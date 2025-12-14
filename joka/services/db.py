@@ -3,7 +3,7 @@ from typing import List
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, AsyncConnection
 
-from models.migration_model import MigrationModel
+from joka.models.migration_model import MigrationModel
 
 
 # exception: no migration table

@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from dataclasses import dataclass
 
 # subcommands
-from services import db
-import subcommands
+from joka.services import db
+from joka import subcommands
 
+# the application state object
 @dataclass
 class AppState:
     env_path: str = ""
@@ -23,11 +24,9 @@ class AppState:
 app = typer.Typer()
 state = AppState()
 
-
 ###
 ### commands
 ###
-
 
 @app.command()
 def init():
@@ -44,7 +43,6 @@ def status():
 ###
 ### callbacks
 ###
-
 
 @app.callback()
 def main(

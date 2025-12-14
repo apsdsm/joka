@@ -1,12 +1,12 @@
+# libs
 from typing import List
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from models.migration_file import MigrationFile
-from models.migration_model import MigrationModel
-from entities.migration import Migration
+# entities
+from joka.entities.migration import Migration
 
-import services.db as db
-import services.fs as fs
+# services
+from joka.services import db, fs
 
 
 # exception: migration chain broken
