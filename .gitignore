@@ -7,6 +7,9 @@ wheels/
 *.egg-info/
 *.dist-info/
 
+# little stupid macOS files
+.DS_Store
+
 # Virtual environments
 .venv
 bin

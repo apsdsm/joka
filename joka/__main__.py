@@ -7,6 +7,8 @@ import typer
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncEngine
 from dataclasses import dataclass
+from rich import print as rprint
+
 
 # subcommands
 from joka.services import db
@@ -15,7 +17,7 @@ from joka import subcommands
 # the application state object
 @dataclass
 class AppState:
-    env_path: str = ""
+    env_path: str = ".env"
     db_engine: AsyncEngine | None = None
     migrations_dir: str = ""
     automode: bool = False
@@ -56,11 +58,28 @@ def main(
     state.env_path = env
     state.migrations_dir = migrations
 
-    # set up env
+    # if a env file is specified but it doesn't exits, stop proccesing
+    if not state.env_path == ".env" and not os.path.isfile(state.env_path):
+        rprint(f"[red]Unable to find specified .env file: {state.env_path}[/red]")
+        raise typer.Exit(code=1)
+
+    # try load env vars
     load_dotenv(state.env_path)
 
-    # set up db engine
-    state.db_engine = db.make_engine(os.getenv("DATABASE_URL"))
+    # ensure we have the db url
+    db_url = os.getenv("DATABASE_URL")
+
+    if not db_url:
+        rprint("[red]DATABASE_URL not found in environment variables.[/red]")
+        raise typer.Exit(code=1)
+
+    # try create the db engine
+    try:
+        state.db_engine = db.make_engine(db_url)
+
+    except Exception as e:
+        rprint(f"[red]Error creating database engine: {e}[/red]")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

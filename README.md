@@ -1,13 +1,16 @@
 # Joka
 
-Lightweight Typer-based CLI for running sequential SQL migrations against a MySQL/MariaDB database using asyncio + SQLAlchemy.
+Joka is a small tool for managing migrations in MySQL. It's very early release so may change, and is built to suit my specific requirements, so I don't expect it will support much more than it does.
 
-## Prerequisites
-- Python 3.13+
-- A reachable database URL that works with `asyncmy`, e.g. `mysql+asyncmy://user:pass@host:3306/dbname`
-- A migrations folder (defaults to `devops/db/migrations`)
+```
+DATABASE_URL=mysql+asyncmy://root:root@localhost:3306/penpal
+```
+
 
 ## Setup
+Install the command using 
+
+
 - Clone the repo and install dependencies:
   - With uv: `uv sync`
   - With pip: `python -m venv .venv && source .venv/bin/activate && pip install -e .`
