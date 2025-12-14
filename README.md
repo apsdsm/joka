@@ -2,43 +2,50 @@
 
 Joka is a small tool for managing migrations in MySQL. It's very early release so may change, and is built to suit my specific requirements, so I don't expect it will support much more than it does.
 
-```
-DATABASE_URL=mysql+asyncmy://root:root@localhost:3306/penpal
-```
+<p align="center">
+  <img src="joka.jpg" alt="joka" width="400">
+</p>
 
+## Install
+
+Not much going now, but I suggest using the releases and pipx. Current latest release:
+
+```
+pipx install https://github.com/apsdsm/joka/releases/download/v0.1.1/joka-0.1.1-py3-none-any.whl
+```
 
 ## Setup
-Install the command using 
 
+### Database Path
 
-- Clone the repo and install dependencies:
-  - With uv: `uv sync`
-  - With pip: `python -m venv .venv && source .venv/bin/activate && pip install -e .`
-- Create an `.env` file with at least:
-  ```
-  DATABASE_URL=mysql+asyncmy://user:pass@host:3306/dbname
-  ```
-- Create your migrations directory if it does not exist (default `devops/db/migrations`).
+Either add a .env file in the directory you run from, or ensure that a DATABASE_URL environment variable is available at run time. You can specify an .env file to load using the `--env` parameter.
 
-## Writing migrations
-- File naming pattern: `YYMMDDHHMMSS_description.sql` (example: `20250101010101_create_users.sql`).
-- Each file contains raw SQL; statements are applied in filename order.
-- A `migrations` table is created in your database to track what has been applied.
+The DATABASE_URL param should have the whole connection string, as in:
 
-## CLI usage
-All commands share global options:
-- `--env`: Path to the env file (default `.env`).
-- `--migrations`: Path to migrations directory (default `devops/db/migrations`).
-- `--auto`: Automatically confirm prompts (intended to bypass confirmations).
+```
+DATABASE_URL=mysql+asyncmy://name:pass@localhost:3306/my_db
+```
 
-Common commands (run from repo root):
-- Initialize tracking table:  
-  `python joka.py --env .env --migrations devops/db/migrations init`
-- Show migration chain/status:  
-  `python joka.py --env .env --migrations devops/db/migrations status`
-- Apply pending migrations (prompts before applying):  
-  `python joka.py --env .env --migrations devops/db/migrations up`
+### Migration Files
 
-## Notes / TODO
-- The filesystem helpers for parsing migration file contents are still stubs.
-- The CLI currently assumes MySQL/MariaDB semantics (uses `information_schema` and `AUTO_INCREMENT`).
+Put your migrations into a single folder, and make sure they all have the naming pattern `YYMMDDHHMMSS_description.sql`, as in: `2512251524_add_jinglebells.sql`. Each file should contain a complete SQL statement. The file contents will be executed according to the order defined by that first date/time part of the string.
+
+### Initialize Joka
+
+You need to initialize Joka at least once to make the migrations table. Run `joka init` and it will try to make a table called `migrations` in your db.
+
+## Commands
+
+Run `joka --help` for more info.
+
+### Up
+
+Will show you the current status of the db, and if given permission will apply any pending migrations. Will update the migrations table to keep track of what was applied.
+
+### Status
+
+Will show you the current status of the db, but not try apply anything.
+
+### Init
+
+Will create a migrations table in the database.
