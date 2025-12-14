@@ -1,0 +1,2 @@
+#!/bin/bash
+uv run python joka/__main__.py --migrations ../penpal/devops/db/migrations --env ../penpal/.env.test up

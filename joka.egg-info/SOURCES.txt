@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+joka/__init__.py
+joka/__main__.py
+joka.egg-info/PKG-INFO
+joka.egg-info/SOURCES.txt
+joka.egg-info/dependency_links.txt
+joka.egg-info/entry_points.txt
+joka.egg-info/requires.txt
+joka.egg-info/top_level.txt

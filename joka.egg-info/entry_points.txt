@@ -1,0 +1,2 @@
+[console_scripts]
+joka = joka.__main__:main
