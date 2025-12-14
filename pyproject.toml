@@ -1,6 +1,6 @@
 [project]
 name = "joka"
-version = "0.1.0"
+version = "0.1.1"
 description = "Joka - MySQL Migration Tool"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-joka = "joka.__main__:main"
+joka = "joka.__main__:app"
 
 [build-system]
 requires = ["setuptools>=65.5.1", "wheel"]

@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import os
 import typer
@@ -48,9 +47,24 @@ def status():
 
 @app.callback()
 def main(
-    env: str = typer.Option(".env", help="Path to the environment file (default is .env)"),
-    migrations: str = typer.Option("devops/db/migrations", help="Path to the migrations directory (default is devops/migrate/migrations)"),
-    auto: bool = typer.Option(False, help="Automatically confirm prompts (use with caution)"),
+    env: str = typer.Option(
+        ".env", 
+        "--env", 
+        "-e",
+        help="Path to the environment file (default is .env)"
+        ),
+    migrations: str = typer.Option(
+        "devops/db/migrations", 
+        "--migrations", 
+        "-m",
+        help="Path to the migrations directory (default is devops/migrate/migrations)"
+        ),
+    auto: bool = typer.Option(
+        False, 
+        "--auto",
+        "-a",
+        help="Automatically confirm prompts (use with caution)"
+        ),
 ):
     
     # set up state
