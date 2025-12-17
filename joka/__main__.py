@@ -41,6 +41,10 @@ def up():
 def status():
     asyncio.run(subcommands.status.run(engine=state.db_engine, migrations_dir=state.migrations_dir))
 
+@app.command()
+def make(migration_name: str):
+    asyncio.run(subcommands.make.run(migrations_dir=state.migrations_dir, migration_name=migration_name))
+
 ###
 ### callbacks
 ###

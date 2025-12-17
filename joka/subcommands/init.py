@@ -15,7 +15,7 @@ async def run(engine: AsyncEngine) -> None:
 
     async with engine.connect() as conn:
         try:
-            # let the user what we're going to do
+            # let the user know what we're going to do
             rprint("[green]Initializing migrations system...[/green]")
 
             # try initializing the migrations table

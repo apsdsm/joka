@@ -1,3 +1,3 @@
-from . import up, init, status
+from . import up, init, status, make
 
-__all__ = ["up", "init", "status"]
+__all__ = ["up", "init", "status", "make"]
