@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 
-from joka.services import fs
+from joka.infra import fs
 
 async def run(migrations_dir: str, migration_name: str) -> None:
     """

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from rich import print as rprint
 
 # exceptions
-from joka.services.db import NoMigrationTableError
+from joka.infra.db import NoMigrationTableError
 
 # services
 import joka.services.migrations as migrations
@@ -15,7 +15,7 @@ async def run(engine: AsyncEngine, migrations_dir: str) -> None:
 
     async with engine.connect() as conn:
         try:
-            # let the user what we're going to do
+            # let the user know what we're going to do
             rprint("[green]Checking migration chain...[/green]")
 
             # get the files waiting to be applied

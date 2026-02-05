@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from joka.entities.migration import Migration
 
 # services
-from joka.services import db, fs
+from joka.infra import db
+from joka.infra import fs
 
 
 # exception: migration chain broken

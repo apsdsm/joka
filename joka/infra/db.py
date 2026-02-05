@@ -3,7 +3,7 @@ from typing import List
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, AsyncConnection
 
-from joka.models.migration_model import MigrationModel
+from joka.models.migration import Migration
 
 
 # exception: no migration table
@@ -16,13 +16,10 @@ class MigrationAlreadyExistsError(Exception):
     """Raised when attempting to create a migrations table that already exists."""
     pass
 
-
-
 # exception: error creating migration table
 class MigrationTableCreationError(Exception):
     """Raised when there is an error creating the migrations table."""
     pass
-
 
 
 
@@ -91,7 +88,7 @@ async def create_migrations_table(engine: AsyncEngine) -> None:
 
 
 
-async def get_applied_migrations(con: AsyncConnection) -> List[MigrationModel]:
+async def get_applied_migrations(con: AsyncConnection) -> List[Migration]:
     """
     Retrieve the set of applied migrations from the database.
     If the migrations table does not exist, raise NoMigrationTableError.
@@ -110,7 +107,7 @@ async def get_applied_migrations(con: AsyncConnection) -> List[MigrationModel]:
 
     res = await con.execute(sql)
     rows = res.fetchall()
-    migrations = [MigrationModel(**row._mapping) for row in rows]
+    migrations = [Migration(**row._mapping) for row in rows]
     
     return migrations
 

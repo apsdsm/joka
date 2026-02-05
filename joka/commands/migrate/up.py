@@ -3,11 +3,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from rich import print as rprint
 
 # errors
-from joka.services.db import NoMigrationTableError
+from joka.infra.db import NoMigrationTableError
 
 # services
 import joka.services.migrations as migrations
-import joka.services.cli as cli
+import joka.infra.cli as cli
 
 async def run(engine: AsyncEngine, migrations_dir: str) -> None:
     """

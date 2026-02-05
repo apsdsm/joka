@@ -13,3 +13,6 @@ wheels/
 # Virtual environments
 .venv
 bin
+
+# other
+do-not-commit

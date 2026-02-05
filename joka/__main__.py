@@ -10,8 +10,8 @@ from rich import print as rprint
 
 
 # subcommands
-from joka.services import db
-from joka import subcommands
+from joka.infra import db
+from joka import commands
 
 # the application state object
 @dataclass
@@ -20,30 +20,57 @@ class AppState:
     db_engine: AsyncEngine | None = None
     migrations_dir: str = ""
     automode: bool = False
+    state_dir: str = ""
 
 # the main app
 app = typer.Typer()
+sub_app_migrate = typer.Typer()
+sub_app_make = typer.Typer()
+sub_app_data = typer.Typer()
+
+app.add_typer(sub_app_migrate, name="migrate", help="Database migration commands")
+app.add_typer(sub_app_data, name="data", help="Application data state commands")
+app.add_typer(sub_app_make, name="make", help="Create new migration files")
+
 state = AppState()
 
 ###
-### commands
+### init commands
 ###
 
 @app.command()
 def init():
-    asyncio.run(subcommands.init.run(engine=state.db_engine))
-    
-@app.command()
+    asyncio.run(commands.init.run(engine=state.db_engine))
+
+### 
+### migrate commands
+###
+
+@sub_app_migrate.command()
 def up():
-    asyncio.run(subcommands.up.run(engine=state.db_engine, migrations_dir=state.migrations_dir))
+    asyncio.run(commands.migrate.up.run(engine=state.db_engine, migrations_dir=state.migrations_dir))
 
-@app.command()
+@sub_app_migrate.command()
 def status():
-    asyncio.run(subcommands.status.run(engine=state.db_engine, migrations_dir=state.migrations_dir))
+    asyncio.run(commands.migrate.status.run(engine=state.db_engine, migrations_dir=state.migrations_dir))
 
-@app.command()
+###
+### make commands
+###
+
+@sub_app_make.command()
 def make(migration_name: str):
-    asyncio.run(subcommands.make.run(migrations_dir=state.migrations_dir, migration_name=migration_name))
+    asyncio.run(commands.make.run(migrations_dir=state.migrations_dir, migration_name=migration_name))
+
+
+###
+### data commands
+###
+
+@sub_app_data.command()
+def sync():
+    asyncio.run(commands.data.sync.run(engine=state.db_engine, state_dir=state.state_dir))
+
 
 ###
 ### callbacks
@@ -58,10 +85,10 @@ def main(
         help="Path to the environment file (default is .env)"
         ),
     migrations: str = typer.Option(
-        "devops/db/migrations", 
+        "devops/migrations", 
         "--migrations", 
         "-m",
-        help="Path to the migrations directory (default is devops/migrate/migrations)"
+        help="Path to the migrations directory (default is devops/migrations)"
         ),
     auto: bool = typer.Option(
         False, 
@@ -69,12 +96,19 @@ def main(
         "-a",
         help="Automatically confirm prompts (use with caution)"
         ),
-):
+    states: str = typer.Option(
+        "devops/states",
+        "--states",
+        "-s",
+        help="Path to the state directory (default is devops/state)"
+        ),
+    ):
     
     # set up state
     state.automode = auto
     state.env_path = env
     state.migrations_dir = migrations
+    state.state_dir = states
 
     # if a env file is specified but it doesn't exits, stop proccesing
     if not state.env_path == ".env" and not os.path.isfile(state.env_path):
