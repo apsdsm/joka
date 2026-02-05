@@ -1,23 +1,67 @@
-
 from sqlalchemy.ext.asyncio import AsyncEngine
-
 from rich import print as rprint
 
-# services
-import joka.services.state as state_service
+import joka.services.templates as templates_service
+from joka.infra import db, cli
+from joka.files.models import StrategyType
 
-async def run(engine: AsyncEngine, state_dir: str) -> None:
+
+async def run(engine: AsyncEngine, templates_dir: str, auto_confirm: bool = False) -> None:
     """
-    Sync the data state.
+    Sync template data to the database.
     """
+    # Load templates configuration
+    tables = templates_service.get_tables(templates_dir)
 
-    rprint("[green]Sync command not yet implemented.[/green]")
+    if not tables:
+        rprint("[yellow]No tables configured for sync.[/yellow]")
+        return
 
-    tables = state_service.get_state(state_dir)
-
-    # print them out on new lines for now
+    # Show what will be synced
+    rprint("\n[bold]Tables to sync:[/bold]")
     for table in tables:
-        rprint(f"|- Table: {table.name}, {table.path} ({len(table.records)} records)")
+        row_count = sum(len(templates_service.load_record(r)) for r in table.records)
+        rprint(f"  [cyan]{table.name}[/cyan] ({table.strategy.value}): {row_count} rows from {len(table.records)} files")
 
-        for record in table.records:
-            rprint(f"|  |-  Record: {record.type} - {record.name} - {record.path}")
+    rprint("")
+
+    # Confirm
+    if not auto_confirm:
+        if not cli.confirm("Proceed with sync? (only 'yes' will confirm): "):
+            rprint("[yellow]Sync cancelled.[/yellow]")
+            return
+
+    # Sync each table
+    async with engine.connect() as con:
+        for table in tables:
+            if table.strategy == StrategyType.truncate:
+                await sync_truncate(con, table)
+            else:
+                rprint(f"[yellow]Strategy '{table.strategy.value}' not yet implemented for {table.name}, skipping.[/yellow]")
+
+        await con.commit()
+
+    rprint("\n[green]Sync complete.[/green]")
+
+
+async def sync_truncate(con, table) -> None:
+    """
+    Sync a table using the truncate strategy:
+    1. Truncate the table (delete all rows)
+    2. Insert all rows from the template files
+    """
+    rprint(f"[cyan]Syncing {table.name}...[/cyan]")
+
+    # Load all data for this table
+    rows = templates_service.load_table_data(table)
+
+    # Truncate
+    await db.truncate_table(con, table.name)
+    rprint(f"  Truncated {table.name}")
+
+    # Insert
+    if rows:
+        count = await db.insert_rows(con, table.name, rows)
+        rprint(f"  Inserted {count} rows")
+    else:
+        rprint(f"  No rows to insert")

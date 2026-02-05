@@ -20,6 +20,13 @@ dependencies = [
 [project.scripts]
 joka = "joka.__main__:app"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "testcontainers[mysql]>=4.0.0",
+]
+
 [build-system]
 requires = ["setuptools>=65.5.1", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -27,3 +34,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["joka*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

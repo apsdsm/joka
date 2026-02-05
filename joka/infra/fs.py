@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 from datetime import datetime
 
-from joka.models.migration_file import MigrationFile
+from joka.files.models import MigrationFile
 
 MIGRATION_PATTERN = re.compile(r"^(\d{12})_.*\.sql$")  # yymmddhhmmss_*.sql
 

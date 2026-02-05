@@ -20,7 +20,7 @@ class AppState:
     db_engine: AsyncEngine | None = None
     migrations_dir: str = ""
     automode: bool = False
-    state_dir: str = ""
+    templates_dir: str = ""
 
 # the main app
 app = typer.Typer()
@@ -69,7 +69,11 @@ def make(migration_name: str):
 
 @sub_app_data.command()
 def sync():
-    asyncio.run(commands.data.sync.run(engine=state.db_engine, state_dir=state.state_dir))
+    asyncio.run(commands.data.sync.run(
+        engine=state.db_engine,
+        templates_dir=state.templates_dir,
+        auto_confirm=state.automode
+    ))
 
 
 ###
@@ -96,11 +100,11 @@ def main(
         "-a",
         help="Automatically confirm prompts (use with caution)"
         ),
-    states: str = typer.Option(
-        "devops/states",
-        "--states",
-        "-s",
-        help="Path to the state directory (default is devops/state)"
+    templates: str = typer.Option(
+        "devops/templates",
+        "--templates",
+        "-t",
+        help="Path to the templates directory (default is devops/templates)"
         ),
     ):
     
@@ -108,7 +112,7 @@ def main(
     state.automode = auto
     state.env_path = env
     state.migrations_dir = migrations
-    state.state_dir = states
+    state.templates_dir = templates
 
     # if a env file is specified but it doesn't exits, stop proccesing
     if not state.env_path == ".env" and not os.path.isfile(state.env_path):

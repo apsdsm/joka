@@ -1,9 +1,9 @@
 import os
-from typing import List
+from typing import List, Dict, Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, AsyncConnection
 
-from joka.models.migration import Migration
+from joka.db.models import MigrationRow
 
 
 # exception: no migration table
@@ -88,7 +88,7 @@ async def create_migrations_table(engine: AsyncEngine) -> None:
 
 
 
-async def get_applied_migrations(con: AsyncConnection) -> List[Migration]:
+async def get_applied_migrations(con: AsyncConnection) -> List[MigrationRow]:
     """
     Retrieve the set of applied migrations from the database.
     If the migrations table does not exist, raise NoMigrationTableError.
@@ -107,7 +107,7 @@ async def get_applied_migrations(con: AsyncConnection) -> List[Migration]:
 
     res = await con.execute(sql)
     rows = res.fetchall()
-    migrations = [Migration(**row._mapping) for row in rows]
+    migrations = [MigrationRow(**row._mapping) for row in rows]
     
     return migrations
 
@@ -141,3 +141,59 @@ async def record_migration_applied(con: AsyncConnection, migration_index: str) -
 
     # if any errors occur, they will raise exceptions
     await con.execute(sql, {"migration_index": migration_index})
+
+
+class TableNotFoundError(Exception):
+    """Raised when attempting to operate on a table that does not exist."""
+    pass
+
+
+async def table_exists(con: AsyncConnection, table_name: str) -> bool:
+    """Check if a table exists in the database."""
+    sql = text(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_name = :table_name
+        """
+    )
+    res = await con.execute(sql, {"table_name": table_name})
+    return res.scalar() == 1
+
+
+async def truncate_table(con: AsyncConnection, table_name: str) -> None:
+    """
+    Truncate a table, removing all rows.
+    Raises TableNotFoundError if the table does not exist.
+    """
+    if not await table_exists(con, table_name):
+        raise TableNotFoundError(f"Table does not exist: {table_name}")
+
+    # Use backticks to quote the table name for MySQL
+    sql = text(f"TRUNCATE TABLE `{table_name}`")
+    await con.execute(sql)
+
+
+async def insert_rows(con: AsyncConnection, table_name: str, rows: List[Dict[str, Any]]) -> int:
+    """
+    Insert rows into a table. Each row is a dict mapping column names to values.
+    Returns the number of rows inserted.
+    Raises TableNotFoundError if the table does not exist.
+    """
+    if not rows:
+        return 0
+
+    if not await table_exists(con, table_name):
+        raise TableNotFoundError(f"Table does not exist: {table_name}")
+
+    # Get column names from the first row
+    columns = list(rows[0].keys())
+    col_names = ", ".join(f"`{c}`" for c in columns)
+    placeholders = ", ".join(f":{c}" for c in columns)
+
+    sql = text(f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})")
+
+    for row in rows:
+        await con.execute(sql, row)
+
+    return len(rows)
