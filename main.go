@@ -7,7 +7,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
-	"github.com/nickfiggins/joka/cmd"
+	"github.com/nickfiggins/joka/cmd/migration"
+	"github.com/nickfiggins/joka/cmd/template"
 	"github.com/spf13/cobra"
 )
 
@@ -66,7 +67,7 @@ func main() {
 		Use:   "init",
 		Short: "Initialize the migrations table",
 		RunE: func(c *cobra.Command, _ []string) error {
-			return cmd.RunInitCommand{DB: dbConn}.Execute(c.Context())
+			return migration.RunInitCommand{DB: dbConn}.Execute(c.Context())
 		},
 	}
 
@@ -75,7 +76,7 @@ func main() {
 		Short: "Create a new migration file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			return cmd.RunMakeCommand{
+			return migration.RunMakeCommand{
 				MigrationsDir: migrationsDir,
 				Name:          args[0],
 			}.Execute(c.Context())
@@ -91,7 +92,7 @@ func main() {
 		Use:   "up",
 		Short: "Apply pending migrations",
 		RunE: func(c *cobra.Command, _ []string) error {
-			return cmd.RunMigrateUpCommand{
+			return migration.RunMigrateUpCommand{
 				DB:            dbConn,
 				MigrationsDir: migrationsDir,
 				AutoConfirm:   autoConfirm,
@@ -103,7 +104,7 @@ func main() {
 		Use:   "status",
 		Short: "Show migration status",
 		RunE: func(c *cobra.Command, _ []string) error {
-			return cmd.RunMigrateStatusCommand{
+			return migration.RunMigrateStatusCommand{
 				DB:            dbConn,
 				MigrationsDir: migrationsDir,
 			}.Execute(c.Context())
@@ -119,7 +120,7 @@ func main() {
 		Use:   "sync",
 		Short: "Sync template data to the database",
 		RunE: func(c *cobra.Command, _ []string) error {
-			return cmd.RunDataSyncCommand{
+			return template.RunDataSyncCommand{
 				DB:           dbConn,
 				TemplatesDir: templatesDir,
 				AutoConfirm:  autoConfirm,

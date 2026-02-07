@@ -1,4 +1,4 @@
-package cmd
+package migration
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/fatih/color"
+	"github.com/nickfiggins/joka/cmd/shared"
 	"github.com/nickfiggins/joka/internal/domains/migration/app"
 	"github.com/nickfiggins/joka/internal/domains/migration/domain"
 	"github.com/nickfiggins/joka/internal/domains/migration/infra"
@@ -54,7 +55,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 	}
 
 	if !r.AutoConfirm {
-		if !confirm(fmt.Sprintf("%d pending migrations found. Apply now? (only 'yes' will apply): ", len(pending))) {
+		if !shared.Confirm(fmt.Sprintf("%d pending migrations found. Apply now? (only 'yes' will apply): ", len(pending))) {
 			fmt.Println("Migration aborted by user.")
 			return nil
 		}

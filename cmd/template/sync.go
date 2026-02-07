@@ -1,4 +1,4 @@
-package cmd
+package template
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/fatih/color"
+	"github.com/nickfiggins/joka/cmd/shared"
 	"github.com/nickfiggins/joka/internal/domains/template/app"
 	"github.com/nickfiggins/joka/internal/domains/template/domain"
 	"github.com/nickfiggins/joka/internal/domains/template/infra"
@@ -43,7 +44,7 @@ func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 	fmt.Println()
 
 	if !r.AutoConfirm {
-		if !confirm("Proceed with sync? (only 'yes' will confirm): ") {
+		if !shared.Confirm("Proceed with sync? (only 'yes' will confirm): ") {
 			color.Yellow("Sync cancelled.")
 			return nil
 		}
