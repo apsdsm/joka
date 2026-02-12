@@ -1,6 +1,6 @@
 # Joka
 
-Joka is a small tool for managing migrations in MySQL. It's very early release so may change, and is built to suit my specific requirements, so I don't expect it will support much more than it does.
+Joka is a MySQL migration and data management tool. It tracks and applies SQL migrations, captures schema snapshots, and syncs seed data from files to database tables.
 
 <p align="center">
   <img src="joka.jpg" alt="joka" width="400">
@@ -8,44 +8,102 @@ Joka is a small tool for managing migrations in MySQL. It's very early release s
 
 ## Install
 
-Not much going now, but I suggest using the releases and pipx. Current latest release:
+Build from source (requires Go 1.25+):
 
-```
-pipx install https://github.com/apsdsm/joka/releases/download/v0.1.1/joka-0.1.1-py3-none-any.whl
+```bash
+go install github.com/apsdsm/joka@latest
 ```
 
 ## Setup
 
-### Database Path
+### Database URL
 
-Either add a .env file in the directory you run from, or ensure that a DATABASE_URL environment variable is available at run time. You can specify an .env file to load using the `--env` parameter.
-
-The DATABASE_URL param should have the whole connection string, as in:
+Joka needs a MySQL connection string. Either add a `.env` file in the directory you run from, or set `DATABASE_URL` as an environment variable. You can point to a specific env file with `--env`.
 
 ```
-DATABASE_URL=mysql+asyncmy://name:pass@localhost:3306/my_db
+DATABASE_URL=user:pass@tcp(localhost:3306)/my_db
 ```
 
 ### Migration Files
 
-Put your migrations into a single folder, and make sure they all have the naming pattern `YYMMDDHHMMSS_description.sql`, as in: `2512251524_add_jinglebells.sql`. Each file should contain a complete SQL statement. The file contents will be executed according to the order defined by that first date/time part of the string.
+Put your migrations in a single directory (defaults to `devops/migrations/`). Files must follow the naming pattern `YYMMDDHHMMSS_description.sql`:
 
-### Initialize Joka
+```
+devops/migrations/
+├── 250115093000_create_users.sql
+├── 250116140000_add_email_index.sql
+└── 250201100000_create_orders.sql
+```
 
-You need to initialize Joka at least once to make the migrations table. Run `joka init` and it will try to make a table called `migrations` in your db.
+Files are applied in order of their timestamp prefix. Each file can contain multiple SQL statements.
+
+### Template Files
+
+Seed/reference data lives in the templates directory (defaults to `devops/templates/`):
+
+```
+devops/templates/
+├── _config.yaml
+├── email_templates/
+│   ├── welcome.yaml
+│   └── reminder.yaml
+└── settings/
+    └── defaults.csv
+```
+
+YAML files represent single rows, CSV files represent multiple rows. See `_config.yaml` for table configuration and sync strategies.
 
 ## Commands
 
-Run `joka --help` for more info.
+### `joka init`
 
-### Up
+Creates the `joka_migrations` tracking table. Run this once before your first migration.
 
-Will show you the current status of the db, and if given permission will apply any pending migrations. Will update the migrations table to keep track of what was applied.
+### `joka make <name>`
 
-### Status
+Creates a new timestamped migration file in the migrations directory.
 
-Will show you the current status of the db, but not try apply anything.
+```bash
+joka make create_users_table
+# Creates: devops/migrations/250615143022_create_users_table.sql
+```
 
-### Init
+### `joka migrate up`
 
-Will create a migrations table in the database.
+Shows current migration status, then applies any pending migrations (with confirmation). All pending migrations run in a single transaction — if one fails, they all roll back. An advisory lock prevents concurrent runs.
+
+### `joka migrate status`
+
+Shows the status of every migration (applied or pending) without applying anything.
+
+### `joka migrate snapshot [migration_index]`
+
+Displays the schema snapshot captured after a migration was applied. Shows `CREATE TABLE` statements for all user tables. Omit the index to see the latest snapshot.
+
+### `joka data sync`
+
+Syncs template/seed data from files to database tables based on `_config.yaml`. Currently supports the `truncate` strategy (delete all rows, then insert from files). Runs in a transaction with advisory locking.
+
+### `joka unlock`
+
+Force-releases an advisory lock left behind by a crashed process. Shows who held the lock before releasing it.
+
+## Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--env` | `-e` | `.env` | Path to the environment file |
+| `--migrations` | `-m` | `devops/migrations` | Path to the migrations directory |
+| `--templates` | `-t` | `devops/templates` | Path to the templates directory |
+| `--auto` | `-a` | `false` | Skip confirmation prompts |
+
+## How It Works
+
+Joka uses three internal tables (all prefixed with `joka_`):
+
+- **`joka_migrations`** — Tracks which migrations have been applied and when.
+- **`joka_lock`** — Advisory lock table (at most one row). Prevents concurrent `migrate up` or `data sync` runs.
+- **`joka_snapshots`** — Stores a full schema snapshot (JSON of all `CREATE TABLE` statements) after each migration is applied.
+
+The lock and snapshot tables are created automatically on first use. Only `joka_migrations` requires `joka init`.
+
