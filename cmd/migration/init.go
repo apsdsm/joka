@@ -6,9 +6,9 @@ import (
 	"errors"
 
 	"github.com/fatih/color"
-	"github.com/nickfiggins/joka/internal/domains/migration/app"
-	"github.com/nickfiggins/joka/internal/domains/migration/domain"
-	"github.com/nickfiggins/joka/internal/domains/migration/infra"
+	"github.com/apsdsm/joka/internal/domains/migration/app"
+	"github.com/apsdsm/joka/internal/domains/migration/domain"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
 )
 
 // RunInitCommand handles the "init" command to create the migrations table.

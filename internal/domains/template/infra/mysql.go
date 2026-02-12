@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nickfiggins/joka/db"
-	"github.com/nickfiggins/joka/internal/domains/template/domain"
+	"github.com/apsdsm/joka/db"
+	"github.com/apsdsm/joka/internal/domains/template/domain"
 )
 
 type DBTX interface {

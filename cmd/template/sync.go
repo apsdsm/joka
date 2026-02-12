@@ -6,19 +6,31 @@ import (
 	"fmt"
 
 	"github.com/fatih/color"
-	"github.com/nickfiggins/joka/cmd/shared"
-	"github.com/nickfiggins/joka/internal/domains/template/app"
-	"github.com/nickfiggins/joka/internal/domains/template/domain"
-	"github.com/nickfiggins/joka/internal/domains/template/infra"
+	"github.com/apsdsm/joka/cmd/shared"
+	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
+	"github.com/apsdsm/joka/internal/domains/template/app"
+	"github.com/apsdsm/joka/internal/domains/template/domain"
+	"github.com/apsdsm/joka/internal/domains/template/infra"
 )
 
+// RunDataSyncCommand handles the "data sync" command. It reads table configs
+// and data files from the templates directory, then syncs them to the database.
 type RunDataSyncCommand struct {
 	DB           *sql.DB
 	TemplatesDir string
 	AutoConfirm  bool
 }
 
+// Execute acquires an advisory lock, syncs all configured tables inside a
+// transaction, and releases the lock when done.
 func (r RunDataSyncCommand) Execute(ctx context.Context) error {
+	// Acquire advisory lock to prevent concurrent sync/migration runs.
+	lockAdapter := lockinfra.NewMySQLLockAdapter(r.DB)
+	if err := lockAdapter.Acquire(ctx, "data sync"); err != nil {
+		return err
+	}
+	defer lockAdapter.Release(ctx)
+
 	tables, err := infra.GetTables(r.TemplatesDir)
 	if err != nil {
 		color.Red("Error: %v", err)

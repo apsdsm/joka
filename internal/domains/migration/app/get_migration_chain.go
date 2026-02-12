@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nickfiggins/joka/internal/domains/migration/domain"
-	"github.com/nickfiggins/joka/internal/domains/migration/infra"
+	"github.com/apsdsm/joka/internal/domains/migration/domain"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
 )
 
 // GetMigrationChainAction encapsulates the dependencies needed to build the

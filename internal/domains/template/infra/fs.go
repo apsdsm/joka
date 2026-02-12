@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/nickfiggins/joka/internal/domains/template/domain"
-	"github.com/nickfiggins/joka/internal/domains/template/infra/models"
+	"github.com/apsdsm/joka/internal/domains/template/domain"
+	"github.com/apsdsm/joka/internal/domains/template/infra/models"
 	"gopkg.in/yaml.v3"
 )
 

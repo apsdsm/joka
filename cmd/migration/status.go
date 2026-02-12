@@ -7,9 +7,9 @@ import (
 	"fmt"
 
 	"github.com/fatih/color"
-	"github.com/nickfiggins/joka/internal/domains/migration/app"
-	"github.com/nickfiggins/joka/internal/domains/migration/domain"
-	"github.com/nickfiggins/joka/internal/domains/migration/infra"
+	"github.com/apsdsm/joka/internal/domains/migration/app"
+	"github.com/apsdsm/joka/internal/domains/migration/domain"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
 )
 
 type RunMigrateStatusCommand struct {

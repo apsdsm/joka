@@ -7,8 +7,10 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
-	"github.com/nickfiggins/joka/cmd/migration"
-	"github.com/nickfiggins/joka/cmd/template"
+	"github.com/apsdsm/joka/cmd/lock"
+	"github.com/apsdsm/joka/cmd/migration"
+	"github.com/apsdsm/joka/cmd/template"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/spf13/cobra"
 )
 
@@ -40,12 +42,8 @@ func main() {
 			}
 
 			var err error
-			dbConn, err = sql.Open("mysql", dsn)
+			dbConn, err = jokadb.Open(dsn)
 			if err != nil {
-				return fmt.Errorf("error creating database connection: %w", err)
-			}
-
-			if err := dbConn.Ping(); err != nil {
 				return fmt.Errorf("error connecting to database: %w", err)
 			}
 
@@ -128,9 +126,33 @@ func main() {
 		},
 	}
 
-	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd)
+	unlockCmd := &cobra.Command{
+		Use:   "unlock",
+		Short: "Force-release a held lock",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return lock.RunUnlockCommand{DB: dbConn}.Execute(c.Context())
+		},
+	}
+
+	migrateSnapshotCmd := &cobra.Command{
+		Use:   "snapshot [migration_index]",
+		Short: "View schema snapshot for a migration",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			var index string
+			if len(args) > 0 {
+				index = args[0]
+			}
+			return migration.RunSnapshotCommand{
+				DB:             dbConn,
+				MigrationIndex: index,
+			}.Execute(c.Context())
+		},
+	}
+
+	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd)
 	dataCmd.AddCommand(dataSyncCmd)
-	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd)
+	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, unlockCmd)
 
 	if err := root.Execute(); err != nil {
 		color.Red("%v", err)

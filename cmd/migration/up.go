@@ -7,19 +7,31 @@ import (
 	"fmt"
 
 	"github.com/fatih/color"
-	"github.com/nickfiggins/joka/cmd/shared"
-	"github.com/nickfiggins/joka/internal/domains/migration/app"
-	"github.com/nickfiggins/joka/internal/domains/migration/domain"
-	"github.com/nickfiggins/joka/internal/domains/migration/infra"
+	"github.com/apsdsm/joka/cmd/shared"
+	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
+	"github.com/apsdsm/joka/internal/domains/migration/app"
+	"github.com/apsdsm/joka/internal/domains/migration/domain"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
 )
 
+// RunMigrateUpCommand handles the "migrate up" command. It builds the migration
+// chain, identifies pending migrations, and applies them inside a transaction.
 type RunMigrateUpCommand struct {
 	DB            *sql.DB
 	MigrationsDir string
 	AutoConfirm   bool
 }
 
+// Execute acquires an advisory lock, applies all pending migrations in a
+// single transaction, and releases the lock when done (including on error).
 func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
+	// Acquire advisory lock to prevent concurrent migration runs.
+	lockAdapter := lockinfra.NewMySQLLockAdapter(r.DB)
+	if err := lockAdapter.Acquire(ctx, "migrate up"); err != nil {
+		return err
+	}
+	defer lockAdapter.Release(ctx)
+
 	color.Green("Checking migration chain...")
 
 	adapter := infra.NewMySQLDBAdapter(r.DB)

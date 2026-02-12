@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/nickfiggins/joka/internal/domains/migration/infra/models"
+	"github.com/apsdsm/joka/internal/domains/migration/infra/models"
 )
 
 // migrationPattern matches filenames of the form YYMMDDHHMMSS_name.sql.
@@ -66,7 +66,7 @@ func CreateMigrationFile(dir string, name string) (string, error) {
 		return "", fmt.Errorf("migrations directory not found: %s", dir)
 	}
 
-	timestamp := time.Now().Format("20060102150405")
+	timestamp := time.Now().Format("060102150405")
 	filename := fmt.Sprintf("%s_%s.sql", timestamp, name)
 	filePath := filepath.Join(dir, filename)
 

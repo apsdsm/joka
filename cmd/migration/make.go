@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/fatih/color"
-	"github.com/nickfiggins/joka/internal/domains/migration/infra"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
 )
 
 // RunMakeCommand handles the "make" command to create a new migration file.

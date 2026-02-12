@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 
-	"github.com/nickfiggins/joka/internal/domains/template/domain"
-	"github.com/nickfiggins/joka/internal/domains/template/infra"
+	"github.com/apsdsm/joka/internal/domains/template/domain"
+	"github.com/apsdsm/joka/internal/domains/template/infra"
 )
 
 type LoadTableDataAction struct {

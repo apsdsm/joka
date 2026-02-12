@@ -1,6 +1,6 @@
 package models
 
-import "github.com/nickfiggins/joka/internal/domains/template/domain"
+import "github.com/apsdsm/joka/internal/domains/template/domain"
 
 type TableConfig struct {
 	Name     string              `yaml:"name"`

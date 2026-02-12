@@ -5,13 +5,31 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 )
 
+// EnsureMultiStatements parses a MySQL DSN, enables multiStatements, and
+// returns the updated DSN string. Without this flag, go-sql-driver silently
+// ignores everything after the first semicolon in a query — which means
+// migration files with multiple statements would only partially execute.
+func EnsureMultiStatements(dsn string) (string, error) {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", fmt.Errorf("parsing DSN: %w", err)
+	}
+	cfg.MultiStatements = true
+	return cfg.FormatDSN(), nil
+}
+
 // Open creates and verifies a database connection from a MySQL DSN string.
-// It pings the database to ensure connectivity before returning. The caller
-// is responsible for closing the returned *sql.DB.
+// It enables multiStatements and pings the database to ensure connectivity
+// before returning. The caller is responsible for closing the returned *sql.DB.
 func Open(dsn string) (*sql.DB, error) {
+	dsn, err := EnsureMultiStatements(dsn)
+	if err != nil {
+		return nil, err
+	}
+
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err

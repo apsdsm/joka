@@ -1,4 +1,4 @@
-module github.com/nickfiggins/joka
+module github.com/apsdsm/joka
 
 go 1.25.1
 
