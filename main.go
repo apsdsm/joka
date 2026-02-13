@@ -10,6 +10,8 @@ import (
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/template"
+	"github.com/apsdsm/joka/config"
+	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/spf13/cobra"
 )
@@ -22,12 +24,26 @@ func main() {
 		templatesDir  string
 		autoConfirm   bool
 		dbConn        *sql.DB
+		cfg           *config.Config
 	)
 
 	root := &cobra.Command{
 		Use:   "joka",
 		Short: "MySQL migration management tool",
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
+			var err error
+			cfg, err = config.Load()
+			if err != nil {
+				return err
+			}
+
+			if !c.Flags().Changed("migrations") && cfg.Migrations != "" {
+				migrationsDir = cfg.Migrations
+			}
+			if !c.Flags().Changed("templates") && cfg.Templates != "" {
+				templatesDir = cfg.Templates
+			}
+
 			if c.Name() == "make" {
 				return loadEnv(envFile)
 			}
@@ -41,7 +57,6 @@ func main() {
 				return fmt.Errorf("DATABASE_URL not found in environment variables")
 			}
 
-			var err error
 			dbConn, err = jokadb.Open(dsn)
 			if err != nil {
 				return fmt.Errorf("error connecting to database: %w", err)
@@ -118,9 +133,17 @@ func main() {
 		Use:   "sync",
 		Short: "Sync template data to the database",
 		RunE: func(c *cobra.Command, _ []string) error {
+			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
+			for i, t := range cfg.Tables {
+				tables[i] = templateinfra.TableConfig{
+					Name:     t.Name,
+					Strategy: t.Strategy,
+				}
+			}
 			return template.RunDataSyncCommand{
 				DB:           dbConn,
 				TemplatesDir: templatesDir,
+				Tables:       tables,
 				AutoConfirm:  autoConfirm,
 			}.Execute(c.Context())
 		},

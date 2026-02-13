@@ -59,16 +59,6 @@ func TestLoadRecord_CSVMultipleRows(t *testing.T) {
 func TestGetTables_ConfigParsing(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create config
-	configYAML := `name: test_data
-tables:
-  - name: emails
-    strategy: truncate
-  - name: settings
-    strategy: truncate
-`
-	os.WriteFile(filepath.Join(dir, "_config.yaml"), []byte(configYAML), 0644)
-
 	// Create table directories with files
 	emailsDir := filepath.Join(dir, "emails")
 	os.Mkdir(emailsDir, 0755)
@@ -78,7 +68,12 @@ tables:
 	os.Mkdir(settingsDir, 0755)
 	os.WriteFile(filepath.Join(settingsDir, "defaults.csv"), []byte("key,value\na,b\n"), 0644)
 
-	tables, err := GetTables(dir)
+	tableConfigs := []TableConfig{
+		{Name: "emails", Strategy: domain.StrategyTruncate},
+		{Name: "settings", Strategy: domain.StrategyTruncate},
+	}
+
+	tables, err := GetTables(dir, tableConfigs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

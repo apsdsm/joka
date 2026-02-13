@@ -24,6 +24,22 @@ Joka needs a MySQL connection string. Either add a `.env` file in the directory 
 DATABASE_URL=user:pass@tcp(localhost:3306)/my_db
 ```
 
+### Configuration File
+
+Create a `.jokarc.yaml` in your project root to configure paths and table sync settings:
+
+```yaml
+migrations: devops/migrations
+templates: devops/templates
+tables:
+  - name: email_templates
+    strategy: truncate
+  - name: settings
+    strategy: truncate
+```
+
+All fields are optional. CLI flags override `.jokarc.yaml` values. If neither is provided, defaults apply (`devops/migrations`, `devops/templates`).
+
 ### Migration Files
 
 Put your migrations in a single directory (defaults to `devops/migrations/`). Files must follow the naming pattern `YYMMDDHHMMSS_description.sql`:
@@ -43,7 +59,6 @@ Seed/reference data lives in the templates directory (defaults to `devops/templa
 
 ```
 devops/templates/
-├── _config.yaml
 ├── email_templates/
 │   ├── welcome.yaml
 │   └── reminder.yaml
@@ -51,7 +66,7 @@ devops/templates/
     └── defaults.csv
 ```
 
-YAML files represent single rows, CSV files represent multiple rows. See `_config.yaml` for table configuration and sync strategies.
+YAML files represent single rows, CSV files represent multiple rows. Tables and their sync strategies are configured in `.jokarc.yaml`.
 
 ## Commands
 
@@ -82,7 +97,7 @@ Displays the schema snapshot captured after a migration was applied. Shows `CREA
 
 ### `joka data sync`
 
-Syncs template/seed data from files to database tables based on `_config.yaml`. Currently supports the `truncate` strategy (delete all rows, then insert from files). Runs in a transaction with advisory locking.
+Syncs template/seed data from files to database tables based on the `tables` config in `.jokarc.yaml`. Currently supports the `truncate` strategy (delete all rows, then insert from files). Runs in a transaction with advisory locking.
 
 ### `joka unlock`
 

@@ -8,33 +8,26 @@ import (
 	"strings"
 
 	"github.com/apsdsm/joka/internal/domains/template/domain"
-	"github.com/apsdsm/joka/internal/domains/template/infra/models"
 	"gopkg.in/yaml.v3"
 )
 
-func GetTables(templatesDir string) ([]domain.Table, error) {
+type TableConfig struct {
+	Name     string
+	Strategy domain.StrategyType
+}
+
+func GetTables(templatesDir string, tableConfigs []TableConfig) ([]domain.Table, error) {
 	info, err := os.Stat(templatesDir)
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("templates directory not found: %s", templatesDir)
 	}
 
-	configPath := filepath.Join(templatesDir, "_config.yaml")
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("templates config file not found: %s", configPath)
-	}
-
-	var config models.TemplatesConfig
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("parsing templates config: %w", err)
-	}
-
 	var tables []domain.Table
-	for _, tc := range config.Tables {
+	for _, tc := range tableConfigs {
 		tablePath := filepath.Join(templatesDir, tc.Name)
 		tableInfo, err := os.Stat(tablePath)
 		if err != nil || !tableInfo.IsDir() {
-			return nil, fmt.Errorf("table directory not found: %s (configured in _config.yaml)", tablePath)
+			return nil, fmt.Errorf("table directory not found: %s", tablePath)
 		}
 
 		entries, err := os.ReadDir(tablePath)

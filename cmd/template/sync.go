@@ -7,10 +7,10 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/apsdsm/joka/cmd/shared"
+	"github.com/apsdsm/joka/internal/domains/template/infra"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 	"github.com/apsdsm/joka/internal/domains/template/app"
 	"github.com/apsdsm/joka/internal/domains/template/domain"
-	"github.com/apsdsm/joka/internal/domains/template/infra"
 )
 
 // RunDataSyncCommand handles the "data sync" command. It reads table configs
@@ -18,6 +18,7 @@ import (
 type RunDataSyncCommand struct {
 	DB           *sql.DB
 	TemplatesDir string
+	Tables       []infra.TableConfig
 	AutoConfirm  bool
 }
 
@@ -31,7 +32,7 @@ func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 	}
 	defer lockAdapter.Release(ctx)
 
-	tables, err := infra.GetTables(r.TemplatesDir)
+	tables, err := infra.GetTables(r.TemplatesDir, r.Tables)
 	if err != nil {
 		color.Red("Error: %v", err)
 		return err
