@@ -16,7 +16,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// set up the cobra function.
+const version = "0.1.0"
+
 func main() {
 	var (
 		envFile       string
@@ -42,6 +43,10 @@ func main() {
 			}
 			if !c.Flags().Changed("templates") && cfg.Templates != "" {
 				templatesDir = cfg.Templates
+			}
+
+			if c.Name() == "version" {
+				return nil
 			}
 
 			if c.Name() == "make" {
@@ -175,7 +180,15 @@ func main() {
 
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd)
 	dataCmd.AddCommand(dataSyncCmd)
-	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, unlockCmd)
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the version number",
+		Run: func(c *cobra.Command, _ []string) {
+			fmt.Println("joka", version)
+		},
+	}
+
+	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		color.Red("%v", err)
