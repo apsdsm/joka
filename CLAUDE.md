@@ -40,7 +40,7 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 ### Top-level structure
 
 - **`main.go`** — CLI entry point using Cobra. Wires up commands, flags, and DB connection lifecycle.
-- **`db/`** — Database utilities (`Open`, `TableExists`, `EnsureMultiStatements`).
+- **`db/`** — Database utilities (`Open`, `TableExists`).
 - **`cmd/`** — Command handlers. Each receives dependencies and calls into domain actions.
 - **`internal/domains/`** — Domain logic, organized by bounded context.
 
