@@ -7,6 +7,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
+	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/template"
@@ -23,6 +24,7 @@ func main() {
 		envFile       string
 		migrationsDir string
 		templatesDir  string
+		entitiesDir   string
 		autoConfirm   bool
 		dbConn        *sql.DB
 		cfg           *config.Config
@@ -43,6 +45,9 @@ func main() {
 			}
 			if !c.Flags().Changed("templates") && cfg.Templates != "" {
 				templatesDir = cfg.Templates
+			}
+			if !c.Flags().Changed("entities") && cfg.Entities != "" {
+				entitiesDir = cfg.Entities
 			}
 
 			if c.Name() == "version" {
@@ -79,6 +84,7 @@ func main() {
 	root.PersistentFlags().StringVarP(&envFile, "env", "e", ".env", "Path to the environment file")
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
 	root.PersistentFlags().StringVarP(&templatesDir, "templates", "t", "devops/templates", "Path to the templates directory")
+	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
 
 	initCmd := &cobra.Command{
@@ -178,8 +184,26 @@ func main() {
 		},
 	}
 
+	entityCmd := &cobra.Command{
+		Use:   "entity",
+		Short: "Entity graph management commands",
+	}
+
+	entitySyncCmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Sync entity YAML files to the database",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return entity.RunEntitySyncCommand{
+				DB:          dbConn,
+				EntitiesDir: entitiesDir,
+				AutoConfirm: autoConfirm,
+			}.Execute(c.Context())
+		},
+	}
+
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd)
 	dataCmd.AddCommand(dataSyncCmd)
+	entityCmd.AddCommand(entitySyncCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
@@ -188,7 +212,7 @@ func main() {
 		},
 	}
 
-	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, entityCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		color.Red("%v", err)

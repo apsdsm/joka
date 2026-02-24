@@ -16,6 +16,7 @@ type TableConfig struct {
 type Config struct {
 	Migrations string        `yaml:"migrations"`
 	Templates  string        `yaml:"templates"`
+	Entities   string        `yaml:"entities"`
 	Tables     []TableConfig `yaml:"tables"`
 }
 
