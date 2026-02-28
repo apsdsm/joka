@@ -49,6 +49,7 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 - **`migration/`** — Migration lifecycle: create files, track applied migrations, apply pending ones, capture schema snapshots.
 - **`lock/`** — DB-backed advisory locking via `joka_lock` table. Prevents concurrent mutating operations.
 - **`template/`** — Syncs seed/reference data from YAML/CSV files to database tables.
+- **`entity/`** — Syncs entity graphs (parent-child seed data) from YAML files with reference resolution.
 
 ### Layer pattern (within each domain)
 
@@ -66,8 +67,8 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
   - MySQL: `user:pass@tcp(host:port)/dbname`
   - PostgreSQL: `postgresql://user:pass@host:port/dbname?sslmode=disable`
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
-- **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--auto` for auto-confirm.
-- **Advisory locking**: `migrate up` and `data sync` acquire a DB lock before running. Use `joka unlock` if a process crashes without releasing.
+- **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm.
+- **Advisory locking**: `migrate up`, `data sync`, and `entity sync` acquire a DB lock before running. Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
 
@@ -98,7 +99,16 @@ CREATE TABLE joka_snapshots (
 )
 ```
 
-`joka_lock` and `joka_snapshots` are auto-created on first use. Only `joka_migrations` requires `joka init`.
+```sql
+-- Entity sync tracking
+CREATE TABLE joka_entities (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    entity_file VARCHAR(512) NOT NULL UNIQUE,
+    synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+`joka_lock`, `joka_snapshots`, and `joka_entities` are auto-created on first use. Only `joka_migrations` requires `joka init`.
 
 ## Templates
 
@@ -129,3 +139,47 @@ tables:
 - `truncate` - Delete all rows, then insert from files (implemented)
 - `update` - Upsert/merge with existing data (not yet implemented)
 - `delete` - (not yet implemented)
+
+## Entities
+
+The `joka entity sync` command syncs entity graphs from YAML files to database tables. Unlike templates, entities support parent-child relationships and cross-row references.
+
+**Directory structure** (`devops/entities/` by default):
+```
+devops/entities/
+├── admin_user.yaml
+└── test_data.yaml
+```
+
+**Entity YAML format**:
+```yaml
+entities:
+  - _is: users
+    _id: admin
+    _pk: id              # optional, defaults to "id"
+    name: Admin
+    email: admin@example.com
+    password_hash: "{{ argon2id|admin123 }}"
+    _has:
+      - _is: profiles
+        user_id: "{{ admin.id }}"
+        bio: "System administrator"
+```
+
+**Reserved keys** (underscore-prefixed, not inserted as columns):
+- `_is` (required) — Target table name
+- `_id` (optional) — Reference handle for this entity's auto-generated PK
+- `_pk` (optional) — Primary key column name, defaults to `"id"`. Used by PostgreSQL adapter for `RETURNING` clause; MySQL ignores it (uses `LastInsertId`)
+- `_has` (optional) — List of child entities, inserted after the parent
+
+**Template expressions** (resolved at insert time):
+- `{{ now }}` — Current UTC timestamp (`2006-01-02 15:04:05`)
+- `{{ <ref>.id }}` — Auto-generated PK of a previously inserted entity (looked up by `_id` handle)
+- `{{ argon2id|<plaintext> }}` — Argon2id hash of the given plaintext
+
+**Insertion behavior**:
+- Entities are inserted depth-first: parent first, then children in order
+- Each entity's auto-generated PK is stored in a reference map under its `_id` handle
+- Children can reference any previously inserted entity via `{{ handle.id }}`
+- All inserts within a file run in a single transaction
+- Files are tracked in `joka_entities`; already-synced files are skipped on re-run
