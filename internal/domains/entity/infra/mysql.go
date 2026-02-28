@@ -6,39 +6,41 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/apsdsm/joka/db"
+	jokadb "github.com/apsdsm/joka/db"
 )
 
 // DBTX is satisfied by both *sql.DB and *sql.Tx, allowing the adapter to
 // operate inside or outside a transaction.
 type DBTX interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // MySQLDBAdapter implements entity app.DBAdapter for MySQL. Tracking-table
 // operations use the raw *sql.DB connection (DDL can't run in a transaction),
 // while InsertRow uses the DBTX interface (typically a *sql.Tx).
 type MySQLDBAdapter struct {
-	db   DBTX
-	conn *sql.DB
+	db     DBTX
+	conn   *sql.DB
+	driver jokadb.Driver
 }
 
 // NewMySQLDBAdapter creates an adapter that runs all queries on the raw
 // connection (outside a transaction).
 func NewMySQLDBAdapter(conn *sql.DB) *MySQLDBAdapter {
-	return &MySQLDBAdapter{db: conn, conn: conn}
+	return &MySQLDBAdapter{db: conn, conn: conn, driver: jokadb.MySQL}
 }
 
 // NewMySQLTxDBAdapter creates an adapter that runs InsertRow inside the
 // given transaction, while tracking-table DDL uses the raw connection.
 func NewMySQLTxDBAdapter(tx *sql.Tx, conn *sql.DB) *MySQLDBAdapter {
-	return &MySQLDBAdapter{db: tx, conn: conn}
+	return &MySQLDBAdapter{db: tx, conn: conn, driver: jokadb.MySQL}
 }
 
 // EnsureTrackingTable creates the joka_entities table if it does not already
 // exist. The table tracks which entity files have been synced.
 func (m *MySQLDBAdapter) EnsureTrackingTable(ctx context.Context) error {
-	exists, err := db.TableExists(ctx, m.conn, "joka_entities")
+	exists, err := jokadb.TableExists(ctx, m.conn, m.driver, "joka_entities")
 	if err != nil {
 		return err
 	}
@@ -92,8 +94,9 @@ func (m *MySQLDBAdapter) RecordEntitySynced(ctx context.Context, filePath string
 }
 
 // InsertRow inserts a single row into the given table using the DBTX interface
-// (transaction or raw connection). Returns the last insert id.
-func (m *MySQLDBAdapter) InsertRow(ctx context.Context, table string, columns map[string]any) (int64, error) {
+// (transaction or raw connection). Returns the last insert id. The pkColumn
+// parameter is accepted for interface compatibility but MySQL uses LastInsertId.
+func (m *MySQLDBAdapter) InsertRow(ctx context.Context, table string, columns map[string]any, pkColumn string) (int64, error) {
 	colNames := make([]string, 0, len(columns))
 	placeholders := make([]string, 0, len(columns))
 	args := make([]any, 0, len(columns))

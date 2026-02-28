@@ -7,17 +7,18 @@ import (
 	"fmt"
 
 	"github.com/fatih/color"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
-	"github.com/apsdsm/joka/internal/domains/migration/infra"
 )
 
 // RunMigrateUpCommand handles the "migrate up" command. It builds the migration
 // chain, identifies pending migrations, and applies them inside a transaction.
 type RunMigrateUpCommand struct {
 	DB            *sql.DB
+	Driver        jokadb.Driver
 	MigrationsDir string
 	AutoConfirm   bool
 }
@@ -26,7 +27,7 @@ type RunMigrateUpCommand struct {
 // single transaction, and releases the lock when done (including on error).
 func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 	// Acquire advisory lock to prevent concurrent migration runs.
-	lockAdapter := lockinfra.NewMySQLLockAdapter(r.DB)
+	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
 	if err := lockAdapter.Acquire(ctx, "migrate up"); err != nil {
 		return err
 	}
@@ -34,7 +35,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 
 	color.Green("Checking migration chain...")
 
-	adapter := infra.NewMySQLDBAdapter(r.DB)
+	adapter := newMigrationAdapter(r.Driver, r.DB)
 	chain, err := app.GetMigrationChainAction{
 		DB:            adapter,
 		MigrationsDir: r.MigrationsDir,
@@ -78,7 +79,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	txAdapter := infra.NewMySQLTxDBAdapter(tx, r.DB)
+	txAdapter := newMigrationTxAdapter(r.Driver, tx, r.DB)
 
 	for _, m := range pending {
 		fmt.Printf("Applying migration %s...\n", m.MigrationIndex)

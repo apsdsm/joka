@@ -27,12 +27,13 @@ func main() {
 		entitiesDir   string
 		autoConfirm   bool
 		dbConn        *sql.DB
+		dbDriver      jokadb.Driver
 		cfg           *config.Config
 	)
 
 	root := &cobra.Command{
 		Use:   "joka",
-		Short: "MySQL migration management tool",
+		Short: "Database migration management tool",
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
 			var err error
 			cfg, err = config.Load()
@@ -67,7 +68,7 @@ func main() {
 				return fmt.Errorf("DATABASE_URL not found in environment variables")
 			}
 
-			dbConn, err = jokadb.Open(dsn)
+			dbConn, dbDriver, err = jokadb.Open(dsn)
 			if err != nil {
 				return fmt.Errorf("error connecting to database: %w", err)
 			}
@@ -91,7 +92,7 @@ func main() {
 		Use:   "init",
 		Short: "Initialize the migrations table",
 		RunE: func(c *cobra.Command, _ []string) error {
-			return migration.RunInitCommand{DB: dbConn}.Execute(c.Context())
+			return migration.RunInitCommand{DB: dbConn, Driver: dbDriver}.Execute(c.Context())
 		},
 	}
 
@@ -118,6 +119,7 @@ func main() {
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateUpCommand{
 				DB:            dbConn,
+				Driver:        dbDriver,
 				MigrationsDir: migrationsDir,
 				AutoConfirm:   autoConfirm,
 			}.Execute(c.Context())
@@ -130,6 +132,7 @@ func main() {
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateStatusCommand{
 				DB:            dbConn,
+				Driver:        dbDriver,
 				MigrationsDir: migrationsDir,
 			}.Execute(c.Context())
 		},
@@ -153,6 +156,7 @@ func main() {
 			}
 			return template.RunDataSyncCommand{
 				DB:           dbConn,
+				Driver:       dbDriver,
 				TemplatesDir: templatesDir,
 				Tables:       tables,
 				AutoConfirm:  autoConfirm,
@@ -164,7 +168,7 @@ func main() {
 		Use:   "unlock",
 		Short: "Force-release a held lock",
 		RunE: func(c *cobra.Command, _ []string) error {
-			return lock.RunUnlockCommand{DB: dbConn}.Execute(c.Context())
+			return lock.RunUnlockCommand{DB: dbConn, Driver: dbDriver}.Execute(c.Context())
 		},
 	}
 
@@ -179,6 +183,7 @@ func main() {
 			}
 			return migration.RunSnapshotCommand{
 				DB:             dbConn,
+				Driver:         dbDriver,
 				MigrationIndex: index,
 			}.Execute(c.Context())
 		},
@@ -195,6 +200,7 @@ func main() {
 		RunE: func(c *cobra.Command, _ []string) error {
 			return entity.RunEntitySyncCommand{
 				DB:          dbConn,
+				Driver:      dbDriver,
 				EntitiesDir: entitiesDir,
 				AutoConfirm: autoConfirm,
 			}.Execute(c.Context())

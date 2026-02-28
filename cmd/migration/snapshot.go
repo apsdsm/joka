@@ -8,7 +8,7 @@ import (
 	"sort"
 
 	"github.com/fatih/color"
-	"github.com/apsdsm/joka/internal/domains/migration/infra"
+	jokadb "github.com/apsdsm/joka/db"
 )
 
 // RunSnapshotCommand handles "migrate snapshot [migration_index]". It retrieves
@@ -16,13 +16,14 @@ import (
 // it shows the most recent snapshot.
 type RunSnapshotCommand struct {
 	DB             *sql.DB
+	Driver         jokadb.Driver
 	MigrationIndex string // empty = latest
 }
 
 // Execute loads the snapshot from joka_snapshots and prints each table's
 // CREATE TABLE statement, sorted alphabetically by table name.
 func (r RunSnapshotCommand) Execute(ctx context.Context) error {
-	adapter := infra.NewMySQLDBAdapter(r.DB)
+	adapter := newMigrationAdapter(r.Driver, r.DB)
 
 	// Resolve which snapshot to show — explicit index or fall back to latest.
 	index := r.MigrationIndex

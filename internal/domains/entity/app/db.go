@@ -20,6 +20,7 @@ type DBAdapter interface {
 	RecordEntitySynced(ctx context.Context, filePath string) error
 
 	// InsertRow inserts a single row into the given table and returns the
-	// last insert id (auto-increment value).
-	InsertRow(ctx context.Context, table string, columns map[string]any) (int64, error)
+	// auto-generated primary key value. pkColumn identifies the primary key
+	// column (e.g. "id") so the adapter can retrieve it portably.
+	InsertRow(ctx context.Context, table string, columns map[string]any, pkColumn string) (int64, error)
 }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Joka is a MySQL migration and data management tool written in Go. It tracks and applies SQL migrations using a `joka_migrations` table, captures schema snapshots after each migration, and syncs seed data from files to database tables.
+Joka is a database migration and data management tool written in Go. It supports **MySQL** and **PostgreSQL**. It tracks and applies SQL migrations using a `joka_migrations` table, captures schema snapshots after each migration, and syncs seed data from files to database tables.
 
 Module path: `github.com/apsdsm/joka`
 
@@ -53,15 +53,18 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 ### Layer pattern (within each domain)
 
 - **`domain/`** — Pure types, constants, and error sentinels. No infrastructure dependencies.
-- **`app/`** — Use-case actions and interfaces (e.g. `DBAdapter`). Depends on domain types, not on MySQL.
-- **`infra/`** — MySQL and filesystem implementations. Implements the interfaces defined in `app/`.
+- **`app/`** — Use-case actions and interfaces (e.g. `DBAdapter`). Depends on domain types, not on specific databases.
+- **`infra/`** — MySQL, PostgreSQL, and filesystem implementations. Implements the interfaces defined in `app/`. Each database has its own adapter file (`mysql.go`, `postgres.go`).
 - **`infra/models/`** — Flat structs for DB rows and file representations.
 
 ## Key Technical Details
 
-- **Go 1.25+** with `github.com/go-sql-driver/mysql`
-- **Multi-statement SQL**: DSN is configured with `multiStatements=true` so migration files can contain multiple statements separated by semicolons.
-- **Configuration**: Requires `DATABASE_URL` in `.env` file or environment variable (MySQL DSN format: `user:pass@tcp(host:port)/dbname`).
+- **Go 1.25+** with `github.com/go-sql-driver/mysql` and `github.com/lib/pq`
+- **Driver auto-detection**: The database driver is detected from the `DATABASE_URL` format. PostgreSQL DSNs start with `postgres://` or `postgresql://`; everything else is assumed MySQL.
+- **Multi-statement SQL**: MySQL DSN is configured with `multiStatements=true`; PostgreSQL handles multiple statements natively.
+- **Configuration**: Requires `DATABASE_URL` in `.env` file or environment variable.
+  - MySQL: `user:pass@tcp(host:port)/dbname`
+  - PostgreSQL: `postgresql://user:pass@host:port/dbname?sslmode=disable`
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
 - **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--auto` for auto-confirm.
 - **Advisory locking**: `migrate up` and `data sync` acquire a DB lock before running. Use `joka unlock` if a process crashes without releasing.

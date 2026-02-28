@@ -5,21 +5,23 @@ import (
 	"database/sql"
 
 	"github.com/fatih/color"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/lock/app"
-	"github.com/apsdsm/joka/internal/domains/lock/infra"
+	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 )
 
 // RunUnlockCommand handles the "unlock" command, which is an escape hatch to
 // force-release a held lock. This is useful when a process crashes without
 // cleaning up, leaving the lock row behind in joka_lock.
 type RunUnlockCommand struct {
-	DB *sql.DB
+	DB     *sql.DB
+	Driver jokadb.Driver
 }
 
 // Execute checks if a lock is currently held and releases it. If no lock is
 // held, it prints a message and exits cleanly.
 func (r RunUnlockCommand) Execute(ctx context.Context) error {
-	adapter := infra.NewMySQLLockAdapter(r.DB)
+	adapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
 
 	lock, err := adapter.GetLock(ctx)
 	if err != nil {

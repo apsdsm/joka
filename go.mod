@@ -6,6 +6,7 @@ require (
 	github.com/fatih/color v1.18.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/joho/godotenv v1.5.1
+	github.com/lib/pq v1.11.2
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.40.0
 	golang.org/x/crypto v0.43.0

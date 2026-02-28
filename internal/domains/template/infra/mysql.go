@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/apsdsm/joka/db"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/template/domain"
 )
 
@@ -15,20 +15,21 @@ type DBTX interface {
 }
 
 type MySQLDBAdapter struct {
-	db   DBTX
-	conn *sql.DB
+	db     DBTX
+	conn   *sql.DB
+	driver jokadb.Driver
 }
 
 func NewMySQLDBAdapter(conn *sql.DB) *MySQLDBAdapter {
-	return &MySQLDBAdapter{db: conn, conn: conn}
+	return &MySQLDBAdapter{db: conn, conn: conn, driver: jokadb.MySQL}
 }
 
 func NewMySQLTxDBAdapter(tx *sql.Tx, conn *sql.DB) *MySQLDBAdapter {
-	return &MySQLDBAdapter{db: tx, conn: conn}
+	return &MySQLDBAdapter{db: tx, conn: conn, driver: jokadb.MySQL}
 }
 
 func (m *MySQLDBAdapter) TruncateTable(ctx context.Context, tableName string) error {
-	exists, err := db.TableExists(ctx, m.conn, tableName)
+	exists, err := jokadb.TableExists(ctx, m.conn, m.driver, tableName)
 	if err != nil {
 		return err
 	}
@@ -45,7 +46,7 @@ func (m *MySQLDBAdapter) InsertRows(ctx context.Context, tableName string, rows 
 		return 0, nil
 	}
 
-	exists, err := db.TableExists(ctx, m.conn, tableName)
+	exists, err := jokadb.TableExists(ctx, m.conn, m.driver, tableName)
 	if err != nil {
 		return 0, err
 	}

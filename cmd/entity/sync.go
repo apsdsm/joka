@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/fatih/color"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
@@ -14,20 +15,16 @@ import (
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 )
 
-// RunEntitySyncCommand handles the "entity sync" command. It discovers YAML
-// entity files, checks which have already been synced, and inserts new entity
-// graphs inside a transaction.
+// RunEntitySyncCommand handles the "entity sync" command.
 type RunEntitySyncCommand struct {
 	DB          *sql.DB
+	Driver      jokadb.Driver
 	EntitiesDir string
 	AutoConfirm bool
 }
 
-// Execute acquires an advisory lock, discovers entity files, parses them,
-// previews which files will be synced, and inserts new graphs in a transaction.
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
-	// Acquire advisory lock to prevent concurrent sync/migration runs.
-	lockAdapter := lockinfra.NewMySQLLockAdapter(r.DB)
+	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
 
 	if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
 		return err
@@ -35,14 +32,12 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	defer lockAdapter.Release(ctx) //nolint:errcheck
 
-	// Ensure the tracking table exists.
-	dbAdapter := infra.NewMySQLDBAdapter(r.DB)
+	dbAdapter := newEntityAdapter(r.Driver, r.DB)
 
 	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
 		return fmt.Errorf("ensuring tracking table: %w", err)
 	}
 
-	// Discover entity files.
 	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
 	if err != nil {
 		return err
@@ -53,7 +48,6 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	// Parse all files and check which are already synced.
 	var pending []*domain.EntityFile
 
 	for _, rel := range relPaths {
@@ -64,7 +58,6 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			return err
 		}
 
-		// Use the relative path as the tracking key.
 		file.Path = rel
 
 		already, err := dbAdapter.IsEntitySynced(ctx, rel)
@@ -84,7 +77,6 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	// Preview files to sync.
 	fmt.Println()
 	color.Set(color.Bold)
 	fmt.Println("Entity files to sync:")
@@ -103,13 +95,12 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		}
 	}
 
-	// Begin transaction for all inserts.
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	txAdapter := infra.NewMySQLTxDBAdapter(tx, r.DB)
+	txAdapter := newEntityTxAdapter(r.Driver, tx, r.DB)
 
 	synced, err := app.SyncEntitiesAction{
 		DB:    txAdapter,
@@ -133,4 +124,18 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	color.Green("\nEntity sync complete. %d file(s) synced.", len(synced))
 
 	return nil
+}
+
+func newEntityAdapter(driver jokadb.Driver, conn *sql.DB) app.DBAdapter {
+	if driver == jokadb.Postgres {
+		return infra.NewPostgresDBAdapter(conn)
+	}
+	return infra.NewMySQLDBAdapter(conn)
+}
+
+func newEntityTxAdapter(driver jokadb.Driver, tx *sql.Tx, conn *sql.DB) app.DBAdapter {
+	if driver == jokadb.Postgres {
+		return infra.NewPostgresTxDBAdapter(tx, conn)
+	}
+	return infra.NewMySQLTxDBAdapter(tx, conn)
 }

@@ -1,11 +1,16 @@
 package app
 
-import "context"
+import (
+	"context"
 
-// LockAdapter abstracts the lock storage so commands don't depend on MySQL directly.
+	"github.com/apsdsm/joka/internal/domains/lock/domain"
+)
+
+// LockAdapter abstracts the lock storage so commands don't depend on a specific database.
 type LockAdapter interface {
 	Acquire(ctx context.Context, operation string) error
 	Release(ctx context.Context) error
+	GetLock(ctx context.Context) (*domain.Lock, error)
 }
 
 // AcquireLockAction attempts to take the advisory lock before a mutating

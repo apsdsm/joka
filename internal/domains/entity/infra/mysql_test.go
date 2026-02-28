@@ -140,7 +140,7 @@ func TestInsertRow_ReturnsLastInsertId(t *testing.T) {
 	id1, err := adapter.InsertRow(ctx, tableName, map[string]any{
 		"name":  "Alice",
 		"email": "alice@test.com",
-	})
+	}, "id")
 	if err != nil {
 		t.Fatalf("first InsertRow: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestInsertRow_ReturnsLastInsertId(t *testing.T) {
 	id2, err := adapter.InsertRow(ctx, tableName, map[string]any{
 		"name":  "Bob",
 		"email": "bob@test.com",
-	})
+	}, "id")
 	if err != nil {
 		t.Fatalf("second InsertRow: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestInsertRow_InTransaction(t *testing.T) {
 	id, err := adapter.InsertRow(ctx, tableName, map[string]any{
 		"name":  "TxUser",
 		"email": "tx@test.com",
-	})
+	}, "id")
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("InsertRow in tx: %v", err)

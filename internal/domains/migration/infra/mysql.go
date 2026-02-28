@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/apsdsm/joka/db"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
 	"github.com/apsdsm/joka/internal/domains/migration/infra/models"
 )
@@ -25,18 +25,19 @@ type DBTX interface {
 // a raw *sql.DB connection for operations that must run outside a transaction
 // (e.g. DDL statements like CREATE TABLE, or information_schema lookups).
 type MySQLDBAdapter struct {
-	db   DBTX   // query executor — either *sql.DB or *sql.Tx
-	conn *sql.DB // raw connection, always available for DDL and metadata
+	db     DBTX    // query executor — either *sql.DB or *sql.Tx
+	conn   *sql.DB // raw connection, always available for DDL and metadata
+	driver jokadb.Driver
 }
 
 // NewMySQLDBAdapter creates a new MySQLDBAdapter using a direct database connection.
 func NewMySQLDBAdapter(conn *sql.DB) *MySQLDBAdapter {
-	return &MySQLDBAdapter{db: conn, conn: conn}
+	return &MySQLDBAdapter{db: conn, conn: conn, driver: jokadb.MySQL}
 }
 
 // NewMySQLTxDBAdapter creates a new MySQLDBAdapter using a transaction.
 func NewMySQLTxDBAdapter(tx *sql.Tx, conn *sql.DB) *MySQLDBAdapter {
-	return &MySQLDBAdapter{db: tx, conn: conn}
+	return &MySQLDBAdapter{db: tx, conn: conn, driver: jokadb.MySQL}
 }
 
 // GetAppliedMigrations retrieves the list of applied migrations from the database.
@@ -96,7 +97,7 @@ func (m *MySQLDBAdapter) RecordMigrationApplied(ctx context.Context, migrationIn
 
 // HasMigrationsTable checks if the migrations table exists in the database.
 func (m *MySQLDBAdapter) HasMigrationsTable(ctx context.Context) (bool, error) {
-	return db.TableExists(ctx, m.conn, "joka_migrations")
+	return jokadb.TableExists(ctx, m.conn, m.driver, "joka_migrations")
 }
 
 // CreateMigrationsTable creates the migrations table if it does not already exist.
@@ -126,7 +127,7 @@ func (m *MySQLDBAdapter) CreateMigrationsTable(ctx context.Context) error {
 // exist. Called automatically before any snapshot read/write so callers don't
 // need to run a separate init step.
 func (m *MySQLDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
-	exists, err := db.TableExists(ctx, m.conn, "joka_snapshots")
+	exists, err := jokadb.TableExists(ctx, m.conn, m.driver, "joka_snapshots")
 	if err != nil {
 		return err
 	}

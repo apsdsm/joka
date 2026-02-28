@@ -72,10 +72,15 @@ func parseEntity(raw map[string]any) (domain.Entity, error) {
 
 	refID, _ := raw["_id"].(string)
 
+	pkColumn := "id"
+	if pk, ok := raw["_pk"].(string); ok && pk != "" {
+		pkColumn = pk
+	}
+
 	columns := make(map[string]any, len(raw))
 
 	for k, v := range raw {
-		if k == "_is" || k == "_id" || k == "_has" {
+		if k == "_is" || k == "_id" || k == "_has" || k == "_pk" {
 			continue
 		}
 
@@ -108,6 +113,7 @@ func parseEntity(raw map[string]any) (domain.Entity, error) {
 	return domain.Entity{
 		Table:    table,
 		RefID:    refID,
+		PKColumn: pkColumn,
 		Columns:  columns,
 		Children: children,
 	}, nil

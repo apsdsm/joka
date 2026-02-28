@@ -39,7 +39,7 @@ func (a InsertGraphAction) insertEntity(ctx context.Context, entity domain.Entit
 		return fmt.Errorf("resolving %s: %w", entity.Table, err)
 	}
 
-	id, err := a.DB.InsertRow(ctx, entity.Table, columns)
+	id, err := a.DB.InsertRow(ctx, entity.Table, columns, entity.PKColumn)
 	if err != nil {
 		return fmt.Errorf("inserting into %s: %w", entity.Table, err)
 	}

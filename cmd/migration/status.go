@@ -7,22 +7,22 @@ import (
 	"fmt"
 
 	"github.com/fatih/color"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
-	"github.com/apsdsm/joka/internal/domains/migration/infra"
 )
 
 type RunMigrateStatusCommand struct {
 	DB            *sql.DB
+	Driver        jokadb.Driver
 	MigrationsDir string
 }
 
 func (r RunMigrateStatusCommand) Execute(ctx context.Context) error {
 	color.Green("Checking migration chain...")
 
-	// get migration chain
 	chain, err := app.GetMigrationChainAction{
-		DB:            infra.NewMySQLDBAdapter(r.DB),
+		DB:            newMigrationAdapter(r.Driver, r.DB),
 		MigrationsDir: r.MigrationsDir,
 	}.Execute(ctx)
 
@@ -34,13 +34,11 @@ func (r RunMigrateStatusCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	// if no migrations found, return nil
 	if len(chain) == 0 {
 		fmt.Println("No migration files found.")
 		return nil
 	}
 
-	// print all migrations then return nil
 	for _, m := range chain {
 		fmt.Printf("Migration %s - Status: %s\n", m.MigrationIndex, m.Status)
 	}

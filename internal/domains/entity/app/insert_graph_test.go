@@ -44,7 +44,7 @@ func (m *mockDBAdapter) RecordEntitySynced(_ context.Context, filePath string) e
 	return nil
 }
 
-func (m *mockDBAdapter) InsertRow(_ context.Context, table string, columns map[string]any) (int64, error) {
+func (m *mockDBAdapter) InsertRow(_ context.Context, table string, columns map[string]any, _ string) (int64, error) {
 	m.insertedRows = append(m.insertedRows, mockInsertCall{Table: table, Columns: columns})
 	id := m.nextID
 	m.nextID++
@@ -167,7 +167,7 @@ type failingDBAdapter struct {
 	mockDBAdapter
 }
 
-func (f *failingDBAdapter) InsertRow(_ context.Context, _ string, _ map[string]any) (int64, error) {
+func (f *failingDBAdapter) InsertRow(_ context.Context, _ string, _ map[string]any, _ string) (int64, error) {
 	return 0, fmt.Errorf("insert failed")
 }
 

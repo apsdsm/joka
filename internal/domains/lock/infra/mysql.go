@@ -7,7 +7,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/apsdsm/joka/db"
+	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/lock/domain"
 )
 
@@ -15,19 +15,20 @@ import (
 // The table holds at most one row (PRIMARY KEY = 1). An INSERT succeeding means
 // the lock was acquired; a duplicate-key failure means it's held by someone else.
 type MySQLLockAdapter struct {
-	conn *sql.DB
+	conn   *sql.DB
+	driver jokadb.Driver
 }
 
 // NewMySQLLockAdapter creates a lock adapter that operates on the given database connection.
 func NewMySQLLockAdapter(conn *sql.DB) *MySQLLockAdapter {
-	return &MySQLLockAdapter{conn: conn}
+	return &MySQLLockAdapter{conn: conn, driver: jokadb.MySQL}
 }
 
 // EnsureTable creates the joka_lock table if it doesn't already exist.
 // Called automatically by Acquire and Release so callers don't need to
 // run `joka init` first.
 func (m *MySQLLockAdapter) EnsureTable(ctx context.Context) error {
-	exists, err := db.TableExists(ctx, m.conn, "joka_lock")
+	exists, err := jokadb.TableExists(ctx, m.conn, m.driver, "joka_lock")
 	if err != nil {
 		return err
 	}
@@ -86,6 +87,10 @@ func (m *MySQLLockAdapter) Release(ctx context.Context) error {
 
 // GetLock reads the current lock holder. Returns nil if no lock is held.
 func (m *MySQLLockAdapter) GetLock(ctx context.Context) (*domain.Lock, error) {
+	if err := m.EnsureTable(ctx); err != nil {
+		return nil, fmt.Errorf("ensuring lock table: %w", err)
+	}
+
 	var lock domain.Lock
 	err := m.conn.QueryRowContext(ctx,
 		`SELECT id, locked_by, locked_at, operation FROM joka_lock WHERE id = 1`,
