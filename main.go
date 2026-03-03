@@ -143,6 +143,8 @@ func main() {
 		Short: "Application data state commands",
 	}
 
+	var ignoreForeignKeys bool
+
 	dataSyncCmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync template data to the database",
@@ -154,15 +156,25 @@ func main() {
 					Strategy: t.Strategy,
 				}
 			}
+
+			// CLI flag overrides config; config is the default.
+			ignoreFK := cfg.IgnoreForeignKeys
+			if c.Flags().Changed("ignore-foreign-keys") {
+				ignoreFK = ignoreForeignKeys
+			}
+
 			return template.RunDataSyncCommand{
-				DB:           dbConn,
-				Driver:       dbDriver,
-				TemplatesDir: templatesDir,
-				Tables:       tables,
-				AutoConfirm:  autoConfirm,
+				DB:                dbConn,
+				Driver:            dbDriver,
+				TemplatesDir:      templatesDir,
+				Tables:            tables,
+				AutoConfirm:       autoConfirm,
+				IgnoreForeignKeys: ignoreFK,
 			}.Execute(c.Context())
 		},
 	}
+
+	dataSyncCmd.Flags().BoolVar(&ignoreForeignKeys, "ignore-foreign-keys", false, "Disable foreign key checks during truncate (MySQL)")
 
 	unlockCmd := &cobra.Command{
 		Use:   "unlock",

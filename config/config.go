@@ -14,10 +14,11 @@ type TableConfig struct {
 }
 
 type Config struct {
-	Migrations string        `yaml:"migrations"`
-	Templates  string        `yaml:"templates"`
-	Entities   string        `yaml:"entities"`
-	Tables     []TableConfig `yaml:"tables"`
+	Migrations        string        `yaml:"migrations"`
+	Templates         string        `yaml:"templates"`
+	Entities          string        `yaml:"entities"`
+	Tables            []TableConfig `yaml:"tables"`
+	IgnoreForeignKeys bool          `yaml:"ignore_foreign_keys"`
 }
 
 // Load reads .jokarc.yaml from the current working directory. If the file does

@@ -17,11 +17,12 @@ import (
 // RunDataSyncCommand handles the "data sync" command. It reads table configs
 // and data files from the templates directory, then syncs them to the database.
 type RunDataSyncCommand struct {
-	DB           *sql.DB
-	Driver       jokadb.Driver
-	TemplatesDir string
-	Tables       []infra.TableConfig
-	AutoConfirm  bool
+	DB                *sql.DB
+	Driver            jokadb.Driver
+	TemplatesDir      string
+	Tables            []infra.TableConfig
+	AutoConfirm       bool
+	IgnoreForeignKeys bool
 }
 
 // Execute acquires an advisory lock, syncs all configured tables inside a
@@ -72,6 +73,13 @@ func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 
 	txAdapter := newTemplateTxAdapter(r.Driver, tx, r.DB)
 
+	if r.IgnoreForeignKeys {
+		if err := txAdapter.DisableForeignKeys(ctx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("disabling foreign key checks: %w", err)
+		}
+	}
+
 	for _, table := range tables {
 		if table.Strategy == domain.StrategyTruncate {
 			color.Cyan("Syncing %s...", table.Name)
@@ -84,6 +92,13 @@ func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 			fmt.Printf("  Synced %d rows\n", count)
 		} else {
 			color.Yellow("Strategy '%s' not yet implemented for %s, skipping.", table.Strategy, table.Name)
+		}
+	}
+
+	if r.IgnoreForeignKeys {
+		if err := txAdapter.EnableForeignKeys(ctx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("re-enabling foreign key checks: %w", err)
 		}
 	}
 

@@ -41,6 +41,16 @@ func (m *MySQLDBAdapter) TruncateTable(ctx context.Context, tableName string) er
 	return err
 }
 
+func (m *MySQLDBAdapter) DisableForeignKeys(ctx context.Context) error {
+	_, err := m.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=0")
+	return err
+}
+
+func (m *MySQLDBAdapter) EnableForeignKeys(ctx context.Context) error {
+	_, err := m.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=1")
+	return err
+}
+
 func (m *MySQLDBAdapter) InsertRows(ctx context.Context, tableName string, rows []map[string]any) (int, error) {
 	if len(rows) == 0 {
 		return 0, nil

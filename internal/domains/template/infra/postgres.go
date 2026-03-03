@@ -80,3 +80,13 @@ func (p *PostgresDBAdapter) InsertRows(ctx context.Context, tableName string, ro
 
 	return len(rows), nil
 }
+
+// DisableForeignKeys is a no-op for PostgreSQL. Use TRUNCATE ... CASCADE instead.
+func (p *PostgresDBAdapter) DisableForeignKeys(ctx context.Context) error {
+	return nil
+}
+
+// EnableForeignKeys is a no-op for PostgreSQL.
+func (p *PostgresDBAdapter) EnableForeignKeys(ctx context.Context) error {
+	return nil
+}
