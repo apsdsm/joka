@@ -14,6 +14,7 @@ type mockDBAdapter struct {
 	nextID       int64
 	trackingRows []string
 	synced       map[string]bool
+	lookupData   map[string]any // keyed by "table.returnCol.whereCol=whereVal"
 }
 
 // mockInsertCall records the arguments passed to InsertRow.
@@ -24,8 +25,9 @@ type mockInsertCall struct {
 
 func newMockDBAdapter() *mockDBAdapter {
 	return &mockDBAdapter{
-		nextID: 1,
-		synced: make(map[string]bool),
+		nextID:     1,
+		synced:     make(map[string]bool),
+		lookupData: make(map[string]any),
 	}
 }
 
@@ -50,6 +52,17 @@ func (m *mockDBAdapter) InsertRow(_ context.Context, table string, columns map[s
 	m.nextID++
 
 	return id, nil
+}
+
+func (m *mockDBAdapter) LookupValue(_ context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {
+	key := fmt.Sprintf("%s.%s.%s=%v", table, returnCol, whereCol, whereVal)
+
+	val, ok := m.lookupData[key]
+	if !ok {
+		return nil, fmt.Errorf("lookup returned no rows: %s.%s where %s=%v", table, returnCol, whereCol, whereVal)
+	}
+
+	return val, nil
 }
 
 func TestInsertGraphAction_SingleEntity(t *testing.T) {
@@ -169,6 +182,42 @@ type failingDBAdapter struct {
 
 func (f *failingDBAdapter) InsertRow(_ context.Context, _ string, _ map[string]any, _ string) (int64, error) {
 	return 0, fmt.Errorf("insert failed")
+}
+
+func TestInsertGraphAction_WithLookup(t *testing.T) {
+	db := newMockDBAdapter()
+	db.lookupData["industry_types.id.code=RESTAURANT"] = int64(42)
+
+	refMap := make(map[string]int64)
+
+	entities := []domain.Entity{
+		{
+			Table: "benchmarks",
+			Columns: map[string]any{
+				"industry_type_id": "{{ lookup|industry_types,id,code=RESTAURANT }}",
+				"category":         "TEAMWORK",
+				"avg_score":        3.50,
+			},
+		},
+	}
+
+	err := InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(db.insertedRows) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(db.insertedRows))
+	}
+
+	industryID, ok := db.insertedRows[0].Columns["industry_type_id"].(int64)
+	if !ok {
+		t.Fatalf("expected int64 for industry_type_id, got %T", db.insertedRows[0].Columns["industry_type_id"])
+	}
+
+	if industryID != 42 {
+		t.Errorf("expected industry_type_id 42, got %d", industryID)
+	}
 }
 
 func TestInsertGraphAction_InsertError(t *testing.T) {

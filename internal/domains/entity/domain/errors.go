@@ -14,4 +14,8 @@ var (
 	// ErrEntityParseFailed is returned when a YAML entity file cannot be
 	// decoded into the expected structure.
 	ErrEntityParseFailed = errors.New("entity parse failed")
+
+	// ErrLookupNotFound is returned when a {{ lookup|... }} expression
+	// matches zero rows in the target table.
+	ErrLookupNotFound = errors.New("lookup returned no rows")
 )

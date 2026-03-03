@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	jokadb "github.com/apsdsm/joka/db"
+	"github.com/apsdsm/joka/internal/domains/entity/domain"
 )
 
 // PostgresDBAdapter implements entity app.DBAdapter for PostgreSQL.
@@ -102,4 +103,23 @@ func (p *PostgresDBAdapter) InsertRow(ctx context.Context, table string, columns
 	}
 
 	return id, nil
+}
+
+// LookupValue queries a single value from an existing table row. Returns
+// ErrLookupNotFound if no matching row exists.
+func (p *PostgresDBAdapter) LookupValue(ctx context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {
+	query := fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE "%s" = $1 LIMIT 1`, returnCol, table, whereCol)
+
+	var result any
+
+	err := p.db.QueryRowContext(ctx, query, whereVal).Scan(&result)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("%w: %s.%s where %s=%v", domain.ErrLookupNotFound, table, returnCol, whereCol, whereVal)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("lookup %s.%s: %w", table, returnCol, err)
+	}
+
+	return result, nil
 }

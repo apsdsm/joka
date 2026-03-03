@@ -34,7 +34,7 @@ func (a InsertGraphAction) Execute(ctx context.Context) error {
 // insertEntity resolves columns, inserts the row, stores the auto-increment id
 // in RefMap (if _id was provided), and recurses into children.
 func (a InsertGraphAction) insertEntity(ctx context.Context, entity domain.Entity, now string) error {
-	columns, err := resolveColumns(entity.Columns, a.RefMap, now)
+	columns, err := resolveColumns(ctx, entity.Columns, a.RefMap, now, a.DB)
 	if err != nil {
 		return fmt.Errorf("resolving %s: %w", entity.Table, err)
 	}

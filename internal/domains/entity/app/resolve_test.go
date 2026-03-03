@@ -1,15 +1,40 @@
 package app
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 )
 
+// lookupMock implements DBAdapter.LookupValue for resolve tests. Only
+// LookupValue is used; other methods panic if called unexpectedly.
+type lookupMock struct {
+	data map[string]any
+}
+
+func (l *lookupMock) EnsureTrackingTable(context.Context) error                      { panic("unused") }
+func (l *lookupMock) IsEntitySynced(context.Context, string) (bool, error)           { panic("unused") }
+func (l *lookupMock) RecordEntitySynced(context.Context, string) error               { panic("unused") }
+func (l *lookupMock) InsertRow(context.Context, string, map[string]any, string) (int64, error) {
+	panic("unused")
+}
+func (l *lookupMock) LookupValue(_ context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {
+	key := fmt.Sprintf("%s.%s.%s=%v", table, returnCol, whereCol, whereVal)
+
+	val, ok := l.data[key]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s.%s where %s=%v", domain.ErrLookupNotFound, table, returnCol, whereCol, whereVal)
+	}
+
+	return val, nil
+}
+
 func TestResolveValue_PlainString(t *testing.T) {
-	val, err := resolveValue("hello", nil, "")
+	val, err := resolveValue(context.Background(), "hello", nil, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -20,7 +45,7 @@ func TestResolveValue_PlainString(t *testing.T) {
 }
 
 func TestResolveValue_Now(t *testing.T) {
-	val, err := resolveValue("{{ now }}", nil, "2025-01-01 00:00:00")
+	val, err := resolveValue(context.Background(), "{{ now }}", nil, "2025-01-01 00:00:00", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,7 +57,7 @@ func TestResolveValue_Now(t *testing.T) {
 
 func TestResolveValue_NowTrimmed(t *testing.T) {
 	// Test with no spaces around expression.
-	val, err := resolveValue("{{now}}", nil, "2025-01-01 00:00:00")
+	val, err := resolveValue(context.Background(), "{{now}}", nil, "2025-01-01 00:00:00", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,7 +70,7 @@ func TestResolveValue_NowTrimmed(t *testing.T) {
 func TestResolveValue_RefID(t *testing.T) {
 	refMap := map[string]int64{"parent": 42}
 
-	val, err := resolveValue("{{ parent.id }}", refMap, "")
+	val, err := resolveValue(context.Background(), "{{ parent.id }}", refMap, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -63,7 +88,7 @@ func TestResolveValue_RefID(t *testing.T) {
 func TestResolveValue_RefID_Missing(t *testing.T) {
 	refMap := map[string]int64{}
 
-	_, err := resolveValue("{{ missing.id }}", refMap, "")
+	_, err := resolveValue(context.Background(), "{{ missing.id }}", refMap, "", nil)
 	if err == nil {
 		t.Fatal("expected error for missing ref, got nil")
 	}
@@ -74,7 +99,7 @@ func TestResolveValue_RefID_Missing(t *testing.T) {
 }
 
 func TestResolveValue_Argon2id(t *testing.T) {
-	val, err := resolveValue("{{ argon2id|password123 }}", nil, "")
+	val, err := resolveValue(context.Background(), "{{ argon2id|password123 }}", nil, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -90,9 +115,64 @@ func TestResolveValue_Argon2id(t *testing.T) {
 }
 
 func TestResolveValue_UnknownExpression(t *testing.T) {
-	_, err := resolveValue("{{ unknown_func }}", nil, "")
+	_, err := resolveValue(context.Background(), "{{ unknown_func }}", nil, "", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown expression, got nil")
+	}
+
+	if !errors.Is(err, domain.ErrInvalidTemplate) {
+		t.Errorf("expected ErrInvalidTemplate, got: %v", err)
+	}
+}
+
+func TestResolveValue_Lookup(t *testing.T) {
+	db := &lookupMock{data: map[string]any{
+		"industry_types.id.code=RESTAURANT": int64(7),
+	}}
+
+	val, err := resolveValue(context.Background(), "{{ lookup|industry_types,id,code=RESTAURANT }}", nil, "", db)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	id, ok := val.(int64)
+	if !ok {
+		t.Fatalf("expected int64, got %T", val)
+	}
+
+	if id != 7 {
+		t.Errorf("expected 7, got %d", id)
+	}
+}
+
+func TestResolveValue_Lookup_NotFound(t *testing.T) {
+	db := &lookupMock{data: map[string]any{}}
+
+	_, err := resolveValue(context.Background(), "{{ lookup|industry_types,id,code=MISSING }}", nil, "", db)
+	if err == nil {
+		t.Fatal("expected error for missing lookup, got nil")
+	}
+
+	if !errors.Is(err, domain.ErrLookupNotFound) {
+		t.Errorf("expected ErrLookupNotFound, got: %v", err)
+	}
+}
+
+func TestResolveValue_Lookup_BadParams(t *testing.T) {
+	_, err := resolveValue(context.Background(), "{{ lookup|just_table }}", nil, "", nil)
+	if err == nil {
+		t.Fatal("expected error for bad lookup params, got nil")
+	}
+
+	if !errors.Is(err, domain.ErrInvalidTemplate) {
+		t.Errorf("expected ErrInvalidTemplate, got: %v", err)
+	}
+}
+
+func TestResolveValue_Lookup_NoEquals(t *testing.T) {
+	_, err := resolveValue(context.Background(), "{{ lookup|table,col,no_equals }}", nil, "", nil)
+	if err == nil {
+		t.Fatal("expected error for missing =, got nil")
 	}
 
 	if !errors.Is(err, domain.ErrInvalidTemplate) {
@@ -111,7 +191,7 @@ func TestResolveColumns_MixedTypes(t *testing.T) {
 	refMap := map[string]int64{"parent": 10}
 	now := "2025-06-01 12:00:00"
 
-	resolved, err := resolveColumns(columns, refMap, now)
+	resolved, err := resolveColumns(context.Background(), columns, refMap, now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +223,7 @@ func TestResolveColumns_ErrorPropagation(t *testing.T) {
 		"ref": "{{ missing.id }}",
 	}
 
-	_, err := resolveColumns(columns, map[string]int64{}, "")
+	_, err := resolveColumns(context.Background(), columns, map[string]int64{}, "", nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

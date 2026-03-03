@@ -176,6 +176,7 @@ entities:
 - `{{ now }}` — Current UTC timestamp (`2006-01-02 15:04:05`)
 - `{{ <ref>.id }}` — Auto-generated PK of a previously inserted entity (looked up by `_id` handle)
 - `{{ argon2id|<plaintext> }}` — Argon2id hash of the given plaintext
+- `{{ lookup|table,return_col,where_col=value }}` — Query a value from an existing table row (e.g. `{{ lookup|industry_types,id,code=RESTAURANT }}`). Useful for referencing rows seeded outside the entity file (via templates or migrations)
 
 **Insertion behavior**:
 - Entities are inserted depth-first: parent first, then children in order

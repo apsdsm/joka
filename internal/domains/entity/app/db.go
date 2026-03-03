@@ -23,4 +23,9 @@ type DBAdapter interface {
 	// auto-generated primary key value. pkColumn identifies the primary key
 	// column (e.g. "id") so the adapter can retrieve it portably.
 	InsertRow(ctx context.Context, table string, columns map[string]any, pkColumn string) (int64, error)
+
+	// LookupValue queries a single value from an existing table row. Used by
+	// {{ lookup|table,return_col,where_col=value }} template expressions to
+	// resolve foreign keys against data seeded outside the entity file.
+	LookupValue(ctx context.Context, table, returnCol, whereCol string, whereVal any) (any, error)
 }
