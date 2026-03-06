@@ -9,6 +9,7 @@ import (
 
 	"github.com/fatih/color"
 	jokadb "github.com/apsdsm/joka/db"
+	"github.com/apsdsm/joka/cmd/shared"
 )
 
 // RunSnapshotCommand handles "migrate snapshot [migration_index]". It retrieves
@@ -18,11 +19,13 @@ type RunSnapshotCommand struct {
 	DB             *sql.DB
 	Driver         jokadb.Driver
 	MigrationIndex string // empty = latest
+	OutputFormat   string
 }
 
 // Execute loads the snapshot from joka_snapshots and prints each table's
 // CREATE TABLE statement, sorted alphabetically by table name.
 func (r RunSnapshotCommand) Execute(ctx context.Context) error {
+	jsonOut := r.OutputFormat == shared.OutputJSON
 	adapter := newMigrationAdapter(r.Driver, r.DB)
 
 	// Resolve which snapshot to show — explicit index or fall back to latest.
@@ -31,6 +34,9 @@ func (r RunSnapshotCommand) Execute(ctx context.Context) error {
 		var err error
 		index, err = adapter.GetLatestSnapshotIndex(ctx)
 		if err != nil {
+			if jsonOut {
+				return shared.PrintErrorJSON(err)
+			}
 			color.Red("Error: %v", err)
 			return err
 		}
@@ -39,21 +45,35 @@ func (r RunSnapshotCommand) Execute(ctx context.Context) error {
 	// Fetch the raw JSON snapshot from the database.
 	snapshot, err := adapter.GetSchemaSnapshot(ctx, index)
 	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
 		color.Red("Error: %v", err)
 		return err
 	}
 
-	color.Green("Schema snapshot for migration %s:", index)
-	fmt.Println()
-
-	// Parse the JSON map of {table_name: "CREATE TABLE ..."} and print
-	// each entry sorted alphabetically.
+	// Parse the JSON map of {table_name: "CREATE TABLE ..."}.
 	var schema map[string]string
 	if err := json.Unmarshal([]byte(snapshot), &schema); err != nil {
+		if jsonOut {
+			// Return raw snapshot as a string if parsing fails.
+			shared.PrintJSON(map[string]any{"status": "ok", "migration_index": index, "schema_raw": snapshot})
+			return nil
+		}
 		// Fall back to printing raw JSON if parsing fails.
+		color.Green("Schema snapshot for migration %s:", index)
+		fmt.Println()
 		fmt.Println(snapshot)
 		return nil
 	}
+
+	if jsonOut {
+		shared.PrintJSON(map[string]any{"status": "ok", "migration_index": index, "schema": schema})
+		return nil
+	}
+
+	color.Green("Schema snapshot for migration %s:", index)
+	fmt.Println()
 
 	var tables []string
 	for name := range schema {

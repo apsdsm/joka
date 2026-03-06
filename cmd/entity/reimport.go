@@ -16,17 +16,23 @@ import (
 
 // RunEntityReimportCommand handles the "entity reimport" command.
 type RunEntityReimportCommand struct {
-	DB          *sql.DB
-	Driver      jokadb.Driver
-	EntitiesDir string
-	FilePath    string // relative path argument
-	AutoConfirm bool
+	DB           *sql.DB
+	Driver       jokadb.Driver
+	EntitiesDir  string
+	FilePath     string // relative path argument
+	AutoConfirm  bool
+	OutputFormat string
 }
 
 func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
+	jsonOut := r.OutputFormat == shared.OutputJSON
+
 	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
 
 	if err := lockAdapter.Acquire(ctx, "entity reimport"); err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
 		return err
 	}
 	defer lockAdapter.Release(ctx) //nolint:errcheck
@@ -34,56 +40,87 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 	dbAdapter := newEntityAdapter(r.Driver, r.DB)
 
 	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(fmt.Errorf("ensuring tracking table: %w", err))
+		}
 		return fmt.Errorf("ensuring tracking table: %w", err)
 	}
 	if err := dbAdapter.EnsureRowTrackingTable(ctx); err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(fmt.Errorf("ensuring row tracking table: %w", err))
+		}
 		return fmt.Errorf("ensuring row tracking table: %w", err)
 	}
 	if err := dbAdapter.EnsureContentHashColumn(ctx); err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(fmt.Errorf("ensuring content hash column: %w", err))
+		}
 		return fmt.Errorf("ensuring content hash column: %w", err)
 	}
 
 	fullPath := filepath.Join(r.EntitiesDir, r.FilePath)
 
 	if _, err := os.Stat(fullPath); err != nil {
-		return fmt.Errorf("entity file not found: %s", fullPath)
+		err = fmt.Errorf("entity file not found: %s", fullPath)
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
 	}
 
 	synced, err := dbAdapter.IsEntitySynced(ctx, r.FilePath)
 	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
 		return err
 	}
 	if !synced {
-		return fmt.Errorf("entity file %q has never been synced; use 'entity sync' first", r.FilePath)
+		err = fmt.Errorf("entity file %q has never been synced; use 'entity sync' first", r.FilePath)
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
 	}
 
 	tracked, err := dbAdapter.GetTrackedRows(ctx, r.FilePath)
 	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
 		return err
 	}
 
 	contentHash, err := app.HashFileContent(fullPath)
 	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
 		return err
 	}
 
-	fmt.Println()
-	color.Set(color.Bold)
-	fmt.Println("Entity reimport:")
-	color.Unset()
-	color.Cyan("  File: %s", r.FilePath)
-	color.Cyan("  Tracked rows to delete: %d", len(tracked))
-	fmt.Println()
+	if !jsonOut {
+		fmt.Println()
+		color.Set(color.Bold)
+		fmt.Println("Entity reimport:")
+		color.Unset()
+		color.Cyan("  File: %s", r.FilePath)
+		color.Cyan("  Tracked rows to delete: %d", len(tracked))
+		fmt.Println()
 
-	if !r.AutoConfirm {
-		if !shared.Confirm("Proceed with entity reimport? (only 'yes' will confirm): ") {
-			color.Yellow("Entity reimport cancelled.")
-			return nil
+		if !r.AutoConfirm {
+			if !shared.Confirm("Proceed with entity reimport? (only 'yes' will confirm): ") {
+				color.Yellow("Entity reimport cancelled.")
+				return nil
+			}
 		}
 	}
 
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(fmt.Errorf("starting transaction: %w", err))
+		}
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
@@ -97,11 +134,22 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
 		return err
 	}
 
 	if err := tx.Commit(); err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(fmt.Errorf("committing transaction: %w", err))
+		}
 		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	if jsonOut {
+		shared.PrintJSON(map[string]any{"status": "ok", "file": r.FilePath, "rows_deleted": len(tracked)})
+		return nil
 	}
 
 	color.Green("\nEntity reimport complete: %s", r.FilePath)

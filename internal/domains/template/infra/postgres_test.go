@@ -32,53 +32,40 @@ func TestPostgresTruncateTable(t *testing.T) {
 		t.Fatalf("getting test db: %v", err)
 	}
 
-	tableName := "test_pg_tmpl_truncate"
-	createPostgresTestTable(t, db, tableName)
-
-	ctx := context.Background()
-
-	// Insert some rows.
-	_, err = db.ExecContext(ctx, `INSERT INTO "`+tableName+`" (id, name, email) VALUES (1, 'alice', 'alice@test.com'), (2, 'bob', 'bob@test.com')`)
-	if err != nil {
-		t.Fatalf("inserting rows: %v", err)
-	}
-
-	adapter := infra.NewPostgresDBAdapter(db)
-
-	if err := adapter.TruncateTable(ctx, tableName); err != nil {
-		t.Fatalf("TruncateTable: %v", err)
-	}
-
-	// Verify table is empty.
-	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM "`+tableName+`"`).Scan(&count); err != nil {
-		t.Fatalf("counting rows: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected 0 rows after truncate, got %d", count)
-	}
-}
-
-func TestPostgresTruncateTable_NotFound(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-
-	db, err := testlib.GetTestPostgresDB()
-	if err != nil {
-		t.Fatalf("getting test db: %v", err)
-	}
-
 	adapter := infra.NewPostgresDBAdapter(db)
 	ctx := context.Background()
 
-	err = adapter.TruncateTable(ctx, "nonexistent_table_xyz")
-	if err == nil {
-		t.Fatal("expected error for nonexistent table, got nil")
-	}
-	if !errors.Is(err, domain.ErrTableNotFound) {
-		t.Fatalf("expected ErrTableNotFound, got: %v", err)
-	}
+	t.Run("it removes all rows from the table", func(t *testing.T) {
+		tableName := "test_pg_tmpl_truncate"
+		createPostgresTestTable(t, db, tableName)
+
+		_, err = db.ExecContext(ctx, `INSERT INTO "`+tableName+`" (id, name, email) VALUES (1, 'alice', 'alice@test.com'), (2, 'bob', 'bob@test.com')`)
+		if err != nil {
+			t.Fatalf("inserting rows: %v", err)
+		}
+
+		if err := adapter.TruncateTable(ctx, tableName); err != nil {
+			t.Fatalf("TruncateTable: %v", err)
+		}
+
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM "`+tableName+`"`).Scan(&count); err != nil {
+			t.Fatalf("counting rows: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("expected 0 rows after truncate, got %d", count)
+		}
+	})
+
+	t.Run("it returns ErrTableNotFound for a nonexistent table", func(t *testing.T) {
+		err := adapter.TruncateTable(ctx, "nonexistent_table_xyz")
+		if err == nil {
+			t.Fatal("expected error for nonexistent table, got nil")
+		}
+		if !errors.Is(err, domain.ErrTableNotFound) {
+			t.Fatalf("expected ErrTableNotFound, got: %v", err)
+		}
+	})
 }
 
 func TestPostgresInsertRows(t *testing.T) {
@@ -91,57 +78,46 @@ func TestPostgresInsertRows(t *testing.T) {
 		t.Fatalf("getting test db: %v", err)
 	}
 
-	tableName := "test_pg_tmpl_insert"
-	createPostgresTestTable(t, db, tableName)
-
 	adapter := infra.NewPostgresDBAdapter(db)
 	ctx := context.Background()
 
-	rows := []map[string]any{
-		{"id": 1, "name": "alice", "email": "alice@test.com"},
-		{"id": 2, "name": "bob", "email": "bob@test.com"},
-	}
+	t.Run("it inserts multiple rows and verifies data", func(t *testing.T) {
+		tableName := "test_pg_tmpl_insert"
+		createPostgresTestTable(t, db, tableName)
 
-	count, err := adapter.InsertRows(ctx, tableName, rows)
-	if err != nil {
-		t.Fatalf("InsertRows: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 inserted, got %d", count)
-	}
+		rows := []map[string]any{
+			{"id": 1, "name": "alice", "email": "alice@test.com"},
+			{"id": 2, "name": "bob", "email": "bob@test.com"},
+		}
 
-	// Verify data.
-	var name, email string
-	err = db.QueryRowContext(ctx, `SELECT name, email FROM "`+tableName+`" WHERE id = 1`).Scan(&name, &email)
-	if err != nil {
-		t.Fatalf("querying inserted row: %v", err)
-	}
-	if name != "alice" || email != "alice@test.com" {
-		t.Errorf("unexpected row data: name=%q email=%q", name, email)
-	}
-}
+		count, err := adapter.InsertRows(ctx, tableName, rows)
+		if err != nil {
+			t.Fatalf("InsertRows: %v", err)
+		}
+		if count != 2 {
+			t.Fatalf("expected 2 inserted, got %d", count)
+		}
 
-func TestPostgresInsertRows_EmptySlice(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+		var name, email string
+		err = db.QueryRowContext(ctx, `SELECT name, email FROM "`+tableName+`" WHERE id = 1`).Scan(&name, &email)
+		if err != nil {
+			t.Fatalf("querying inserted row: %v", err)
+		}
+		if name != "alice" || email != "alice@test.com" {
+			t.Errorf("unexpected row data: name=%q email=%q", name, email)
+		}
+	})
 
-	db, err := testlib.GetTestPostgresDB()
-	if err != nil {
-		t.Fatalf("getting test db: %v", err)
-	}
+	t.Run("it returns zero for an empty slice", func(t *testing.T) {
+		tableName := "test_pg_tmpl_empty"
+		createPostgresTestTable(t, db, tableName)
 
-	tableName := "test_pg_tmpl_empty"
-	createPostgresTestTable(t, db, tableName)
-
-	adapter := infra.NewPostgresDBAdapter(db)
-	ctx := context.Background()
-
-	count, err := adapter.InsertRows(ctx, tableName, []map[string]any{})
-	if err != nil {
-		t.Fatalf("InsertRows with empty slice: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected 0 inserted, got %d", count)
-	}
+		count, err := adapter.InsertRows(ctx, tableName, []map[string]any{})
+		if err != nil {
+			t.Fatalf("InsertRows with empty slice: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("expected 0 inserted, got %d", count)
+		}
+	})
 }

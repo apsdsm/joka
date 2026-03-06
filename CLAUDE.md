@@ -70,7 +70,8 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
   - MySQL: `user:pass@tcp(host:port)/dbname`
   - PostgreSQL: `postgresql://user:pass@host:port/dbname?sslmode=disable`
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
-- **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm.
+- **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
+- **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
 - **Advisory locking**: `migrate up`, `data sync`, `entity sync`, and `entity reimport` acquire a DB lock before running. Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
