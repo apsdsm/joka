@@ -24,6 +24,9 @@ go run . migrate up
 go run . migrate status
 go run . migrate snapshot
 go run . data sync
+go run . entity sync
+go run . entity status
+go run . entity reimport admin_user.yaml
 go run . unlock
 
 # Run tests
@@ -68,7 +71,7 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
   - PostgreSQL: `postgresql://user:pass@host:port/dbname?sslmode=disable`
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
 - **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm.
-- **Advisory locking**: `migrate up`, `data sync`, and `entity sync` acquire a DB lock before running. Use `joka unlock` if a process crashes without releasing.
+- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, and `entity reimport` acquire a DB lock before running. Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
 
@@ -104,11 +107,23 @@ CREATE TABLE joka_snapshots (
 CREATE TABLE joka_entities (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     entity_file VARCHAR(512) NOT NULL UNIQUE,
+    content_hash VARCHAR(64),
     synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+
+-- Entity row tracking (for reimport support)
+CREATE TABLE joka_entity_rows (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    entity_file VARCHAR(512) NOT NULL,
+    table_name VARCHAR(255) NOT NULL,
+    row_pk BIGINT NOT NULL,
+    pk_column VARCHAR(255) NOT NULL DEFAULT 'id',
+    ref_id VARCHAR(255),
+    insertion_order INT NOT NULL
 )
 ```
 
-`joka_lock`, `joka_snapshots`, and `joka_entities` are auto-created on first use. Only `joka_migrations` requires `joka init`.
+`joka_lock`, `joka_snapshots`, `joka_entities`, and `joka_entity_rows` are auto-created on first use. Only `joka_migrations` requires `joka init`.
 
 ## Templates
 
@@ -184,3 +199,17 @@ entities:
 - Children can reference any previously inserted entity via `{{ handle.id }}`
 - All inserts within a file run in a single transaction
 - Files are tracked in `joka_entities`; already-synced files are skipped on re-run
+- Each inserted row is tracked in `joka_entity_rows` with table, PK, and insertion order
+- Duplicate `_id` handles within a single file are rejected with an error
+
+**Entity status** (`joka entity status`):
+- Compares entity files on disk with the tracking table
+- Reports status per file: `synced` (hash matches), `modified` (hash differs), `new` (not yet synced), `orphaned` (tracked but file deleted)
+- Uses SHA-256 content hashing stored in `joka_entities.content_hash`
+
+**Entity reimport** (`joka entity reimport <file>`):
+- Deletes previously inserted rows in reverse insertion order (children first, then parents)
+- Re-inserts the entity graph from the YAML file
+- Aborts on FK constraint violations from external references
+- Updates the content hash and row tracking after successful reimport
+- Requires prior sync; use `entity sync` first for new files

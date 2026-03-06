@@ -38,6 +38,14 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("ensuring tracking table: %w", err)
 	}
 
+	if err := dbAdapter.EnsureRowTrackingTable(ctx); err != nil {
+		return fmt.Errorf("ensuring row tracking table: %w", err)
+	}
+
+	if err := dbAdapter.EnsureContentHashColumn(ctx); err != nil {
+		return fmt.Errorf("ensuring content hash column: %w", err)
+	}
+
 	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
 	if err != nil {
 		return err
@@ -53,13 +61,6 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	for _, rel := range relPaths {
 		fullPath := filepath.Join(r.EntitiesDir, rel)
 
-		file, err := app.ParseEntityAction{Path: fullPath}.Execute()
-		if err != nil {
-			return err
-		}
-
-		file.Path = rel
-
 		already, err := dbAdapter.IsEntitySynced(ctx, rel)
 		if err != nil {
 			return err
@@ -68,6 +69,19 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		if already {
 			continue
 		}
+
+		file, err := app.ParseEntityAction{Path: fullPath}.Execute()
+		if err != nil {
+			return err
+		}
+
+		file.Path = rel
+
+		hash, err := app.HashFileContent(fullPath)
+		if err != nil {
+			return err
+		}
+		file.ContentHash = hash
 
 		pending = append(pending, file)
 	}

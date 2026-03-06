@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	var (
@@ -219,9 +219,36 @@ func main() {
 		},
 	}
 
+	entityStatusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show entity file sync status",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return entity.RunEntityStatusCommand{
+				DB:          dbConn,
+				Driver:      dbDriver,
+				EntitiesDir: entitiesDir,
+			}.Execute(c.Context())
+		},
+	}
+
+	entityReimportCmd := &cobra.Command{
+		Use:   "reimport [file]",
+		Short: "Re-sync an entity file (delete old rows, re-insert)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			return entity.RunEntityReimportCommand{
+				DB:          dbConn,
+				Driver:      dbDriver,
+				EntitiesDir: entitiesDir,
+				FilePath:    args[0],
+				AutoConfirm: autoConfirm,
+			}.Execute(c.Context())
+		},
+	}
+
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd)
 	dataCmd.AddCommand(dataSyncCmd)
-	entityCmd.AddCommand(entitySyncCmd)
+	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",

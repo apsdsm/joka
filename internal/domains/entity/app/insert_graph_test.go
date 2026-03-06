@@ -10,11 +10,15 @@ import (
 
 // mockDBAdapter is a hand-rolled mock for the DBAdapter interface.
 type mockDBAdapter struct {
-	insertedRows []mockInsertCall
-	nextID       int64
-	trackingRows []string
-	synced       map[string]bool
-	lookupData   map[string]any // keyed by "table.returnCol.whereCol=whereVal"
+	insertedRows    []mockInsertCall
+	nextID          int64
+	trackingRows    []string
+	synced          map[string]bool
+	lookupData      map[string]any // keyed by "table.returnCol.whereCol=whereVal"
+	entityRows      []domain.TrackedRow
+	entityHashes    map[string]string
+	deletedRows     []mockDeleteCall
+	deletedTracking []string
 }
 
 // mockInsertCall records the arguments passed to InsertRow.
@@ -23,15 +27,24 @@ type mockInsertCall struct {
 	Columns map[string]any
 }
 
+type mockDeleteCall struct {
+	Table    string
+	PKColumn string
+	PKValue  int64
+}
+
 func newMockDBAdapter() *mockDBAdapter {
 	return &mockDBAdapter{
-		nextID:     1,
-		synced:     make(map[string]bool),
-		lookupData: make(map[string]any),
+		nextID:       1,
+		synced:       make(map[string]bool),
+		lookupData:   make(map[string]any),
+		entityHashes: make(map[string]string),
 	}
 }
 
-func (m *mockDBAdapter) EnsureTrackingTable(_ context.Context) error {
+func (m *mockDBAdapter) EnsureTrackingTable(_ context.Context) error    { return nil }
+func (m *mockDBAdapter) EnsureRowTrackingTable(_ context.Context) error { return nil }
+func (m *mockDBAdapter) EnsureContentHashColumn(_ context.Context) error {
 	return nil
 }
 
@@ -42,7 +55,68 @@ func (m *mockDBAdapter) IsEntitySynced(_ context.Context, filePath string) (bool
 func (m *mockDBAdapter) RecordEntitySynced(_ context.Context, filePath string) error {
 	m.trackingRows = append(m.trackingRows, filePath)
 	m.synced[filePath] = true
+	return nil
+}
 
+func (m *mockDBAdapter) RecordEntitySyncedWithHash(_ context.Context, filePath, contentHash string) error {
+	m.trackingRows = append(m.trackingRows, filePath)
+	m.synced[filePath] = true
+	m.entityHashes[filePath] = contentHash
+	return nil
+}
+
+func (m *mockDBAdapter) UpdateEntitySynced(_ context.Context, filePath, contentHash string) error {
+	m.entityHashes[filePath] = contentHash
+	return nil
+}
+
+func (m *mockDBAdapter) GetEntityHash(_ context.Context, filePath string) (string, error) {
+	return m.entityHashes[filePath], nil
+}
+
+func (m *mockDBAdapter) GetAllSyncedEntities(_ context.Context) (map[string]string, error) {
+	result := make(map[string]string)
+	for k, v := range m.entityHashes {
+		result[k] = v
+	}
+	return result, nil
+}
+
+func (m *mockDBAdapter) RecordEntityRow(_ context.Context, row domain.TrackedRow) error {
+	m.entityRows = append(m.entityRows, row)
+	return nil
+}
+
+func (m *mockDBAdapter) GetTrackedRows(_ context.Context, entityFile string) ([]domain.TrackedRow, error) {
+	var rows []domain.TrackedRow
+	for i := len(m.entityRows) - 1; i >= 0; i-- {
+		if m.entityRows[i].EntityFile == entityFile {
+			rows = append(rows, m.entityRows[i])
+		}
+	}
+	return rows, nil
+}
+
+func (m *mockDBAdapter) DeleteTrackedRows(_ context.Context, entityFile string) error {
+	m.deletedTracking = append(m.deletedTracking, entityFile)
+	var remaining []domain.TrackedRow
+	for _, r := range m.entityRows {
+		if r.EntityFile != entityFile {
+			remaining = append(remaining, r)
+		}
+	}
+	m.entityRows = remaining
+	return nil
+}
+
+func (m *mockDBAdapter) DeleteRow(_ context.Context, table, pkColumn string, pkValue int64) error {
+	m.deletedRows = append(m.deletedRows, mockDeleteCall{Table: table, PKColumn: pkColumn, PKValue: pkValue})
+	return nil
+}
+
+func (m *mockDBAdapter) DeleteEntityRecord(_ context.Context, filePath string) error {
+	delete(m.synced, filePath)
+	delete(m.entityHashes, filePath)
 	return nil
 }
 
@@ -50,18 +124,15 @@ func (m *mockDBAdapter) InsertRow(_ context.Context, table string, columns map[s
 	m.insertedRows = append(m.insertedRows, mockInsertCall{Table: table, Columns: columns})
 	id := m.nextID
 	m.nextID++
-
 	return id, nil
 }
 
 func (m *mockDBAdapter) LookupValue(_ context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {
 	key := fmt.Sprintf("%s.%s.%s=%v", table, returnCol, whereCol, whereVal)
-
 	val, ok := m.lookupData[key]
 	if !ok {
 		return nil, fmt.Errorf("lookup returned no rows: %s.%s where %s=%v", table, returnCol, whereCol, whereVal)
 	}
-
 	return val, nil
 }
 
@@ -80,7 +151,7 @@ func TestInsertGraphAction_SingleEntity(t *testing.T) {
 		},
 	}
 
-	err := InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}.Execute(context.Background())
+	err := (&InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}).Execute(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +188,7 @@ func TestInsertGraphAction_ParentChild(t *testing.T) {
 		},
 	}
 
-	err := InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}.Execute(context.Background())
+	err := (&InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}).Execute(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,7 +236,7 @@ func TestInsertGraphAction_NoRefID(t *testing.T) {
 		},
 	}
 
-	err := InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}.Execute(context.Background())
+	err := (&InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}).Execute(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,7 +272,7 @@ func TestInsertGraphAction_WithLookup(t *testing.T) {
 		},
 	}
 
-	err := InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}.Execute(context.Background())
+	err := (&InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}).Execute(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -220,6 +291,112 @@ func TestInsertGraphAction_WithLookup(t *testing.T) {
 	}
 }
 
+func TestInsertGraphAction_TracksRows(t *testing.T) {
+	db := newMockDBAdapter()
+	refMap := make(map[string]int64)
+
+	entities := []domain.Entity{
+		{
+			Table:    "users",
+			RefID:    "u1",
+			PKColumn: "id",
+			Columns:  map[string]any{"name": "Alice"},
+		},
+	}
+
+	action := &InsertGraphAction{DB: db, Entities: entities, RefMap: refMap, EntityFile: "test.yaml"}
+	err := action.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(action.TrackedRows) != 1 {
+		t.Fatalf("expected 1 tracked row, got %d", len(action.TrackedRows))
+	}
+
+	row := action.TrackedRows[0]
+	if row.EntityFile != "test.yaml" {
+		t.Errorf("expected EntityFile 'test.yaml', got %q", row.EntityFile)
+	}
+	if row.TableName != "users" {
+		t.Errorf("expected TableName 'users', got %q", row.TableName)
+	}
+	if row.RowPK != 1 {
+		t.Errorf("expected RowPK 1, got %d", row.RowPK)
+	}
+	if row.InsertionOrder != 0 {
+		t.Errorf("expected InsertionOrder 0, got %d", row.InsertionOrder)
+	}
+}
+
+func TestInsertGraphAction_TracksParentAndChild(t *testing.T) {
+	db := newMockDBAdapter()
+	refMap := make(map[string]int64)
+
+	entities := []domain.Entity{
+		{
+			Table:    "users",
+			RefID:    "u1",
+			PKColumn: "id",
+			Columns:  map[string]any{"name": "Alice"},
+			Children: []domain.Entity{
+				{
+					Table:    "profiles",
+					RefID:    "p1",
+					PKColumn: "id",
+					Columns:  map[string]any{"user_id": "{{ u1.id }}", "bio": "test"},
+				},
+			},
+		},
+	}
+
+	action := &InsertGraphAction{DB: db, Entities: entities, RefMap: refMap, EntityFile: "graph.yaml"}
+	err := action.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(action.TrackedRows) != 2 {
+		t.Fatalf("expected 2 tracked rows, got %d", len(action.TrackedRows))
+	}
+
+	if action.TrackedRows[0].TableName != "users" {
+		t.Errorf("expected first tracked row table 'users', got %q", action.TrackedRows[0].TableName)
+	}
+	if action.TrackedRows[0].InsertionOrder != 0 {
+		t.Errorf("expected first tracked row order 0, got %d", action.TrackedRows[0].InsertionOrder)
+	}
+	if action.TrackedRows[1].TableName != "profiles" {
+		t.Errorf("expected second tracked row table 'profiles', got %q", action.TrackedRows[1].TableName)
+	}
+	if action.TrackedRows[1].InsertionOrder != 1 {
+		t.Errorf("expected second tracked row order 1, got %d", action.TrackedRows[1].InsertionOrder)
+	}
+}
+
+func TestInsertGraphAction_NoTrackingWithoutEntityFile(t *testing.T) {
+	db := newMockDBAdapter()
+	refMap := make(map[string]int64)
+
+	entities := []domain.Entity{
+		{
+			Table:    "users",
+			PKColumn: "id",
+			Columns:  map[string]any{"name": "Alice"},
+		},
+	}
+
+	action := &InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}
+	err := action.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if action.TrackedRows != nil {
+		t.Errorf("expected nil TrackedRows when EntityFile is empty, got %v", action.TrackedRows)
+	}
+}
+
 func TestInsertGraphAction_InsertError(t *testing.T) {
 	db := &failingDBAdapter{}
 	refMap := make(map[string]int64)
@@ -231,7 +408,7 @@ func TestInsertGraphAction_InsertError(t *testing.T) {
 		},
 	}
 
-	err := InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}.Execute(context.Background())
+	err := (&InsertGraphAction{DB: db, Entities: entities, RefMap: refMap}).Execute(context.Background())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

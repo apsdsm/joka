@@ -16,12 +16,21 @@ type lookupMock struct {
 	data map[string]any
 }
 
-func (l *lookupMock) EnsureTrackingTable(context.Context) error                      { panic("unused") }
-func (l *lookupMock) IsEntitySynced(context.Context, string) (bool, error)           { panic("unused") }
-func (l *lookupMock) RecordEntitySynced(context.Context, string) error               { panic("unused") }
-func (l *lookupMock) InsertRow(context.Context, string, map[string]any, string) (int64, error) {
-	panic("unused")
-}
+func (l *lookupMock) EnsureTrackingTable(context.Context) error                                { panic("unused") }
+func (l *lookupMock) EnsureRowTrackingTable(context.Context) error                             { panic("unused") }
+func (l *lookupMock) EnsureContentHashColumn(context.Context) error                            { panic("unused") }
+func (l *lookupMock) IsEntitySynced(context.Context, string) (bool, error)                     { panic("unused") }
+func (l *lookupMock) RecordEntitySynced(context.Context, string) error                         { panic("unused") }
+func (l *lookupMock) RecordEntitySyncedWithHash(context.Context, string, string) error         { panic("unused") }
+func (l *lookupMock) UpdateEntitySynced(context.Context, string, string) error                 { panic("unused") }
+func (l *lookupMock) GetEntityHash(context.Context, string) (string, error)                    { panic("unused") }
+func (l *lookupMock) GetAllSyncedEntities(context.Context) (map[string]string, error)          { panic("unused") }
+func (l *lookupMock) RecordEntityRow(context.Context, domain.TrackedRow) error                 { panic("unused") }
+func (l *lookupMock) GetTrackedRows(context.Context, string) ([]domain.TrackedRow, error)      { panic("unused") }
+func (l *lookupMock) DeleteTrackedRows(context.Context, string) error                          { panic("unused") }
+func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error                   { panic("unused") }
+func (l *lookupMock) DeleteEntityRecord(context.Context, string) error                         { panic("unused") }
+func (l *lookupMock) InsertRow(context.Context, string, map[string]any, string) (int64, error) { panic("unused") }
 func (l *lookupMock) LookupValue(_ context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {
 	key := fmt.Sprintf("%s.%s.%s=%v", table, returnCol, whereCol, whereVal)
 

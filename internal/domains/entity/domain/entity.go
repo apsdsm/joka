@@ -16,6 +16,35 @@ type Entity struct {
 // EntityFile groups the entities parsed from a single YAML file. Path is the
 // relative file path used as the tracking key in the joka_entities table.
 type EntityFile struct {
-	Path     string
-	Entities []Entity
+	Path        string
+	ContentHash string
+	Entities    []Entity
+}
+
+// TrackedRow records a single row inserted during entity sync so it can be
+// deleted later during reimport. InsertionOrder determines deletion order
+// (highest first = children before parents).
+type TrackedRow struct {
+	EntityFile     string
+	TableName      string
+	RowPK          int64
+	PKColumn       string
+	RefID          string
+	InsertionOrder int
+}
+
+// FileStatus represents the sync state of an entity file.
+type FileStatus string
+
+const (
+	StatusSynced   FileStatus = "synced"
+	StatusModified FileStatus = "modified"
+	StatusNew      FileStatus = "new"
+	StatusOrphaned FileStatus = "orphaned"
+)
+
+// EntityFileInfo pairs a file path with its sync status.
+type EntityFileInfo struct {
+	Path   string
+	Status FileStatus
 }

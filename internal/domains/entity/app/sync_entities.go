@@ -29,19 +29,37 @@ func (a SyncEntitiesAction) Execute(ctx context.Context) ([]string, error) {
 			continue
 		}
 
-		refMap := make(map[string]int64)
-
-		err = InsertGraphAction{
-			DB:       a.DB,
-			Entities: file.Entities,
-			RefMap:   refMap,
-		}.Execute(ctx)
-		if err != nil {
+		if err := ValidateRefIDs(file.Entities); err != nil {
 			return nil, err
 		}
 
-		if err := a.DB.RecordEntitySynced(ctx, file.Path); err != nil {
+		refMap := make(map[string]int64)
+
+		action := &InsertGraphAction{
+			DB:         a.DB,
+			Entities:   file.Entities,
+			RefMap:     refMap,
+			EntityFile: file.Path,
+		}
+
+		if err := action.Execute(ctx); err != nil {
 			return nil, err
+		}
+
+		for _, row := range action.TrackedRows {
+			if err := a.DB.RecordEntityRow(ctx, row); err != nil {
+				return nil, err
+			}
+		}
+
+		if file.ContentHash != "" {
+			if err := a.DB.RecordEntitySyncedWithHash(ctx, file.Path, file.ContentHash); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := a.DB.RecordEntitySynced(ctx, file.Path); err != nil {
+				return nil, err
+			}
 		}
 
 		synced = append(synced, file.Path)
