@@ -61,6 +61,13 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 - **`infra/`** — MySQL, PostgreSQL, and filesystem implementations. Implements the interfaces defined in `app/`. Each database has its own adapter file (`mysql.go`, `postgres.go`).
 - **`infra/models/`** — Flat structs for DB rows and file representations.
 
+## Versioning
+
+The version is defined as a `const` in `main.go`. When bumping the version:
+1. Update the `version` constant in `main.go`
+2. Create a git tag matching the version (e.g. `git tag v0.3.0`)
+3. Push the tag (e.g. `git push origin v0.3.0`)
+
 ## Key Technical Details
 
 - **Go 1.25+** with `github.com/go-sql-driver/mysql` and `github.com/lib/pq`
