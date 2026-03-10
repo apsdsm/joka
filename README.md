@@ -142,8 +142,11 @@ String values wrapped in `{{ }}` are resolved at insert time:
 | `{{ now }}` | Current UTC timestamp (`2006-01-02 15:04:05`) |
 | `{{ <ref>.id }}` | Auto-generated primary key of a previously inserted entity |
 | `{{ argon2id\|password }}` | Argon2id hash of the given plaintext |
+| `{{ lookup\|table,return_col,where_col=value }}` | Query a value from an existing table row |
 
-Entity files are tracked in a `joka_entities` table. Files that have already been synced are skipped on subsequent runs.
+The `lookup` expression is useful for referencing rows seeded outside the entity file (via templates or migrations), e.g. `{{ lookup|industry_types,id,code=RESTAURANT }}`.
+
+Entity files are tracked in a `joka_entities` table. Individual inserted rows are tracked in `joka_entity_rows` for reimport and update support. Files that have already been synced are skipped on subsequent runs.
 
 ## Commands
 
@@ -180,6 +183,29 @@ Syncs template/seed data from files to database tables based on the `tables` con
 
 Syncs entity YAML files to the database. Inserts entity graphs depth-first (parents before children), resolving template expressions along the way. Runs in a transaction with advisory locking. Already-synced files are skipped.
 
+### `joka entity status`
+
+Shows the sync status of each entity file: `synced` (hash matches), `modified` (file changed since last sync), `new` (not yet synced), or `orphaned` (tracked but file deleted). Uses SHA-256 content hashing.
+
+### `joka entity reimport <file>`
+
+Deletes previously inserted rows in reverse insertion order (children first, then parents) and re-inserts the entity graph from the YAML file. Aborts on FK constraint violations from external references. Requires prior sync — use `entity sync` first for new files.
+
+### `joka entity update <file>`
+
+Adds new entities from a file without deleting existing rows. Entities whose `_id` is already tracked are skipped; only new ones are inserted. Existing parent PKs are loaded into the reference map so new children can reference them via `{{ parent.id }}`.
+
+All entities must have `_id` in update mode (required to determine skip vs insert). Requires prior sync — use `entity sync` first for new files.
+
+```bash
+# 1. Initial sync
+joka entity sync
+
+# 2. Add a new child entity to admin_user.yaml
+# 3. Run update — existing entities are kept, new ones are inserted
+joka entity update admin_user.yaml
+```
+
 ### `joka unlock`
 
 Force-releases an advisory lock left behind by a crashed process. Shows who held the lock before releasing it.
@@ -193,6 +219,8 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--templates` | `-t` | `devops/templates` | Path to the templates directory |
 | `--entities` | | `devops/entities` | Path to the entities directory |
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
+| `--output` | `-o` | `text` | Output format: `text` or `json` |
+| `--ignore-foreign-keys` | | `false` | Disable FK checks during data sync truncate (MySQL) |
 
 ## How It Works
 
@@ -201,6 +229,7 @@ Joka uses four internal tables (all prefixed with `joka_`):
 - **`joka_migrations`** — Tracks which migrations have been applied and when.
 - **`joka_lock`** — Advisory lock table (at most one row). Prevents concurrent `migrate up`, `data sync`, or `entity sync` runs.
 - **`joka_snapshots`** — Stores a full schema snapshot (JSON of all `CREATE TABLE` statements) after each migration is applied.
-- **`joka_entities`** — Tracks which entity files have been synced to prevent duplicate inserts.
+- **`joka_entities`** — Tracks which entity files have been synced (with content hashes for change detection).
+- **`joka_entity_rows`** — Tracks individual rows inserted per entity file, enabling reimport (delete + re-insert) and update (additive insert).
 
-The lock, snapshot, and entity tables are created automatically on first use. Only `joka_migrations` requires `joka init`.
+The lock, snapshot, entity, and entity row tables are created automatically on first use. Only `joka_migrations` requires `joka init`.

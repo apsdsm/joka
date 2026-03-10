@@ -14,12 +14,17 @@ import (
 //
 // When EntityFile is set, each inserted row is recorded in TrackedRows so the
 // caller can persist them to joka_entity_rows for reimport support.
+//
+// When SkipRefIDs is set, entities whose _id is found in this map are not
+// inserted — their existing PK is loaded into RefMap instead. Children are
+// still visited (they may be new). Used by entity update.
 type InsertGraphAction struct {
 	DB          DBAdapter
 	Entities    []domain.Entity
 	RefMap      map[string]int64
 	EntityFile  string
 	TrackedRows []domain.TrackedRow
+	SkipRefIDs  map[string]int64
 
 	insertOrder int
 }
@@ -41,6 +46,18 @@ func (a *InsertGraphAction) Execute(ctx context.Context) error {
 // insertEntity resolves columns, inserts the row, stores the auto-increment id
 // in RefMap (if _id was provided), and recurses into children.
 func (a *InsertGraphAction) insertEntity(ctx context.Context, entity domain.Entity, now string) error {
+	if a.SkipRefIDs != nil && entity.RefID != "" {
+		if existingPK, ok := a.SkipRefIDs[entity.RefID]; ok {
+			a.RefMap[entity.RefID] = existingPK
+			for _, child := range entity.Children {
+				if err := a.insertEntity(ctx, child, now); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
 	columns, err := resolveColumns(ctx, entity.Columns, a.RefMap, now, a.DB)
 	if err != nil {
 		return fmt.Errorf("resolving %s: %w", entity.Table, err)

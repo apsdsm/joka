@@ -30,4 +30,9 @@ var (
 	// ErrForeignKeyConflict is returned when a DELETE fails because another
 	// row references it via a foreign key constraint.
 	ErrForeignKeyConflict = errors.New("foreign key constraint prevented deletion")
+
+	// ErrEntityMissingRefID is returned when entity update encounters an
+	// entity without an _id handle, which is required to determine whether
+	// it has already been tracked.
+	ErrEntityMissingRefID = errors.New("all entities must have _id for entity update")
 )

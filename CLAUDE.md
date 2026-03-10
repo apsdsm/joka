@@ -27,6 +27,7 @@ go run . data sync
 go run . entity sync
 go run . entity status
 go run . entity reimport admin_user.yaml
+go run . entity update admin_user.yaml
 go run . unlock
 
 # Run tests
@@ -221,3 +222,11 @@ entities:
 - Aborts on FK constraint violations from external references
 - Updates the content hash and row tracking after successful reimport
 - Requires prior sync; use `entity sync` first for new files
+
+**Entity update** (`joka entity update <file>`):
+- Additive-only alternative to reimport — never deletes existing rows
+- Skips entities whose `_id` is already tracked; inserts only new ones
+- Pre-populates the reference map from tracked data so new children can reference existing parents via `{{ parent.id }}`
+- All entities must have `_id` (required to determine skip vs insert)
+- Requires prior sync; use `entity sync` first for new files
+- New rows are tracked with `insertion_order` continuing from existing maximum

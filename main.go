@@ -261,9 +261,25 @@ func main() {
 		},
 	}
 
+	entityUpdateCmd := &cobra.Command{
+		Use:   "update [file]",
+		Short: "Add new entities from a file without deleting existing rows",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			return entity.RunEntityUpdateCommand{
+				DB:           dbConn,
+				Driver:       dbDriver,
+				EntitiesDir:  entitiesDir,
+				FilePath:     args[0],
+				AutoConfirm:  autoConfirm,
+				OutputFormat: outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd)
 	dataCmd.AddCommand(dataSyncCmd)
-	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd)
+	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd, entityUpdateCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
