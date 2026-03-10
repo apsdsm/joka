@@ -123,6 +123,24 @@ func TestResolveValue(t *testing.T) {
 		}
 	})
 
+	t.Run("it resolves sha256 expressions to a hex digest", func(t *testing.T) {
+		val, err := resolveValue(context.Background(), "{{ sha256|password }}", nil, "", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		hash, ok := val.(string)
+		if !ok {
+			t.Fatalf("expected string, got %T", val)
+		}
+
+		// SHA-256 of "password"
+		expected := "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+		if hash != expected {
+			t.Errorf("expected %q, got %q", expected, hash)
+		}
+	})
+
 	t.Run("it returns ErrInvalidTemplate for unknown expressions", func(t *testing.T) {
 		_, err := resolveValue(context.Background(), "{{ unknown_func }}", nil, "", nil)
 		if err == nil {

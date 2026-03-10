@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -16,6 +18,7 @@ import (
 //   - {{ now }} — replaced with the provided now timestamp string
 //   - {{ <ref>.id }} — replaced with the auto-increment id from refMap
 //   - {{ argon2id|<raw> }} — replaced with an argon2id hash of <raw>
+//   - {{ sha256|<raw> }} — replaced with the SHA-256 hex digest of <raw>
 //   - {{ lookup|table,return_col,where_col=value }} — replaced with a value queried from an existing table row
 //
 // Non-string values pass through unchanged.
@@ -63,6 +66,13 @@ func resolveValue(ctx context.Context, s string, refMap map[string]int64, now st
 		}
 
 		return hash, nil
+	}
+
+	if strings.HasPrefix(expr, "sha256|") {
+		raw := expr[len("sha256|"):]
+		h := sha256.Sum256([]byte(raw))
+
+		return hex.EncodeToString(h[:]), nil
 	}
 
 	if strings.HasPrefix(expr, "lookup|") {
