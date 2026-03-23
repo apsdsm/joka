@@ -142,6 +142,7 @@ String values wrapped in `{{ }}` are resolved at insert time:
 | `{{ now }}` | Current UTC timestamp (`2006-01-02 15:04:05`) |
 | `{{ <ref>.id }}` | Auto-generated primary key of a previously inserted entity |
 | `{{ argon2id\|password }}` | Argon2id hash of the given plaintext |
+| `{{ sha256\|value }}` | SHA-256 hex digest of the given value |
 | `{{ lookup\|table,return_col,where_col=value }}` | Query a value from an existing table row |
 
 The `lookup` expression is useful for referencing rows seeded outside the entity file (via templates or migrations), e.g. `{{ lookup|industry_types,id,code=RESTAURANT }}`.
