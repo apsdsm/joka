@@ -176,6 +176,25 @@ Shows the status of every migration (applied or pending) without applying anythi
 
 Displays the schema snapshot captured after a migration was applied. Shows `CREATE TABLE` statements for all user tables. Omit the index to see the latest snapshot.
 
+### `joka migrate consolidate --up-to <migration_index>`
+
+Replaces all migration files up to and including the target with a single consolidated file. The consolidated file contains the schema snapshot at that point — the CREATE TABLE statements for every user table, ordered to respect foreign key dependencies.
+
+Use `joka migrate status` to find migration indices:
+
+```
+$ joka migrate status
+Migration 250115093000 - Status: applied
+Migration 250116140000 - Status: applied
+Migration 250201100000 - Status: applied
+
+$ joka migrate consolidate --up-to 250116140000
+```
+
+This replaces the first two migration files with a single `250116140000_consolidated.sql` containing the full schema as of that point. The third migration file is left untouched.
+
+All migrations up to the target must already be applied (snapshots are captured during `migrate up`). This command does not modify the `joka_migrations` tracking table — existing databases that already applied the original migrations are unaffected.
+
 ### `joka data sync`
 
 Syncs template/seed data from files to database tables based on the `tables` config in `.jokarc.yaml`. Currently supports the `truncate` strategy (delete all rows, then insert from files). Runs in a transaction with advisory locking.
@@ -221,6 +240,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--entities` | | `devops/entities` | Path to the entities directory |
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
+| `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`) |
 | `--ignore-foreign-keys` | | `false` | Disable FK checks during data sync truncate (MySQL) |
 
 ## How It Works

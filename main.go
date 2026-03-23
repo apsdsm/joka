@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
 	var (
@@ -213,6 +213,26 @@ func main() {
 		},
 	}
 
+	migrateConsolidateCmd := &cobra.Command{
+		Use:   "consolidate",
+		Short: "Consolidate migrations into a single file using a schema snapshot",
+		RunE: func(c *cobra.Command, _ []string) error {
+			upTo, _ := c.Flags().GetString("up-to")
+			if upTo == "" {
+				return fmt.Errorf("--up-to flag is required")
+			}
+			return migration.RunConsolidateCommand{
+				DB:            dbConn,
+				Driver:        dbDriver,
+				MigrationsDir: migrationsDir,
+				UpToIndex:     upTo,
+				AutoConfirm:   autoConfirm,
+				OutputFormat:  outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+	migrateConsolidateCmd.Flags().String("up-to", "", "Migration index to consolidate up to (required)")
+
 	entityCmd := &cobra.Command{
 		Use:   "entity",
 		Short: "Entity graph management commands",
@@ -277,7 +297,7 @@ func main() {
 		},
 	}
 
-	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd)
+	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd)
 	dataCmd.AddCommand(dataSyncCmd)
 	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd, entityUpdateCmd)
 	versionCmd := &cobra.Command{
