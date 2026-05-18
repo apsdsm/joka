@@ -22,21 +22,26 @@ type RunEntitySyncCommand struct {
 	EntitiesDir  string
 	AutoConfirm  bool
 	OutputFormat string
+	// SkipLock skips advisory lock acquisition. Used when an outer command
+	// (e.g. `joka reset`) already holds the lock.
+	SkipLock bool
 }
 
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+	if !r.SkipLock {
+		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
 
-	if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
+		if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
+			if jsonOut {
+				return shared.PrintErrorJSON(err)
+			}
+			return err
 		}
-		return err
-	}
 
-	defer lockAdapter.Release(ctx) //nolint:errcheck
+		defer lockAdapter.Release(ctx) //nolint:errcheck
+	}
 
 	dbAdapter := newEntityAdapter(r.Driver, r.DB)
 

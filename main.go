@@ -7,6 +7,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
+	"github.com/apsdsm/joka/cmd/dbtools"
 	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
@@ -18,7 +19,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.5.1"
+const version = "0.6.0"
 
 func main() {
 	var (
@@ -297,6 +298,45 @@ func main() {
 		},
 	}
 
+	dropCmd := &cobra.Command{
+		Use:   "drop",
+		Short: "Drop every table in the database (including joka_* tracking)",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return dbtools.RunDropCommand{
+				DB:           dbConn,
+				Driver:       dbDriver,
+				AutoConfirm:  autoConfirm,
+				OutputFormat: outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
+	resetCmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Drop everything and re-run init, migrations, data sync, entity sync",
+		RunE: func(c *cobra.Command, _ []string) error {
+			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
+			for i, t := range cfg.Tables {
+				tables[i] = templateinfra.TableConfig{
+					Name:     t.Name,
+					Strategy: t.Strategy,
+				}
+			}
+
+			return dbtools.RunResetCommand{
+				DB:                dbConn,
+				Driver:            dbDriver,
+				MigrationsDir:     migrationsDir,
+				TemplatesDir:      templatesDir,
+				EntitiesDir:       entitiesDir,
+				Tables:            tables,
+				IgnoreForeignKeys: cfg.IgnoreForeignKeys,
+				AutoConfirm:       autoConfirm,
+				OutputFormat:      outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd)
 	dataCmd.AddCommand(dataSyncCmd)
 	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd, entityUpdateCmd)
@@ -312,7 +352,7 @@ func main() {
 		},
 	}
 
-	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, entityCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		if outputFormat == shared.OutputJSON {

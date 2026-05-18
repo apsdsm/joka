@@ -28,6 +28,8 @@ go run . entity sync
 go run . entity status
 go run . entity reimport admin_user.yaml
 go run . entity update admin_user.yaml
+go run . drop
+go run . reset
 go run . unlock
 
 # Run tests
@@ -80,7 +82,7 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
 - **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
 - **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
-- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, and `entity reimport` acquire a DB lock before running. Use `joka unlock` if a process crashes without releasing.
+- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, `entity reimport`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
 
@@ -133,6 +135,11 @@ CREATE TABLE joka_entity_rows (
 ```
 
 `joka_lock`, `joka_snapshots`, `joka_entities`, and `joka_entity_rows` are auto-created on first use. Only `joka_migrations` requires `joka init`.
+
+## Wipe and reseed
+
+- **`joka drop`** — drops every table in the current database/schema, including all `joka_*` tracking tables. Confirms unless `--auto`. MySQL disables FK checks for the drop; Postgres uses `DROP TABLE ... CASCADE`.
+- **`joka reset`** — wipe-and-reseed pipeline: runs `drop`, then `init`, `migrate up`, `data sync`, `entity sync` in sequence. Acquires one outer advisory lock for the whole flow and confirms once.
 
 ## Templates
 

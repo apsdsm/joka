@@ -22,6 +22,9 @@ type RunMigrateUpCommand struct {
 	MigrationsDir string
 	AutoConfirm   bool
 	OutputFormat  string
+	// SkipLock skips advisory lock acquisition. Used when an outer command
+	// (e.g. `joka reset`) already holds the lock.
+	SkipLock bool
 }
 
 // Execute acquires an advisory lock, applies all pending migrations in a
@@ -29,15 +32,17 @@ type RunMigrateUpCommand struct {
 func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	// Acquire advisory lock to prevent concurrent migration runs.
-	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
-	if err := lockAdapter.Acquire(ctx, "migrate up"); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
+	if !r.SkipLock {
+		// Acquire advisory lock to prevent concurrent migration runs.
+		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+		if err := lockAdapter.Acquire(ctx, "migrate up"); err != nil {
+			if jsonOut {
+				return shared.PrintErrorJSON(err)
+			}
+			return err
 		}
-		return err
+		defer lockAdapter.Release(ctx)
 	}
-	defer lockAdapter.Release(ctx)
 
 	if !jsonOut {
 		color.Green("Checking migration chain...")

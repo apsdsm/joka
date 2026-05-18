@@ -24,6 +24,9 @@ type RunDataSyncCommand struct {
 	AutoConfirm       bool
 	IgnoreForeignKeys bool
 	OutputFormat      string
+	// SkipLock skips advisory lock acquisition. Used when an outer command
+	// (e.g. `joka reset`) already holds the lock.
+	SkipLock bool
 }
 
 // Execute acquires an advisory lock, syncs all configured tables inside a
@@ -31,15 +34,17 @@ type RunDataSyncCommand struct {
 func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	// Acquire advisory lock to prevent concurrent sync/migration runs.
-	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
-	if err := lockAdapter.Acquire(ctx, "data sync"); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
+	if !r.SkipLock {
+		// Acquire advisory lock to prevent concurrent sync/migration runs.
+		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+		if err := lockAdapter.Acquire(ctx, "data sync"); err != nil {
+			if jsonOut {
+				return shared.PrintErrorJSON(err)
+			}
+			return err
 		}
-		return err
+		defer lockAdapter.Release(ctx)
 	}
-	defer lockAdapter.Release(ctx)
 
 	tables, err := infra.GetTables(r.TemplatesDir, r.Tables)
 	if err != nil {
