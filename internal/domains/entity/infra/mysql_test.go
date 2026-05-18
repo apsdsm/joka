@@ -242,6 +242,56 @@ func TestInsertRow(t *testing.T) {
 			t.Errorf("expected 'TxUser', got %q", name)
 		}
 	})
+
+	t.Run("it returns the natural-key value when _pk is in columns", func(t *testing.T) {
+		tableName := "test_entity_join"
+		ctx := context.Background()
+
+		_, err := db.ExecContext(ctx,
+			"CREATE TABLE `"+tableName+"` (client_id BIGINT NOT NULL, api_key_id BIGINT NOT NULL, UNIQUE KEY uq_api_key (api_key_id))",
+		)
+		if err != nil {
+			t.Fatalf("creating join table: %v", err)
+		}
+		t.Cleanup(func() { testlib.DropTable(t, db, tableName) })
+
+		adapter := infra.NewMySQLDBAdapter(db)
+
+		got, err := adapter.InsertRow(ctx, tableName, map[string]any{
+			"client_id":  int64(7),
+			"api_key_id": int64(42),
+		}, "api_key_id")
+		if err != nil {
+			t.Fatalf("InsertRow: %v", err)
+		}
+
+		if got != 42 {
+			t.Errorf("expected tracked PK 42 (from columns), got %d", got)
+		}
+	})
+
+	t.Run("it fails loudly when the table has no auto-increment and no _pk is set", func(t *testing.T) {
+		tableName := "test_entity_join_no_pk"
+		ctx := context.Background()
+
+		_, err := db.ExecContext(ctx,
+			"CREATE TABLE `"+tableName+"` (client_id BIGINT NOT NULL, api_key_id BIGINT NOT NULL)",
+		)
+		if err != nil {
+			t.Fatalf("creating join table: %v", err)
+		}
+		t.Cleanup(func() { testlib.DropTable(t, db, tableName) })
+
+		adapter := infra.NewMySQLDBAdapter(db)
+
+		_, err = adapter.InsertRow(ctx, tableName, map[string]any{
+			"client_id":  int64(1),
+			"api_key_id": int64(2),
+		}, "id")
+		if err == nil {
+			t.Fatal("expected error from InsertRow with no auto-increment and no _pk, got nil")
+		}
+	})
 }
 
 func TestEnsureRowTrackingTable(t *testing.T) {

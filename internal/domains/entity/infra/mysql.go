@@ -98,8 +98,10 @@ func (m *MySQLDBAdapter) RecordEntitySynced(ctx context.Context, filePath string
 }
 
 // InsertRow inserts a single row into the given table using the DBTX interface
-// (transaction or raw connection). Returns the last insert id. The pkColumn
-// parameter is accepted for interface compatibility but MySQL uses LastInsertId.
+// (transaction or raw connection). For natural-key tables (where pkColumn is
+// present in columns), it returns the value from the columns map so reimport
+// can locate the row later. Otherwise it returns LastInsertId, and fails loudly
+// if that is 0 (table has no auto-increment and no _pk was declared).
 func (m *MySQLDBAdapter) InsertRow(ctx context.Context, table string, columns map[string]any, pkColumn string) (int64, error) {
 	colNames := make([]string, 0, len(columns))
 	placeholders := make([]string, 0, len(columns))
@@ -122,7 +124,24 @@ func (m *MySQLDBAdapter) InsertRow(ctx context.Context, table string, columns ma
 		return 0, fmt.Errorf("inserting into %s: %w", table, err)
 	}
 
-	return result.LastInsertId()
+	if pkVal, present, err := pkValueFromColumns(columns, pkColumn); err != nil {
+		return 0, fmt.Errorf("inserting into %s: %w", table, err)
+	} else if present {
+		return pkVal, nil
+	}
+
+	if pkColumn != "id" {
+		return 0, fmt.Errorf("inserting into %s: _pk column %q is not present in entity columns", table, pkColumn)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("inserting into %s: %w", table, err)
+	}
+	if id == 0 {
+		return 0, fmt.Errorf("inserting into %s: insert returned no auto-increment id; declare `_pk:` on the entity if the table uses a natural key", table)
+	}
+	return id, nil
 }
 
 // LookupValue queries a single value from an existing table row. Returns

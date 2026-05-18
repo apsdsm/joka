@@ -76,9 +76,11 @@ func (p *PostgresDBAdapter) RecordEntitySynced(ctx context.Context, filePath str
 	return err
 }
 
-// InsertRow inserts a single row into the given table. For PostgreSQL, it uses
-// RETURNING with the provided pkColumn to get the inserted row's auto-generated
-// id (since LastInsertId is not supported by lib/pq).
+// InsertRow inserts a single row into the given table. For natural-key tables
+// (where pkColumn is present in columns), the value from the columns map is
+// returned so reimport can locate the row later. Otherwise PostgreSQL's
+// RETURNING clause is used to fetch the inserted row's auto-generated id
+// (since LastInsertId is not supported by lib/pq).
 func (p *PostgresDBAdapter) InsertRow(ctx context.Context, table string, columns map[string]any, pkColumn string) (int64, error) {
 	colNames := make([]string, 0, len(columns))
 	placeholders := make([]string, 0, len(columns))
@@ -90,6 +92,27 @@ func (p *PostgresDBAdapter) InsertRow(ctx context.Context, table string, columns
 		placeholders = append(placeholders, fmt.Sprintf("$%d", i))
 		args = append(args, v)
 		i++
+	}
+
+	pkVal, pkPresent, pkErr := pkValueFromColumns(columns, pkColumn)
+	if pkErr != nil {
+		return 0, fmt.Errorf("inserting into %s: %w", table, pkErr)
+	}
+
+	if pkPresent {
+		query := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s)`,
+			table,
+			strings.Join(colNames, ", "),
+			strings.Join(placeholders, ", "),
+		)
+		if _, err := p.db.ExecContext(ctx, query, args...); err != nil {
+			return 0, fmt.Errorf("inserting into %s: %w", table, err)
+		}
+		return pkVal, nil
+	}
+
+	if pkColumn != "id" {
+		return 0, fmt.Errorf("inserting into %s: _pk column %q is not present in entity columns", table, pkColumn)
 	}
 
 	query := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s) RETURNING "%s"`,
