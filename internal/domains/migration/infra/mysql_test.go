@@ -280,6 +280,40 @@ func TestGetLatestSnapshotIndex(t *testing.T) {
 	})
 }
 
+func TestMySQLComputeSchema(t *testing.T) {
+	db, err := testlib.GetTestDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+	ctx := context.Background()
+
+	t.Run("it returns CREATE TABLE for user tables and skips joka_ tables", func(t *testing.T) {
+		_, err := db.ExecContext(ctx, "CREATE TABLE test_compute_users (id INT PRIMARY KEY, name VARCHAR(50))")
+		if err != nil {
+			t.Fatalf("creating user table: %v", err)
+		}
+		t.Cleanup(func() { testlib.DropTable(t, db, "test_compute_users") })
+
+		adapter := infra.NewMySQLDBAdapter(db)
+		// Make sure a joka_ table exists, so we can verify it's filtered out.
+		if err := adapter.EnsureSnapshotsTable(ctx); err != nil {
+			t.Fatalf("EnsureSnapshotsTable: %v", err)
+		}
+
+		schema, err := adapter.ComputeSchema(ctx)
+		if err != nil {
+			t.Fatalf("ComputeSchema: %v", err)
+		}
+
+		if _, ok := schema["test_compute_users"]; !ok {
+			t.Errorf("expected test_compute_users in schema, got %v", keys(schema))
+		}
+		if _, ok := schema["joka_snapshots"]; ok {
+			t.Errorf("expected joka_snapshots to be filtered out, got %v", keys(schema))
+		}
+	})
+}
+
 func keys(m map[string]string) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {

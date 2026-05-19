@@ -128,15 +128,9 @@ func (p *PostgresDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
 	return err
 }
 
-// CaptureSchemaSnapshot captures the current database schema and stores it
-// associated with the given migration index. For PostgreSQL, it queries
-// information_schema for column definitions of all non-joka user tables.
-func (p *PostgresDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationIndex string) error {
-	if err := p.EnsureSnapshotsTable(ctx); err != nil {
-		return fmt.Errorf("ensuring snapshots table: %w", err)
-	}
-
-	// Get all non-joka tables in the current schema.
+// ComputeSchema returns the current database schema as a map of table name to
+// a reconstructed CREATE TABLE-like statement, for all non-joka user tables.
+func (p *PostgresDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
 	rows, err := p.conn.QueryContext(ctx, `
 		SELECT table_name
 		FROM information_schema.tables
@@ -145,7 +139,7 @@ func (p *PostgresDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migration
 		ORDER BY table_name
 	`)
 	if err != nil {
-		return fmt.Errorf("listing tables: %w", err)
+		return nil, fmt.Errorf("listing tables: %w", err)
 	}
 	defer rows.Close()
 
@@ -153,22 +147,35 @@ func (p *PostgresDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migration
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return err
+			return nil, err
 		}
 		tableNames = append(tableNames, name)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
-	// For each table, reconstruct a CREATE TABLE-like statement from information_schema.
 	schema := make(map[string]string)
 	for _, name := range tableNames {
 		stmt, err := p.reconstructCreateTable(ctx, name)
 		if err != nil {
-			return fmt.Errorf("getting schema for table %s: %w", name, err)
+			return nil, fmt.Errorf("getting schema for table %s: %w", name, err)
 		}
 		schema[name] = stmt
+	}
+	return schema, nil
+}
+
+// CaptureSchemaSnapshot captures the current database schema and stores it
+// associated with the given migration index.
+func (p *PostgresDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationIndex string) error {
+	if err := p.EnsureSnapshotsTable(ctx); err != nil {
+		return fmt.Errorf("ensuring snapshots table: %w", err)
+	}
+
+	schema, err := p.ComputeSchema(ctx)
+	if err != nil {
+		return err
 	}
 
 	jsonBytes, err := json.Marshal(schema)

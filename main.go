@@ -19,7 +19,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
 
 func main() {
 	var (
@@ -234,6 +234,18 @@ func main() {
 	}
 	migrateConsolidateCmd.Flags().String("up-to", "", "Migration index to consolidate up to (required)")
 
+	migrateVerifyCmd := &cobra.Command{
+		Use:   "verify",
+		Short: "Detect schema drift against the latest snapshot",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return migration.RunVerifyCommand{
+				DB:           dbConn,
+				Driver:       dbDriver,
+				OutputFormat: outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
 	entityCmd := &cobra.Command{
 		Use:   "entity",
 		Short: "Entity graph management commands",
@@ -337,7 +349,7 @@ func main() {
 		},
 	}
 
-	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd)
+	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
 	dataCmd.AddCommand(dataSyncCmd)
 	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd, entityUpdateCmd)
 	versionCmd := &cobra.Command{

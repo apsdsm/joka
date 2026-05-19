@@ -19,6 +19,9 @@ type mockDBAdapter struct {
 	applySQLErr           error
 	recordAppliedErr      error
 	createTableErr        error
+	latestSnapshotIndex   string
+	schemaSnapshot        string
+	computedSchema        map[string]string
 }
 
 func (m *mockDBAdapter) HasMigrationsTable(ctx context.Context) (bool, error) {
@@ -46,10 +49,13 @@ func (m *mockDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationInde
 	return nil
 }
 func (m *mockDBAdapter) GetSchemaSnapshot(ctx context.Context, migrationIndex string) (string, error) {
-	return "", nil
+	return m.schemaSnapshot, nil
 }
 func (m *mockDBAdapter) GetLatestSnapshotIndex(ctx context.Context) (string, error) {
-	return "", nil
+	return m.latestSnapshotIndex, nil
+}
+func (m *mockDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
+	return m.computedSchema, nil
 }
 
 func createTestFile(t *testing.T, dir, name string) {

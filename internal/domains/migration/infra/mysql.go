@@ -146,14 +146,9 @@ func (m *MySQLDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
 	return err
 }
 
-// CaptureSchemaSnapshot captures the current database schema and stores it
-// associated with the given migration index. It queries SHOW CREATE TABLE for
-// all user tables (excluding joka_* tables).
-func (m *MySQLDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationIndex string) error {
-	if err := m.EnsureSnapshotsTable(ctx); err != nil {
-		return fmt.Errorf("ensuring snapshots table: %w", err)
-	}
-
+// ComputeSchema queries SHOW CREATE TABLE for all user tables (excluding
+// joka_* tables) and returns the map of table -> CREATE TABLE statement.
+func (m *MySQLDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
 	rows, err := m.conn.QueryContext(ctx, `
 		SELECT table_name
 		FROM information_schema.tables
@@ -162,35 +157,47 @@ func (m *MySQLDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationInd
 		ORDER BY table_name
 	`)
 	if err != nil {
-		return fmt.Errorf("listing tables: %w", err)
+		return nil, fmt.Errorf("listing tables: %w", err)
 	}
 	defer rows.Close()
 
-	// Phase 1: collect all user table names (excluding joka_* internal tables).
 	schema := make(map[string]string)
 	var tableNames []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return err
+			return nil, err
 		}
 		tableNames = append(tableNames, name)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
-	// Phase 2: get the full CREATE TABLE statement for each table.
 	for _, name := range tableNames {
 		var tbl, createStmt string
 		err := m.conn.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", name)).Scan(&tbl, &createStmt)
 		if err != nil {
-			return fmt.Errorf("getting schema for table %s: %w", name, err)
+			return nil, fmt.Errorf("getting schema for table %s: %w", name, err)
 		}
 		schema[name] = createStmt
 	}
 
-	// Store the schema as a JSON object: {"table_name": "CREATE TABLE ...", ...}
+	return schema, nil
+}
+
+// CaptureSchemaSnapshot captures the current database schema and stores it
+// associated with the given migration index.
+func (m *MySQLDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationIndex string) error {
+	if err := m.EnsureSnapshotsTable(ctx); err != nil {
+		return fmt.Errorf("ensuring snapshots table: %w", err)
+	}
+
+	schema, err := m.ComputeSchema(ctx)
+	if err != nil {
+		return err
+	}
+
 	jsonBytes, err := json.Marshal(schema)
 	if err != nil {
 		return fmt.Errorf("marshaling schema: %w", err)

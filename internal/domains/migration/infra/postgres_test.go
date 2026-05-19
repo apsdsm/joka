@@ -280,6 +280,39 @@ func TestPostgresGetLatestSnapshotIndex(t *testing.T) {
 	})
 }
 
+func TestPostgresComputeSchema(t *testing.T) {
+	db, err := testlib.GetTestPostgresDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+	ctx := context.Background()
+
+	t.Run("it returns reconstructed schema for user tables and skips joka_ tables", func(t *testing.T) {
+		_, err := db.ExecContext(ctx, `CREATE TABLE test_pg_compute_users (id INT PRIMARY KEY, name VARCHAR(50))`)
+		if err != nil {
+			t.Fatalf("creating user table: %v", err)
+		}
+		t.Cleanup(func() { testlib.DropTablePostgres(t, db, "test_pg_compute_users") })
+
+		adapter := infra.NewPostgresDBAdapter(db)
+		if err := adapter.EnsureSnapshotsTable(ctx); err != nil {
+			t.Fatalf("EnsureSnapshotsTable: %v", err)
+		}
+
+		schema, err := adapter.ComputeSchema(ctx)
+		if err != nil {
+			t.Fatalf("ComputeSchema: %v", err)
+		}
+
+		if _, ok := schema["test_pg_compute_users"]; !ok {
+			t.Errorf("expected test_pg_compute_users in schema, got %v", pgKeys(schema))
+		}
+		if _, ok := schema["joka_snapshots"]; ok {
+			t.Errorf("expected joka_snapshots to be filtered out, got %v", pgKeys(schema))
+		}
+	})
+}
+
 func pgKeys(m map[string]string) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {

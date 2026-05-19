@@ -23,6 +23,7 @@ go run . make "add_users_table"
 go run . migrate up
 go run . migrate status
 go run . migrate snapshot
+go run . migrate verify
 go run . data sync
 go run . entity sync
 go run . entity status
@@ -135,6 +136,14 @@ CREATE TABLE joka_entity_rows (
 ```
 
 `joka_lock`, `joka_snapshots`, `joka_entities`, and `joka_entity_rows` are auto-created on first use. Only `joka_migrations` requires `joka init`.
+
+## Schema drift detection
+
+`joka migrate verify` compares the live database schema against the schema snapshot stored for the most recent applied migration. It reports tables that were added in live but missing from the snapshot, tables present in the snapshot but missing from live, and tables whose CREATE statements differ.
+
+- Useful for catching out-of-band DDL (manual `ALTER TABLE`, columns added without a migration, etc.).
+- MySQL `AUTO_INCREMENT=<n>` is stripped before comparison so row-insertion noise doesn't false-positive.
+- Exit code is non-zero when drift is detected — suitable for CI gating.
 
 ## Wipe and reseed
 

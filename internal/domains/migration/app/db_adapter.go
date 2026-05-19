@@ -26,6 +26,10 @@ type DBAdapter interface {
 	// CaptureSchemaSnapshot records the full database schema (all non-joka tables)
 	// as a JSON snapshot associated with the given migration index.
 	CaptureSchemaSnapshot(ctx context.Context, migrationIndex string) error
+	// ComputeSchema returns the current database schema as a map of
+	// table name to its CREATE TABLE statement (or DB-specific reconstruction).
+	// Non-joka tables only. Used by snapshot capture and drift verification.
+	ComputeSchema(ctx context.Context) (map[string]string, error)
 	// GetSchemaSnapshot retrieves the stored schema JSON for a specific migration.
 	GetSchemaSnapshot(ctx context.Context, migrationIndex string) (string, error)
 	// GetLatestSnapshotIndex returns the migration index of the most recent snapshot.
