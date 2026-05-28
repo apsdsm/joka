@@ -14,16 +14,18 @@ import (
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/cmd/template"
 	"github.com/apsdsm/joka/config"
+	"github.com/apsdsm/joka/internal/connection"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/spf13/cobra"
 )
 
-const version = "0.7.0"
+const version = "0.9.0"
 
 func main() {
 	var (
 		envFile       string
+		profile       string
 		migrationsDir string
 		templatesDir  string
 		entitiesDir   string
@@ -43,7 +45,7 @@ func main() {
 			}
 
 			var err error
-			cfg, err = config.Load()
+			cfg, err = config.Load(profile)
 			if err != nil {
 				return err
 			}
@@ -62,17 +64,21 @@ func main() {
 				return nil
 			}
 
-			if c.Name() == "make" {
-				return loadEnv(envFile)
-			}
-
+			// Load any --env dotenv first so the "env" connection source (and
+			// anything else relying on process env) sees it.
 			if err := loadEnv(envFile); err != nil {
 				return err
 			}
 
-			dsn := os.Getenv("DATABASE_URL")
-			if dsn == "" {
-				return fmt.Errorf("DATABASE_URL not found in environment variables")
+			if c.Name() == "make" {
+				return nil
+			}
+
+			// Resolve the DSN from the connection config (env by default, or a
+			// secret source declared in .jokarc.yaml / the selected profile).
+			dsn, err := connection.Resolve(c.Context(), cfg.Connection, nil)
+			if err != nil {
+				return err
 			}
 
 			dbConn, dbDriver, err = jokadb.Open(dsn)
@@ -90,6 +96,7 @@ func main() {
 	}
 
 	root.PersistentFlags().StringVarP(&envFile, "env", "e", ".env", "Path to the environment file")
+	root.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Config profile to use (from .jokarc.yaml profiles)")
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
 	root.PersistentFlags().StringVarP(&templatesDir, "templates", "t", "devops/templates", "Path to the templates directory")
 	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")

@@ -77,11 +77,16 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 - **Go 1.25+** with `github.com/go-sql-driver/mysql` and `github.com/lib/pq`
 - **Driver auto-detection**: The database driver is detected from the `DATABASE_URL` format. PostgreSQL DSNs start with `postgres://` or `postgresql://`; everything else is assumed MySQL.
 - **Multi-statement SQL**: MySQL DSN is configured with `multiStatements=true`; PostgreSQL handles multiple statements natively.
-- **Configuration**: Requires `DATABASE_URL` in `.env` file or environment variable.
+- **Connection**: by default the DSN comes from `DATABASE_URL` (`.env` or environment). The
+  `.jokarc.yaml` may instead declare a `connection:` block (`internal/connection`) whose `source`
+  is `env`, `literal` (inline `url:`/`password:`), or `aws_secrets_manager` (assemble from parts +
+  a secret key, or a whole-URL key). See README for the schema.
   - MySQL: `user:pass@tcp(host:port)/dbname`
   - PostgreSQL: `postgresql://user:pass@host:port/dbname?sslmode=disable`
+- **Profiles**: `.jokarc.yaml` may define a `profiles:` map; `--profile <name>` overlays a profile
+  (migrations/entities/connection) onto the base config. No `--profile` uses the base.
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
-- **CLI flags**: `--env` for .env path, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
+- **CLI flags**: `--env` for .env path, `--profile`/`-p` for the config profile, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
 - **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
 - **Advisory locking**: `migrate up`, `data sync`, `entity sync`, `entity reimport`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
 

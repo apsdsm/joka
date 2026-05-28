@@ -32,6 +32,8 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/my_db?sslmode=disable
 
 The driver is auto-detected from the URL format. PostgreSQL URLs start with `postgres://` or `postgresql://`; everything else is treated as MySQL.
 
+Instead of an env var you can declare the connection in `.jokarc.yaml` (see **Connection** below) — useful for pulling the password from a secret store without writing it to disk.
+
 ### Configuration File
 
 Create a `.jokarc.yaml` in your project root to configure paths and table sync settings:
@@ -48,6 +50,82 @@ tables:
 ```
 
 All fields are optional. CLI flags override `.jokarc.yaml` values. If neither is provided, defaults apply (`devops/migrations`, `devops/templates`, `devops/entities`).
+
+### Connection
+
+By default joka reads `DATABASE_URL` from the environment (the behaviour above). You can instead declare a `connection:` block. `source` can usually be omitted — it's inferred:
+
+| You provide | Inferred `source` |
+|-------------|-------------------|
+| nothing | `env` (DATABASE_URL) |
+| `url:` or `password:` (or bare host/driver) | `literal` |
+| a `secret:` block | `aws_secrets_manager` |
+
+**Literal** — connection data in the file itself (plaintext; for local / non-sensitive DBs only). Either a full DSN or structured parts:
+
+```yaml
+connection:
+  url: root:root@tcp(localhost:3306)/my_db   # full DSN, used verbatim
+# --- or ---
+connection:
+  driver: mysql
+  host: localhost
+  port: 3306
+  user: root
+  database: my_db
+  password: root                              # inline password; joka builds a URL-safe DSN
+```
+
+**AWS Secrets Manager** — resolve the DSN from a secret at runtime:
+
+```yaml
+connection:
+  source: aws_secrets_manager   # "env" (default) | "aws_secrets_manager"
+  driver: mysql                 # mysql (default) | postgres
+  host: 127.0.0.1
+  port: 3306
+  user: root
+  database: my_db
+  secret:
+    secret_id: my-app/db        # Secrets Manager secret id
+    region: ap-northeast-1      # optional; falls back to AWS_REGION / default chain
+    password_key: db_password   # JSON key in the secret holding the password
+```
+
+Two modes for `aws_secrets_manager`:
+
+- **Assembly** (above): joka builds a URL-safe DSN from `driver/host/port/user/database/params`, taking the password from `secret.password_key`. Use when the secret holds only the password.
+- **Whole-URL**: set `secret.url_key` to a JSON key holding a complete DSN (or store the secret as a plain string and omit both keys). joka uses that value verbatim.
+
+AWS credentials come from the default chain (env vars, shared config, SSO, instance role). `source: env` requires no AWS setup.
+
+### Profiles
+
+Define `profiles:` to keep multiple environments in one `.jokarc.yaml`, selected with `--profile`/`-p`. A profile overlays the base config — any field it sets wins, the rest is inherited:
+
+```yaml
+migrations: devops/migrations
+entities: devops/entities
+
+profiles:
+  local:
+    connection: { source: env }            # uses DATABASE_URL
+  dev-remote:
+    connection:
+      source: aws_secrets_manager
+      driver: mysql
+      host: 127.0.0.1
+      port: 3307
+      user: root
+      database: my_db
+      secret: { secret_id: my-app/db, region: ap-northeast-1, password_key: db_password }
+```
+
+```bash
+joka --profile dev-remote migrate up --auto
+```
+
+With no `--profile`, the base config is used (so existing configs keep working unchanged).
 
 ### Migration Files
 
@@ -235,6 +313,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--env` | `-e` | `.env` | Path to the environment file |
+| `--profile` | `-p` | | Config profile to use (from `.jokarc.yaml` `profiles:`) |
 | `--migrations` | `-m` | `devops/migrations` | Path to the migrations directory |
 | `--templates` | `-t` | `devops/templates` | Path to the templates directory |
 | `--entities` | | `devops/entities` | Path to the entities directory |

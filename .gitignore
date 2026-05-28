@@ -16,3 +16,6 @@ bin
 
 # other
 do-not-commit
+
+# local dev build (run as ./joka-dev to dogfood without clobbering the installed joka)
+/joka-dev

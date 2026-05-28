@@ -24,7 +24,7 @@ tables:
 `
 		os.WriteFile(".jokarc.yaml", []byte(yaml), 0644)
 
-		cfg, err := Load()
+		cfg, err := Load("")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -51,7 +51,7 @@ tables:
 		os.Chdir(dir)
 		defer os.Chdir(orig)
 
-		cfg, err := Load()
+		cfg, err := Load("")
 		if err != nil {
 			t.Fatalf("expected no error for missing file, got: %v", err)
 		}
@@ -68,9 +68,94 @@ tables:
 
 		os.WriteFile(".jokarc.yaml", []byte("{{invalid yaml"), 0644)
 
-		_, err := Load()
+		_, err := Load("")
 		if err == nil {
 			t.Fatal("expected error for invalid YAML, got nil")
+		}
+	})
+}
+
+func TestLoadProfile(t *testing.T) {
+	const cfgYAML = `migrations: db/migrations
+entities: db/entities
+connection:
+  source: env
+profiles:
+  local:
+    connection:
+      source: env
+  dev-remote:
+    entities: db/entities-dev
+    connection:
+      source: aws_secrets_manager
+      driver: mysql
+      host: 127.0.0.1
+      port: 3307
+      user: root
+      database: lgc
+      secret:
+        secret_id: lgc
+        region: ap-northeast-1
+        password_key: mysql_root_password
+`
+
+	writeCfg := func(t *testing.T) {
+		t.Helper()
+		dir := t.TempDir()
+		orig, _ := os.Getwd()
+		os.Chdir(dir)
+		t.Cleanup(func() { os.Chdir(orig) })
+		if err := os.WriteFile(".jokarc.yaml", []byte(cfgYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("no profile returns the base config", func(t *testing.T) {
+		writeCfg(t)
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Entities != "db/entities" {
+			t.Errorf("expected base entities, got %q", cfg.Entities)
+		}
+		if cfg.Connection == nil || cfg.Connection.Source != "env" {
+			t.Errorf("expected base env connection, got %+v", cfg.Connection)
+		}
+		if cfg.Profiles == nil {
+			t.Error("expected base config to retain profiles map")
+		}
+	})
+
+	t.Run("profile overlays connection and inherits base fields", func(t *testing.T) {
+		writeCfg(t)
+		cfg, err := Load("dev-remote")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// inherited from base
+		if cfg.Migrations != "db/migrations" {
+			t.Errorf("expected inherited migrations, got %q", cfg.Migrations)
+		}
+		// overridden by profile
+		if cfg.Entities != "db/entities-dev" {
+			t.Errorf("expected overridden entities, got %q", cfg.Entities)
+		}
+		if cfg.Connection == nil || cfg.Connection.Source != "aws_secrets_manager" {
+			t.Fatalf("expected aws connection, got %+v", cfg.Connection)
+		}
+		if cfg.Connection.Secret == nil || cfg.Connection.Secret.PasswordKey != "mysql_root_password" {
+			t.Errorf("unexpected secret config: %+v", cfg.Connection.Secret)
+		}
+		if cfg.Profiles != nil {
+			t.Error("resolved profile config should not carry nested profiles")
+		}
+	})
+
+	t.Run("unknown profile errors", func(t *testing.T) {
+		writeCfg(t)
+		if _, err := Load("nope"); err == nil {
+			t.Fatal("expected error for unknown profile")
 		}
 	})
 }
