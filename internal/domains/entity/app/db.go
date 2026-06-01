@@ -73,6 +73,19 @@ type DBAdapter interface {
 	// column (e.g. "id") so the adapter can retrieve it portably.
 	InsertRow(ctx context.Context, table string, columns map[string]any, pkColumn string) (int64, error)
 
+	// UpdateRow updates a single existing row in the given table, matched by
+	// pkColumn = pkValue, setting every column in the columns map (the
+	// pkColumn itself is never written). Used by entity sync to propagate
+	// field-level changes to [modified] files without deleting the row.
+	UpdateRow(ctx context.Context, table, pkColumn string, pkValue int64, columns map[string]any) error
+
+	// GetRow reads the given columns from a single row, matched by
+	// pkColumn = pkValue, and returns them as a column→value map. Used by the
+	// sync preview to show the "before" side of an update. Byte-slice values
+	// are converted to strings for comparison. Returns an error if the row
+	// does not exist.
+	GetRow(ctx context.Context, table string, columns []string, pkColumn string, pkValue int64) (map[string]any, error)
+
 	// LookupValue queries a single value from an existing table row. Used by
 	// {{ lookup|table,return_col,where_col=value }} template expressions to
 	// resolve foreign keys against data seeded outside the entity file.

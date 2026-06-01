@@ -43,6 +43,57 @@ func resolveColumns(ctx context.Context, columns map[string]any, refMap map[stri
 	return resolved, nil
 }
 
+// templateExpr returns the inner expression of a {{ ... }} template and true if
+// the value is a string wrapped in template delimiters. Otherwise it returns
+// false (plain value or non-string).
+func templateExpr(v any) (string, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, "{{") || !strings.HasSuffix(trimmed, "}}") {
+		return "", false
+	}
+
+	return strings.TrimSpace(trimmed[2 : len(trimmed)-2]), true
+}
+
+// isNonDeterministicTemplate reports whether a raw column value resolves to a
+// different result on every evaluation (argon2id uses a random salt; now is the
+// current time). A before/after diff of these would always show a spurious
+// change, so the planner labels them "regenerated" instead.
+func isNonDeterministicTemplate(v any) bool {
+	expr, ok := templateExpr(v)
+	if !ok {
+		return false
+	}
+	return expr == "now" || strings.HasPrefix(expr, "argon2id|")
+}
+
+// refTemplate returns the referenced handle and true if the raw value is a
+// {{ <ref>.id }} expression (a reference to another entity's auto-generated PK,
+// not known until that row is inserted).
+func refTemplate(v any) (string, bool) {
+	expr, ok := templateExpr(v)
+	if !ok {
+		return "", false
+	}
+	if expr == "now" {
+		return "", false
+	}
+	for _, fn := range []string{"argon2id|", "sha256|", "lookup|"} {
+		if strings.HasPrefix(expr, fn) {
+			return "", false
+		}
+	}
+	if strings.HasSuffix(expr, ".id") {
+		return strings.TrimSuffix(expr, ".id"), true
+	}
+	return "", false
+}
+
 // resolveValue checks whether a string is a template expression and resolves
 // it. Non-template strings are returned as-is.
 func resolveValue(ctx context.Context, s string, refMap map[string]int64, now string, db DBAdapter) (any, error) {

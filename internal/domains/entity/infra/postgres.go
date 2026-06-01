@@ -131,6 +131,84 @@ func (p *PostgresDBAdapter) InsertRow(ctx context.Context, table string, columns
 	return id, nil
 }
 
+// UpdateRow updates a single existing row, matched by pkColumn = pkValue,
+// setting every column in the map except the primary key column itself.
+func (p *PostgresDBAdapter) UpdateRow(ctx context.Context, table, pkColumn string, pkValue int64, columns map[string]any) error {
+	sets := make([]string, 0, len(columns))
+	args := make([]any, 0, len(columns)+1)
+
+	i := 1
+	for k, v := range columns {
+		if k == pkColumn {
+			continue
+		}
+		sets = append(sets, fmt.Sprintf(`"%s" = $%d`, k, i))
+		args = append(args, v)
+		i++
+	}
+
+	if len(sets) == 0 {
+		return nil // nothing to update beyond the primary key
+	}
+
+	args = append(args, pkValue)
+
+	query := fmt.Sprintf(`UPDATE "%s" SET %s WHERE "%s" = $%d`,
+		table,
+		strings.Join(sets, ", "),
+		pkColumn,
+		i,
+	)
+
+	if _, err := p.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("updating %s: %w", table, err)
+	}
+
+	return nil
+}
+
+// GetRow reads the given columns from a single row matched by pkColumn =
+// pkValue. Byte-slice values are converted to strings so callers can compare
+// them against resolved values.
+func (p *PostgresDBAdapter) GetRow(ctx context.Context, table string, columns []string, pkColumn string, pkValue int64) (map[string]any, error) {
+	result := make(map[string]any, len(columns))
+	if len(columns) == 0 {
+		return result, nil
+	}
+
+	quoted := make([]string, len(columns))
+	for i, c := range columns {
+		quoted[i] = fmt.Sprintf(`"%s"`, c)
+	}
+
+	query := fmt.Sprintf(`SELECT %s FROM "%s" WHERE "%s" = $1 LIMIT 1`,
+		strings.Join(quoted, ", "), table, pkColumn)
+
+	dest := make([]any, len(columns))
+	scan := make([]any, len(columns))
+	for i := range dest {
+		scan[i] = &dest[i]
+	}
+
+	err := p.db.QueryRowContext(ctx, query, pkValue).Scan(scan...)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("reading %s row %s=%d: row not found", table, pkColumn, pkValue)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s row %s=%d: %w", table, pkColumn, pkValue, err)
+	}
+
+	for i, c := range columns {
+		if b, ok := dest[i].([]byte); ok {
+			result[c] = string(b)
+		} else {
+			result[c] = dest[i]
+		}
+	}
+
+	return result, nil
+}
+
 // LookupValue queries a single value from an existing table row. Returns
 // ErrLookupNotFound if no matching row exists.
 func (p *PostgresDBAdapter) LookupValue(ctx context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {

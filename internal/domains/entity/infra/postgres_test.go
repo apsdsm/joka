@@ -769,3 +769,86 @@ func TestPostgresLookupValue(t *testing.T) {
 		}
 	})
 }
+
+func TestUpdateRowPostgres(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	db, err := testlib.GetTestPostgresDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+
+	t.Run("it updates the given columns and leaves the primary key untouched", func(t *testing.T) {
+		tableName := "test_entity_update_pg"
+		createPostgresTestTable(t, db, tableName)
+
+		adapter := infra.NewPostgresDBAdapter(db)
+		ctx := context.Background()
+
+		id, err := adapter.InsertRow(ctx, tableName, map[string]any{
+			"name":  "Before",
+			"email": "before@test.com",
+		}, "id")
+		if err != nil {
+			t.Fatalf("InsertRow: %v", err)
+		}
+
+		// Include the pk column in the update map; it must be ignored.
+		err = adapter.UpdateRow(ctx, tableName, "id", id, map[string]any{
+			"id":    int64(999),
+			"name":  "After",
+			"email": "after@test.com",
+		})
+		if err != nil {
+			t.Fatalf("UpdateRow: %v", err)
+		}
+
+		var name, email string
+		err = db.QueryRowContext(ctx, `SELECT name, email FROM "`+tableName+`" WHERE id = $1`, id).Scan(&name, &email)
+		if err != nil {
+			t.Fatalf("querying row (pk should be unchanged): %v", err)
+		}
+
+		if name != "After" || email != "after@test.com" {
+			t.Errorf("expected updated values, got name=%q email=%q", name, email)
+		}
+	})
+}
+
+func TestGetRowPostgres(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	db, err := testlib.GetTestPostgresDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+
+	t.Run("it reads the requested columns as comparable values", func(t *testing.T) {
+		tableName := "test_entity_getrow_pg"
+		createPostgresTestTable(t, db, tableName)
+
+		adapter := infra.NewPostgresDBAdapter(db)
+		ctx := context.Background()
+
+		id, err := adapter.InsertRow(ctx, tableName, map[string]any{"name": "Alice", "email": "alice@test.com"}, "id")
+		if err != nil {
+			t.Fatalf("InsertRow: %v", err)
+		}
+
+		got, err := adapter.GetRow(ctx, tableName, []string{"name", "email"}, "id", id)
+		if err != nil {
+			t.Fatalf("GetRow: %v", err)
+		}
+
+		if got["name"] != "Alice" {
+			t.Errorf("expected name 'Alice', got %#v", got["name"])
+		}
+		if got["email"] != "alice@test.com" {
+			t.Errorf("expected email string, got %#v", got["email"])
+		}
+	})
+}

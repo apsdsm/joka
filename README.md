@@ -279,7 +279,16 @@ Syncs template/seed data from files to database tables based on the `tables` con
 
 ### `joka entity sync`
 
-Syncs entity YAML files to the database. Inserts entity graphs depth-first (parents before children), resolving template expressions along the way. Runs in a transaction with advisory locking. Already-synced files are skipped.
+Syncs entity YAML files to the database. New files have their entity graph inserted depth-first (parents before children), resolving template expressions along the way. Files that changed since the last sync (`[modified]`) are reconciled **in place**: each entity is updated by primary key against the tracked row at the same depth-first position — existing PKs are preserved (no delete, so no FK conflict) and entities without an `_id` are handled fine. Unchanged files are skipped. Runs in a transaction with advisory locking.
+
+If a modified file changed structurally (a different number of entities than tracked, an entity's table changed, or an `_id` that disagrees with the tracked row at that position), sync refuses to guess and recommends `entity reimport` instead.
+
+Before applying, sync prints a plan — new files show the rows to be inserted, and modified files show a per-column before/after diff. Use `--dry-run` to print the plan and exit without changing anything (and without taking the advisory lock). Non-deterministic columns like `{{ argon2id|… }}` and `{{ now }}` are shown as `(regenerated)`. With `--output json`, the plan is included as a `plan` object.
+
+```bash
+# see exactly what a sync would change, without applying
+joka entity sync --dry-run
+```
 
 ### `joka entity status`
 

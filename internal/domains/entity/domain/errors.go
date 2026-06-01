@@ -35,4 +35,11 @@ var (
 	// entity without an _id handle, which is required to determine whether
 	// it has already been tracked.
 	ErrEntityMissingRefID = errors.New("all entities must have _id for entity update")
+
+	// ErrStructuralChange is returned when a modified entity file cannot be
+	// updated in place because its structure changed relative to what was
+	// tracked (an entity was removed, its table changed, or an entity lacks
+	// an _id needed to match a tracked row). The caller should fall back to
+	// 'entity reimport'.
+	ErrStructuralChange = errors.New("entity file changed structurally; use 'entity reimport'")
 )

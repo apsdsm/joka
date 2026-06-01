@@ -19,6 +19,8 @@ type mockDBAdapter struct {
 	entityHashes    map[string]string
 	deletedRows     []mockDeleteCall
 	deletedTracking []string
+	updatedRows     []mockUpdateCall
+	currentRows     map[string]map[string]any // key: "table|pkValue" -> column values
 }
 
 // mockInsertCall records the arguments passed to InsertRow.
@@ -33,12 +35,21 @@ type mockDeleteCall struct {
 	PKValue  int64
 }
 
+// mockUpdateCall records the arguments passed to UpdateRow.
+type mockUpdateCall struct {
+	Table    string
+	PKColumn string
+	PKValue  int64
+	Columns  map[string]any
+}
+
 func newMockDBAdapter() *mockDBAdapter {
 	return &mockDBAdapter{
 		nextID:       1,
 		synced:       make(map[string]bool),
 		lookupData:   make(map[string]any),
 		entityHashes: make(map[string]string),
+		currentRows:  make(map[string]map[string]any),
 	}
 }
 
@@ -125,6 +136,20 @@ func (m *mockDBAdapter) InsertRow(_ context.Context, table string, columns map[s
 	id := m.nextID
 	m.nextID++
 	return id, nil
+}
+
+func (m *mockDBAdapter) UpdateRow(_ context.Context, table, pkColumn string, pkValue int64, columns map[string]any) error {
+	m.updatedRows = append(m.updatedRows, mockUpdateCall{Table: table, PKColumn: pkColumn, PKValue: pkValue, Columns: columns})
+	return nil
+}
+
+func (m *mockDBAdapter) GetRow(_ context.Context, table string, columns []string, _ string, pkValue int64) (map[string]any, error) {
+	row := m.currentRows[fmt.Sprintf("%s|%d", table, pkValue)]
+	result := make(map[string]any, len(columns))
+	for _, c := range columns {
+		result[c] = row[c]
+	}
+	return result, nil
 }
 
 func (m *mockDBAdapter) LookupValue(_ context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {

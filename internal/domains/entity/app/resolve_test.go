@@ -31,6 +31,8 @@ func (l *lookupMock) DeleteTrackedRows(context.Context, string) error           
 func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error                   { panic("unused") }
 func (l *lookupMock) DeleteEntityRecord(context.Context, string) error                         { panic("unused") }
 func (l *lookupMock) InsertRow(context.Context, string, map[string]any, string) (int64, error) { panic("unused") }
+func (l *lookupMock) UpdateRow(context.Context, string, string, int64, map[string]any) error { panic("unused") }
+func (l *lookupMock) GetRow(context.Context, string, []string, string, int64) (map[string]any, error) { panic("unused") }
 func (l *lookupMock) LookupValue(_ context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {
 	key := fmt.Sprintf("%s.%s.%s=%v", table, returnCol, whereCol, whereVal)
 

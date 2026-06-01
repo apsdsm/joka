@@ -25,12 +25,15 @@ type RunEntitySyncCommand struct {
 	// SkipLock skips advisory lock acquisition. Used when an outer command
 	// (e.g. `joka reset`) already holds the lock.
 	SkipLock bool
+	// DryRun computes and prints the plan (inserts + before/after updates)
+	// without applying anything or acquiring the advisory lock.
+	DryRun bool
 }
 
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	if !r.SkipLock {
+	if !r.SkipLock && !r.DryRun {
 		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
 
 		if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
@@ -83,10 +86,19 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	var pending []*domain.EntityFile
+	var pending []*domain.EntityFile  // new files to insert
+	var modified []*domain.EntityFile // tracked files whose content changed
 
 	for _, rel := range relPaths {
 		fullPath := filepath.Join(r.EntitiesDir, rel)
+
+		hash, err := app.HashFileContent(fullPath)
+		if err != nil {
+			if jsonOut {
+				return shared.PrintErrorJSON(err)
+			}
+			return err
+		}
 
 		already, err := dbAdapter.IsEntitySynced(ctx, rel)
 		if err != nil {
@@ -97,6 +109,32 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		}
 
 		if already {
+			dbHash, err := dbAdapter.GetEntityHash(ctx, rel)
+			if err != nil {
+				if jsonOut {
+					return shared.PrintErrorJSON(err)
+				}
+				return err
+			}
+
+			// A stored hash that matches means the file is unchanged. An
+			// empty stored hash (synced before hashing existed) is treated
+			// as modified, matching `entity status`; the update path then
+			// backfills the hash.
+			if dbHash != "" && dbHash == hash {
+				continue
+			}
+
+			file, err := app.ParseEntityAction{Path: fullPath}.Execute()
+			if err != nil {
+				if jsonOut {
+					return shared.PrintErrorJSON(err)
+				}
+				return err
+			}
+			file.Path = rel
+			file.ContentHash = hash
+			modified = append(modified, file)
 			continue
 		}
 
@@ -109,37 +147,44 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		}
 
 		file.Path = rel
-
-		hash, err := app.HashFileContent(fullPath)
-		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
-		}
 		file.ContentHash = hash
 
 		pending = append(pending, file)
 	}
 
-	if len(pending) == 0 {
+	if len(pending) == 0 && len(modified) == 0 {
 		if jsonOut {
-			shared.PrintJSON(map[string]any{"status": "ok", "synced": []string{}, "message": "all entity files already synced"})
+			shared.PrintJSON(map[string]any{"status": "ok", "synced": []string{}, "updated": []string{}, "message": "all entity files already synced"})
 			return nil
 		}
 		color.Green("All entity files already synced.")
 		return nil
 	}
 
-	if !jsonOut {
-		fmt.Println()
-		color.Set(color.Bold)
-		fmt.Println("Entity files to sync:")
-		color.Unset()
-
-		for _, file := range pending {
-			color.Cyan("  %s (%d entities)", file.Path, len(file.Entities))
+	plan, err := app.PlanSyncAction{
+		DB:       dbAdapter,
+		Files:    pending,
+		Modified: modified,
+	}.Execute(ctx)
+	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
 		}
+		return err
+	}
+
+	if r.DryRun {
+		if jsonOut {
+			shared.PrintJSON(map[string]any{"status": "ok", "dry_run": true, "plan": planJSON(plan)})
+			return nil
+		}
+		printPlan(plan)
+		color.Yellow("\nDry run — no changes applied.")
+		return nil
+	}
+
+	if !jsonOut {
+		printPlan(plan)
 
 		fmt.Println()
 
@@ -161,9 +206,10 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	txAdapter := newEntityTxAdapter(r.Driver, tx, r.DB)
 
-	synced, err := app.SyncEntitiesAction{
-		DB:    txAdapter,
-		Files: pending,
+	result, err := app.SyncEntitiesAction{
+		DB:       txAdapter,
+		Files:    pending,
+		Modified: modified,
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
@@ -180,20 +226,137 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
+	syncedPaths := result.Synced
+	if syncedPaths == nil {
+		syncedPaths = []string{}
+	}
+	updatedPaths := result.Updated
+	if updatedPaths == nil {
+		updatedPaths = []string{}
+	}
+
 	if jsonOut {
-		shared.PrintJSON(map[string]any{"status": "ok", "synced": synced})
+		shared.PrintJSON(map[string]any{"status": "ok", "synced": syncedPaths, "updated": updatedPaths, "plan": planJSON(plan)})
 		return nil
 	}
 
 	fmt.Println()
 
-	for _, path := range synced {
+	for _, path := range syncedPaths {
 		color.Green("  Synced: %s", path)
 	}
 
-	color.Green("\nEntity sync complete. %d file(s) synced.", len(synced))
+	for _, path := range updatedPaths {
+		color.Green("  Updated: %s", path)
+	}
+
+	color.Green("\nEntity sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
 
 	return nil
+}
+
+// printPlan renders a SyncPlan as a human-readable preview: new rows to insert
+// and per-column before/after diffs for modified files.
+func printPlan(plan *app.SyncPlan) {
+	red := color.New(color.FgRed)
+	green := color.New(color.FgGreen)
+
+	hasInserts := false
+	for _, f := range plan.Inserts {
+		if len(f.Rows) > 0 {
+			hasInserts = true
+			break
+		}
+	}
+
+	if hasInserts {
+		fmt.Println()
+		color.Set(color.Bold)
+		fmt.Println("Entity files to sync (new):")
+		color.Unset()
+
+		for _, f := range plan.Inserts {
+			color.Cyan("  %s", f.Path)
+			for _, row := range f.Rows {
+				label := row.Table
+				if row.RefID != "" {
+					label = fmt.Sprintf("%s (_id %s)", row.Table, row.RefID)
+				}
+				green.Printf("    + %s\n", label)
+				for _, v := range row.Values {
+					if v.Note != "" {
+						fmt.Printf("        %s: (%s)\n", v.Column, v.Note)
+					} else {
+						fmt.Printf("        %s: %s\n", v.Column, v.Value)
+					}
+				}
+			}
+		}
+	}
+
+	for _, f := range plan.Updates {
+		fmt.Println()
+		color.Set(color.Bold)
+		fmt.Println("Entity files to update (modified):")
+		color.Unset()
+
+		color.Cyan("  %s", f.Path)
+		if len(f.Rows) == 0 {
+			fmt.Println("    (no field-level changes; sync will refresh the tracking hash only)")
+			continue
+		}
+
+		for _, row := range f.Rows {
+			color.Set(color.Bold)
+			fmt.Printf("    ~ %s (%s=%d)\n", row.Table, row.PKColumn, row.PKValue)
+			color.Unset()
+
+			for _, c := range row.Changes {
+				if c.Regenerated {
+					fmt.Printf("        %s: (regenerated)\n", c.Column)
+					continue
+				}
+				fmt.Printf("        %s:\n", c.Column)
+				red.Printf("          - %s\n", c.Before)
+				green.Printf("          + %s\n", c.After)
+			}
+		}
+	}
+}
+
+// planJSON converts a SyncPlan into plain maps/slices for JSON output.
+func planJSON(plan *app.SyncPlan) map[string]any {
+	inserts := make([]map[string]any, 0, len(plan.Inserts))
+	for _, f := range plan.Inserts {
+		rows := make([]map[string]any, 0, len(f.Rows))
+		for _, row := range f.Rows {
+			values := make([]map[string]any, 0, len(row.Values))
+			for _, v := range row.Values {
+				values = append(values, map[string]any{"column": v.Column, "value": v.Value, "note": v.Note})
+			}
+			rows = append(rows, map[string]any{"table": row.Table, "ref_id": row.RefID, "values": values})
+		}
+		inserts = append(inserts, map[string]any{"file": f.Path, "rows": rows})
+	}
+
+	updates := make([]map[string]any, 0, len(plan.Updates))
+	for _, f := range plan.Updates {
+		rows := make([]map[string]any, 0, len(f.Rows))
+		for _, row := range f.Rows {
+			changes := make([]map[string]any, 0, len(row.Changes))
+			for _, c := range row.Changes {
+				changes = append(changes, map[string]any{
+					"column": c.Column, "before": c.Before, "after": c.After, "regenerated": c.Regenerated,
+				})
+			}
+			rows = append(rows, map[string]any{
+				"table": row.Table, "pk_column": row.PKColumn, "pk_value": row.PKValue, "changes": changes,
+			})
+		}
+		updates = append(updates, map[string]any{"file": f.Path, "rows": rows})
+	}
+
+	return map[string]any{"inserts": inserts, "updates": updates}
 }
 
 func newEntityAdapter(driver jokadb.Driver, conn *sql.DB) app.DBAdapter {

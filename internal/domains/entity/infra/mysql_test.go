@@ -784,3 +784,125 @@ func errorIs(err, target error) bool {
 	}
 	return false
 }
+
+func TestUpdateRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	db, err := testlib.GetTestDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+
+	t.Run("it updates the given columns and leaves the primary key untouched", func(t *testing.T) {
+		tableName := "test_entity_update"
+		createTestTable(t, db, tableName)
+
+		adapter := infra.NewMySQLDBAdapter(db)
+		ctx := context.Background()
+
+		id, err := adapter.InsertRow(ctx, tableName, map[string]any{
+			"name":  "Before",
+			"email": "before@test.com",
+		}, "id")
+		if err != nil {
+			t.Fatalf("InsertRow: %v", err)
+		}
+
+		// Include the pk column in the update map; it must be ignored.
+		err = adapter.UpdateRow(ctx, tableName, "id", id, map[string]any{
+			"id":    int64(999),
+			"name":  "After",
+			"email": "after@test.com",
+		})
+		if err != nil {
+			t.Fatalf("UpdateRow: %v", err)
+		}
+
+		var name, email string
+		err = db.QueryRowContext(ctx, "SELECT name, email FROM `"+tableName+"` WHERE id = ?", id).Scan(&name, &email)
+		if err != nil {
+			t.Fatalf("querying row (pk should be unchanged): %v", err)
+		}
+
+		if name != "After" || email != "after@test.com" {
+			t.Errorf("expected updated values, got name=%q email=%q", name, email)
+		}
+	})
+
+	t.Run("it is a no-op when only the primary key is supplied", func(t *testing.T) {
+		tableName := "test_entity_update_noop"
+		createTestTable(t, db, tableName)
+
+		adapter := infra.NewMySQLDBAdapter(db)
+		ctx := context.Background()
+
+		id, err := adapter.InsertRow(ctx, tableName, map[string]any{"name": "Same", "email": "same@test.com"}, "id")
+		if err != nil {
+			t.Fatalf("InsertRow: %v", err)
+		}
+
+		if err := adapter.UpdateRow(ctx, tableName, "id", id, map[string]any{"id": id}); err != nil {
+			t.Fatalf("UpdateRow no-op: %v", err)
+		}
+
+		var name string
+		if err := db.QueryRowContext(ctx, "SELECT name FROM `"+tableName+"` WHERE id = ?", id).Scan(&name); err != nil {
+			t.Fatalf("querying row: %v", err)
+		}
+		if name != "Same" {
+			t.Errorf("expected unchanged 'Same', got %q", name)
+		}
+	})
+}
+
+func TestGetRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	db, err := testlib.GetTestDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+
+	t.Run("it reads the requested columns as comparable values", func(t *testing.T) {
+		tableName := "test_entity_getrow"
+		createTestTable(t, db, tableName)
+
+		adapter := infra.NewMySQLDBAdapter(db)
+		ctx := context.Background()
+
+		id, err := adapter.InsertRow(ctx, tableName, map[string]any{"name": "Alice", "email": "alice@test.com"}, "id")
+		if err != nil {
+			t.Fatalf("InsertRow: %v", err)
+		}
+
+		got, err := adapter.GetRow(ctx, tableName, []string{"name", "email"}, "id", id)
+		if err != nil {
+			t.Fatalf("GetRow: %v", err)
+		}
+
+		// MySQL returns text columns as []byte; GetRow must convert to string.
+		if got["name"] != "Alice" {
+			t.Errorf("expected name 'Alice' (string), got %#v", got["name"])
+		}
+		if got["email"] != "alice@test.com" {
+			t.Errorf("expected email string, got %#v", got["email"])
+		}
+	})
+
+	t.Run("it returns an error when the row does not exist", func(t *testing.T) {
+		tableName := "test_entity_getrow_missing"
+		createTestTable(t, db, tableName)
+
+		adapter := infra.NewMySQLDBAdapter(db)
+		ctx := context.Background()
+
+		_, err := adapter.GetRow(ctx, tableName, []string{"name"}, "id", 999)
+		if err == nil {
+			t.Fatal("expected error for missing row, got nil")
+		}
+	})
+}

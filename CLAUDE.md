@@ -229,9 +229,23 @@ entities:
 - Each entity's auto-generated PK is stored in a reference map under its `_id` handle
 - Children can reference any previously inserted entity via `{{ handle.id }}`
 - All inserts within a file run in a single transaction
-- Files are tracked in `joka_entities`; already-synced files are skipped on re-run
+- Files are tracked in `joka_entities`; unchanged files are skipped on re-run
 - Each inserted row is tracked in `joka_entity_rows` with table, PK, and insertion order
 - Duplicate `_id` handles within a single file are rejected with an error
+
+**Sync of modified files** (`joka entity sync`):
+- New files (not yet tracked) have their entity graph inserted.
+- Files whose content changed since the last sync (`[modified]` per `entity status`) are reconciled **in place**: the file's entity graph is flattened depth-first (the same order rows were inserted and recorded in `joka_entity_rows`) and each entity is `UPDATE`d against the tracked row at the same position, by primary key. This is non-destructive — existing PKs are preserved, so external rows that reference them by id stay valid (no delete, so no FK conflict). Entities without an `_id` are handled fine; matching is positional, not by `_id`.
+- Unchanged files (stored hash matches) are skipped. A tracked file with an empty stored hash (synced before content hashing existed) is treated as modified, and the update backfills the hash.
+- The update path rewrites **all** columns of each matched row (the PK column itself is never written), so non-deterministic expressions like `{{ argon2id|… }}` produce a fresh value on every sync of a modified file.
+- Sync refuses to update a modified file and recommends `entity reimport` (returning `ErrStructuralChange`) when it detects a structural change: a different number of entities than tracked (one was added or removed), an entity whose table no longer matches the tracked row at that position, or an `_id` that disagrees with the tracked row at that position (reorder/rename). Use `entity reimport` (full re-insert) or, for additive-only changes where every entity has an `_id`, `entity update`.
+
+**Preview / dry-run** (`joka entity sync --dry-run`):
+- Prints the plan without applying anything or acquiring the advisory lock: new files show the rows/columns that would be inserted; modified files show a per-column before/after diff (the "before" is read live from the DB).
+- The same plan is printed before the normal confirmation prompt, so an interactive sync always shows exactly what will change before you confirm.
+- Non-deterministic template columns (`{{ argon2id|… }}`, `{{ now }}`) are shown as `(regenerated)` rather than a misleading hash-vs-hash diff; insert values that depend on a not-yet-assigned PK show `(ref <handle>)`.
+- `--output json` includes a `plan` object (and `dry_run: true` for `--dry-run`).
+- Value comparison normalizes driver types to strings; a column stored as a SQL decimal may show a spurious diff against a YAML float that formats differently (e.g. `3.50` vs `3.5`).
 
 **Entity status** (`joka entity status`):
 - Compares entity files on disk with the tracking table

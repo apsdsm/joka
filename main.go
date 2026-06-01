@@ -20,7 +20,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.9.0"
+const version = "0.10.0"
 
 func main() {
 	var (
@@ -261,16 +261,33 @@ func main() {
 	entitySyncCmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync entity YAML files to the database",
+		Long: `Sync entity YAML files to the database.
+
+New files have their entity graph inserted. Files whose content changed since
+the last sync (shown as [modified] by 'entity status') are reconciled in place:
+each entity is updated by primary key against the tracked row at the same
+depth-first position, so existing PKs are preserved (no delete, no FK conflict).
+Unchanged files are skipped.
+
+If a modified file changed structurally — a different number of entities than
+tracked, an entity's table changed, or an _id that disagrees with the tracked
+row at that position — sync refuses to guess and recommends 'entity reimport'.
+
+Use --dry-run to print the planned inserts and before/after field changes
+without applying anything.`,
 		RunE: func(c *cobra.Command, _ []string) error {
+			dryRun, _ := c.Flags().GetBool("dry-run")
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
 				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
+				DryRun:       dryRun,
 			}.Execute(c.Context())
 		},
 	}
+	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
 
 	entityStatusCmd := &cobra.Command{
 		Use:   "status",
