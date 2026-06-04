@@ -283,7 +283,7 @@ Syncs entity YAML files to the database. New files have their entity graph inser
 
 If a modified file changed structurally (a different number of entities than tracked, an entity's table changed, or an `_id` that disagrees with the tracked row at that position), sync refuses to guess and recommends `entity reimport` instead.
 
-Before applying, sync prints a plan — new files show the rows to be inserted, and modified files show a per-column before/after diff. Use `--dry-run` to print the plan and exit without changing anything (and without taking the advisory lock). Non-deterministic columns like `{{ argon2id|… }}` and `{{ now }}` are shown as `(regenerated)`. With `--output json`, the plan is included as a `plan` object.
+Before applying, sync prints a plan — new files show the rows to be inserted, and modified files show a per-column before/after diff. Use `--dry-run` to print the plan and exit without changing anything (and without taking the advisory lock). Non-deterministic columns like `{{ argon2id|… }}` and `{{ now }}` are shown as `(regenerated)`. A `{{ lookup|… }}` whose target row doesn't exist yet (e.g. it's inserted by another file in the same sync) is shown as `(lookup, resolved at apply time)` rather than failing the plan. With `--output json`, the plan is included as a `plan` object.
 
 ```bash
 # see exactly what a sync would change, without applying

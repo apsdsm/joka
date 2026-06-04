@@ -156,7 +156,9 @@ func (m *mockDBAdapter) LookupValue(_ context.Context, table, returnCol, whereCo
 	key := fmt.Sprintf("%s.%s.%s=%v", table, returnCol, whereCol, whereVal)
 	val, ok := m.lookupData[key]
 	if !ok {
-		return nil, fmt.Errorf("lookup returned no rows: %s.%s where %s=%v", table, returnCol, whereCol, whereVal)
+		// Wrap the same sentinel as the real adapters so errors.Is checks
+		// behave identically in tests.
+		return nil, fmt.Errorf("%w: %s.%s where %s=%v", domain.ErrLookupNotFound, table, returnCol, whereCol, whereVal)
 	}
 	return val, nil
 }

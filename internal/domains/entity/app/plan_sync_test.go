@@ -146,6 +146,133 @@ func TestPlanSyncAction(t *testing.T) {
 		}
 	})
 
+	t.Run("it shows the concrete value for lookups that resolve at plan time", func(t *testing.T) {
+		db := newMockDBAdapter()
+		db.lookupData["clients.id.xid=clnt_1"] = int64(7)
+
+		files := []*domain.EntityFile{
+			{
+				Path: "person.yaml",
+				Entities: []domain.Entity{
+					{Table: "identities", RefID: "i1", PKColumn: "id", Columns: map[string]any{
+						"provisioned_by_client_id": "{{ lookup|clients,id,xid=clnt_1 }}",
+					}},
+				},
+			},
+		}
+
+		plan, err := (PlanSyncAction{DB: db, Files: files}).Execute(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		v := plan.Inserts[0].Rows[0].Values[0]
+		if v.Value != "7" || v.Note != "" {
+			t.Errorf("expected resolved value 7 with no note, got %+v", v)
+		}
+	})
+
+	t.Run("it defers lookups whose target row does not exist yet instead of failing the plan", func(t *testing.T) {
+		// The plan runs before any inserts, so a new file may look up a row
+		// that another new file in the same sync is about to insert (e.g. a
+		// person referencing a client on a fresh database). That must not
+		// abort the sync — apply resolves the lookup after inserts.
+		db := newMockDBAdapter()
+
+		files := []*domain.EntityFile{
+			{
+				Path: "person.yaml",
+				Entities: []domain.Entity{
+					{Table: "identities", RefID: "i1", PKColumn: "id", Columns: map[string]any{
+						"provisioned_by_client_id": "{{ lookup|clients,id,xid=clnt_1 }}",
+						"name":                     "Sysadmin",
+					}},
+				},
+			},
+		}
+
+		plan, err := (PlanSyncAction{DB: db, Files: files}).Execute(context.Background())
+		if err != nil {
+			t.Fatalf("expected plan to defer unresolved lookup, got error: %v", err)
+		}
+
+		noteFor := func(row RowInsertPlan, col string) (ColumnValue, bool) {
+			for _, v := range row.Values {
+				if v.Column == col {
+					return v, true
+				}
+			}
+			return ColumnValue{}, false
+		}
+
+		row := plan.Inserts[0].Rows[0]
+		if v, _ := noteFor(row, "provisioned_by_client_id"); v.Note != "lookup, resolved at apply time" {
+			t.Errorf("expected deferred lookup note, got %+v", v)
+		}
+		if v, _ := noteFor(row, "name"); v.Value != "Sysadmin" {
+			t.Errorf("expected plain value untouched, got %+v", v)
+		}
+	})
+
+	t.Run("it defers unresolved lookups in modified files as a change applied at apply time", func(t *testing.T) {
+		// Same scenario as inserts, but for a tracked file: its lookup may
+		// target a row inserted by a new file in this same sync (inserts
+		// apply before updates).
+		db := newMockDBAdapter()
+		db.synced["person.yaml"] = true
+		db.entityRows = []domain.TrackedRow{
+			{EntityFile: "person.yaml", TableName: "identities", RowPK: 2, PKColumn: "id", RefID: "i1", InsertionOrder: 0},
+		}
+		db.currentRows["identities|2"] = map[string]any{
+			"provisioned_by_client_id": "5",
+		}
+
+		modified := []*domain.EntityFile{
+			{
+				Path: "person.yaml",
+				Entities: []domain.Entity{
+					{Table: "identities", RefID: "i1", PKColumn: "id", Columns: map[string]any{
+						"provisioned_by_client_id": "{{ lookup|clients,id,xid=clnt_1 }}",
+					}},
+				},
+			},
+		}
+
+		plan, err := (PlanSyncAction{DB: db, Modified: modified}).Execute(context.Background())
+		if err != nil {
+			t.Fatalf("expected plan to defer unresolved lookup, got error: %v", err)
+		}
+
+		row := plan.Updates[0].Rows[0]
+		if len(row.Changes) != 1 {
+			t.Fatalf("expected 1 deferred change, got %+v", row.Changes)
+		}
+		c := row.Changes[0]
+		if c.Column != "provisioned_by_client_id" || !c.Deferred || c.Before != "5" {
+			t.Errorf("expected deferred change with before value, got %+v", c)
+		}
+	})
+
+	t.Run("it still fails the plan for invalid templates", func(t *testing.T) {
+		db := newMockDBAdapter()
+
+		files := []*domain.EntityFile{
+			{
+				Path: "bad.yaml",
+				Entities: []domain.Entity{
+					{Table: "users", RefID: "u1", PKColumn: "id", Columns: map[string]any{
+						"name": "{{ bogus|nope }}",
+					}},
+				},
+			},
+		}
+
+		_, err := (PlanSyncAction{DB: db, Files: files}).Execute(context.Background())
+		if !errors.Is(err, domain.ErrInvalidTemplate) {
+			t.Fatalf("expected ErrInvalidTemplate, got %v", err)
+		}
+	})
+
 	t.Run("it propagates structural-change errors from alignment", func(t *testing.T) {
 		db := newMockDBAdapter()
 		db.synced["client.yaml"] = true

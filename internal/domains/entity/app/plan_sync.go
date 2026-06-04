@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -32,8 +33,10 @@ type RowInsertPlan struct {
 
 // ColumnValue is a column and the value it would be set to. Note is set for
 // values that cannot be shown concretely at plan time: "generated" for
-// non-deterministic templates (argon2id, now), or "ref <handle>" for a
-// reference to another entity's not-yet-assigned PK.
+// non-deterministic templates (argon2id, now), "ref <handle>" for a
+// reference to another entity's not-yet-assigned PK, or "lookup, resolved at
+// apply time" for a lookup whose target row doesn't exist yet (it may be
+// inserted earlier in the same sync).
 type ColumnValue struct {
 	Column string
 	Value  string
@@ -56,12 +59,16 @@ type RowUpdatePlan struct {
 
 // ColumnChange is a single column whose value would change. When Regenerated is
 // true the value is derived from a non-deterministic template and Before/After
-// are not meaningful (the value is rewritten on every sync).
+// are not meaningful (the value is rewritten on every sync). When Deferred is
+// true the value is a lookup whose target row doesn't exist yet (it may be
+// inserted by this same sync, which applies inserts before updates) and After
+// can only be resolved at apply time.
 type ColumnChange struct {
 	Column      string
 	Before      string
 	After       string
 	Regenerated bool
+	Deferred    bool
 }
 
 // HasChanges reports whether the plan would actually do anything.
@@ -103,6 +110,14 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 					// handled above, so resolution never needs the refMap here.
 					val, err := resolveColumnValue(ctx, raw, nil, now, a.DB)
 					if err != nil {
+						// The plan runs before any inserts, so a lookup may
+						// target a row this same sync is about to insert
+						// (e.g. from another new file). Apply resolves it
+						// after inserts; don't fail the plan over it.
+						if errors.Is(err, domain.ErrLookupNotFound) {
+							cv.Note = "lookup, resolved at apply time"
+							break
+						}
 						return nil, fmt.Errorf("%s: previewing %s.%s: %w", file.Path, e.Table, k, err)
 					}
 					cv.Value = normalizeValue(val)
@@ -149,6 +164,13 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 
 				after, err := resolveColumnValue(ctx, raw, refMap, now, a.DB)
 				if err != nil {
+					// Same as the insert path: the lookup target may be a row
+					// inserted by this sync (inserts apply before updates), so
+					// defer resolution to apply time instead of failing.
+					if errors.Is(err, domain.ErrLookupNotFound) {
+						changes = append(changes, ColumnChange{Column: k, Before: normalizeValue(current[k]), Deferred: true})
+						continue
+					}
 					return nil, fmt.Errorf("%s: previewing %s.%s: %w", file.Path, e.Table, k, err)
 				}
 

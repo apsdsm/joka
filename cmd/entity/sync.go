@@ -316,6 +316,12 @@ func printPlan(plan *app.SyncPlan) {
 					fmt.Printf("        %s: (regenerated)\n", c.Column)
 					continue
 				}
+				if c.Deferred {
+					fmt.Printf("        %s:\n", c.Column)
+					red.Printf("          - %s\n", c.Before)
+					green.Printf("          + (lookup, resolved at apply time)\n")
+					continue
+				}
 				fmt.Printf("        %s:\n", c.Column)
 				red.Printf("          - %s\n", c.Before)
 				green.Printf("          + %s\n", c.After)
@@ -346,7 +352,7 @@ func planJSON(plan *app.SyncPlan) map[string]any {
 			changes := make([]map[string]any, 0, len(row.Changes))
 			for _, c := range row.Changes {
 				changes = append(changes, map[string]any{
-					"column": c.Column, "before": c.Before, "after": c.After, "regenerated": c.Regenerated,
+					"column": c.Column, "before": c.Before, "after": c.After, "regenerated": c.Regenerated, "deferred": c.Deferred,
 				})
 			}
 			rows = append(rows, map[string]any{

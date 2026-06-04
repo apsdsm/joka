@@ -244,6 +244,7 @@ entities:
 - Prints the plan without applying anything or acquiring the advisory lock: new files show the rows/columns that would be inserted; modified files show a per-column before/after diff (the "before" is read live from the DB).
 - The same plan is printed before the normal confirmation prompt, so an interactive sync always shows exactly what will change before you confirm.
 - Non-deterministic template columns (`{{ argon2id|… }}`, `{{ now }}`) are shown as `(regenerated)` rather than a misleading hash-vs-hash diff; insert values that depend on a not-yet-assigned PK show `(ref <handle>)`.
+- A `{{ lookup|… }}` whose target row doesn't exist yet shows `(lookup, resolved at apply time)` instead of failing the plan — the row may be inserted by this same sync (e.g. a person file looking up a client file's row on a fresh database; inserts apply before updates). Lookups that resolve at plan time show the concrete value; other lookup errors still fail the plan. In JSON, deferred update columns carry `"deferred": true`.
 - `--output json` includes a `plan` object (and `dry_run: true` for `--dry-run`).
 - Value comparison normalizes driver types to strings; a column stored as a SQL decimal may show a spurious diff against a YAML float that formats differently (e.g. `3.50` vs `3.5`).
 
