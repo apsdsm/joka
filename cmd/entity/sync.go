@@ -28,10 +28,19 @@ type RunEntitySyncCommand struct {
 	// DryRun computes and prints the plan (inserts + before/after updates)
 	// without applying anything or acquiring the advisory lock.
 	DryRun bool
+	// Force treats every tracked file as modified (re-applies its row updates)
+	// regardless of whether its stored hash matches the current file. Genuinely
+	// new files are still inserted as usual. The escape hatch for when change
+	// detection is in doubt.
+	Force bool
 }
 
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
+
+	if r.Force && !jsonOut {
+		color.Yellow("Forced re-sync: every tracked file will be re-applied regardless of its stored hash.")
+	}
 
 	if !r.SkipLock && !r.DryRun {
 		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
@@ -120,8 +129,9 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			// A stored hash that matches means the file is unchanged. An
 			// empty stored hash (synced before hashing existed) is treated
 			// as modified, matching `entity status`; the update path then
-			// backfills the hash.
-			if dbHash != "" && dbHash == hash {
+			// backfills the hash. --force overrides this so an unchanged
+			// file is re-applied anyway.
+			if !r.Force && dbHash != "" && dbHash == hash {
 				continue
 			}
 
@@ -236,7 +246,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}
 
 	if jsonOut {
-		shared.PrintJSON(map[string]any{"status": "ok", "synced": syncedPaths, "updated": updatedPaths, "plan": planJSON(plan)})
+		shared.PrintJSON(map[string]any{"status": "ok", "synced": syncedPaths, "updated": updatedPaths, "forced": r.Force, "plan": planJSON(plan)})
 		return nil
 	}
 
@@ -250,7 +260,11 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		color.Green("  Updated: %s", path)
 	}
 
-	color.Green("\nEntity sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
+	if r.Force {
+		color.Green("\nForced entity re-sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
+	} else {
+		color.Green("\nEntity sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
+	}
 
 	return nil
 }

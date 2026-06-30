@@ -274,9 +274,13 @@ tracked, an entity's table changed, or an _id that disagrees with the tracked
 row at that position — sync refuses to guess and recommends 'entity reimport'.
 
 Use --dry-run to print the planned inserts and before/after field changes
-without applying anything.`,
+without applying anything.
+
+Use --force to re-apply every tracked file's row updates regardless of its
+stored hash. This is the escape hatch when change detection is in doubt.`,
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
+			force, _ := c.Flags().GetBool("force")
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
 				Driver:       dbDriver,
@@ -284,10 +288,12 @@ without applying anything.`,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
+				Force:        force,
 			}.Execute(c.Context())
 		},
 	}
 	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
+	entitySyncCmd.Flags().Bool("force", false, "Re-apply updates for every tracked file regardless of hash")
 
 	entityStatusCmd := &cobra.Command{
 		Use:   "status",
