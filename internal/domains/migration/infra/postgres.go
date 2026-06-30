@@ -69,8 +69,12 @@ func (p *PostgresDBAdapter) ApplySQLFromFile(ctx context.Context, filePath strin
 		return nil
 	}
 
-	_, err = p.db.ExecContext(ctx, sqlContent)
-	return err
+	for _, stmt := range jokadb.SplitSQLStatements(sqlContent) {
+		if _, err := p.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RecordMigrationApplied records a migration as applied in the migrations table.
@@ -130,8 +134,16 @@ func (p *PostgresDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
 
 // ComputeSchema returns the current database schema as a map of table name to
 // a reconstructed CREATE TABLE-like statement, for all non-joka user tables.
+//
+// It reads through p.db (the migration transaction during `migrate up`), NOT
+// p.conn (the pool). This is load-bearing: a migration that ALTERs/DROPs an
+// existing table holds ACCESS EXCLUSIVE on it inside the open tx; introspecting
+// that table on a second (pool) connection would block on that lock while the
+// tx waits for the snapshot to finish — an unbreakable cross-connection
+// deadlock. Reading on the same tx connection avoids it (and correctly sees the
+// uncommitted in-tx schema).
 func (p *PostgresDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
-	rows, err := p.conn.QueryContext(ctx, `
+	rows, err := p.db.QueryContext(ctx, `
 		SELECT table_name
 		FROM information_schema.tables
 		WHERE table_schema = current_schema()
@@ -183,7 +195,7 @@ func (p *PostgresDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migration
 		return fmt.Errorf("marshaling schema: %w", err)
 	}
 
-	_, err = p.conn.ExecContext(ctx,
+	_, err = p.db.ExecContext(ctx,
 		`INSERT INTO joka_snapshots (migration_index, schema_snapshot) VALUES ($1, $2)`,
 		migrationIndex, string(jsonBytes),
 	)
@@ -195,7 +207,7 @@ func (p *PostgresDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migration
 // primary keys, unique constraints, foreign keys, and indexes.
 func (p *PostgresDBAdapter) reconstructCreateTable(ctx context.Context, tableName string) (string, error) {
 	// 1. Columns
-	colRows, err := p.conn.QueryContext(ctx, `
+	colRows, err := p.db.QueryContext(ctx, `
 		SELECT column_name, data_type, is_nullable, column_default,
 		       character_maximum_length, numeric_precision, numeric_scale
 		FROM information_schema.columns
@@ -241,7 +253,7 @@ func (p *PostgresDBAdapter) reconstructCreateTable(ctx context.Context, tableNam
 	}
 
 	// 2. Table constraints (primary keys, unique, foreign keys)
-	conRows, err := p.conn.QueryContext(ctx, `
+	conRows, err := p.db.QueryContext(ctx, `
 		SELECT
 			c.conname,
 			c.contype,
@@ -274,7 +286,7 @@ func (p *PostgresDBAdapter) reconstructCreateTable(ctx context.Context, tableNam
 	result := fmt.Sprintf("CREATE TABLE %s (\n%s\n)", tableName, strings.Join(parts, ",\n"))
 
 	// 3. Indexes (exclude those backing constraints — already covered above)
-	idxRows, err := p.conn.QueryContext(ctx, `
+	idxRows, err := p.db.QueryContext(ctx, `
 		SELECT indexname, indexdef
 		FROM pg_indexes
 		WHERE schemaname = current_schema()

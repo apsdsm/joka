@@ -85,8 +85,12 @@ func (m *MySQLDBAdapter) ApplySQLFromFile(ctx context.Context, filePath string) 
 		return nil
 	}
 
-	_, err = m.db.ExecContext(ctx, sqlContent)
-	return err
+	for _, stmt := range jokadb.SplitSQLStatements(sqlContent) {
+		if _, err := m.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RecordMigrationApplied records a migration as applied in the migrations table.

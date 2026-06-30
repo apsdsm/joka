@@ -103,6 +103,19 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
+	// Fail fast on lock contention rather than hanging indefinitely: a DDL
+	// migration that can't acquire its lock (e.g. an app still holding the
+	// table) errors out in seconds instead of wedging. Postgres-only syntax.
+	if r.Driver == jokadb.Postgres {
+		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '15s'"); err != nil {
+			tx.Rollback()
+			if jsonOut {
+				return shared.PrintErrorJSON(fmt.Errorf("setting lock_timeout: %w", err))
+			}
+			return fmt.Errorf("setting lock_timeout: %w", err)
+		}
+	}
+
 	txAdapter := newMigrationTxAdapter(r.Driver, tx, r.DB)
 
 	var applied []string
