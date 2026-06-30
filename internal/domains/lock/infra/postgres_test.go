@@ -80,6 +80,43 @@ func TestPostgresAcquire(t *testing.T) {
 	})
 }
 
+func TestPostgresStaleRowDoesNotBlock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	db, err := testlib.GetTestPostgresDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+
+	t.Cleanup(func() { testlib.DropTablePostgres(t, db, "joka_lock") })
+
+	t.Run("it acquires despite an orphaned joka_lock row from a crashed run", func(t *testing.T) {
+		adapter := infra.NewPostgresLockAdapter(db)
+		ctx := context.Background()
+
+		// Simulate a crashed run: the visibility row is left behind, but no
+		// live session holds the advisory lock (the crashed process disconnected).
+		if err := adapter.EnsureTable(ctx); err != nil {
+			t.Fatalf("EnsureTable: %v", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO joka_lock (id, locked_by, operation) VALUES (1, 'ghost:999', 'migrate up')`,
+		); err != nil {
+			t.Fatalf("inserting stale row: %v", err)
+		}
+
+		// Under the old table-row gate this would fail with ErrLockHeld.
+		if err := adapter.Acquire(ctx, "migrate up"); err != nil {
+			t.Fatalf("Acquire over stale row: %v", err)
+		}
+		if err := adapter.Release(ctx); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+	})
+}
+
 func TestPostgresReleaseThenAcquire(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
