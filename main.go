@@ -15,6 +15,7 @@ import (
 	"github.com/apsdsm/joka/cmd/template"
 	"github.com/apsdsm/joka/config"
 	"github.com/apsdsm/joka/internal/connection"
+	"github.com/apsdsm/joka/internal/secrets"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/spf13/cobra"
@@ -283,6 +284,7 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 			force, _ := c.Flags().GetBool("force")
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
+				Secrets:      secrets.New(cfg.Secrets),
 				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				AutoConfirm:  autoConfirm,
@@ -315,6 +317,7 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			return entity.RunEntityReimportCommand{
 				DB:           dbConn,
+				Secrets:      secrets.New(cfg.Secrets),
 				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				FilePath:     args[0],
@@ -331,6 +334,7 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			return entity.RunEntityUpdateCommand{
 				DB:           dbConn,
+				Secrets:      secrets.New(cfg.Secrets),
 				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				FilePath:     args[0],
@@ -367,6 +371,7 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 
 			return dbtools.RunResetCommand{
 				DB:                dbConn,
+				Secrets:           secrets.New(cfg.Secrets),
 				Driver:            dbDriver,
 				MigrationsDir:     migrationsDir,
 				TemplatesDir:      templatesDir,

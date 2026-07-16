@@ -16,7 +16,10 @@ import (
 
 // RunEntityReimportCommand handles the "entity reimport" command.
 type RunEntityReimportCommand struct {
-	DB           *sql.DB
+	DB *sql.DB
+	// Secrets resolves {{ asm.<source>.<key> }} template references against the
+	// `secrets:` sources in .jokarc.yaml.
+	Secrets      app.SecretResolver
 	Driver       jokadb.Driver
 	EntitiesDir  string
 	FilePath     string // relative path argument
@@ -128,6 +131,7 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 
 	err = app.ReimportEntityAction{
 		DB:          txAdapter,
+		Secrets:     r.Secrets,
 		FilePath:    r.FilePath,
 		FullPath:    fullPath,
 		ContentHash: contentHash,

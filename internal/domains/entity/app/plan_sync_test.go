@@ -253,6 +253,67 @@ func TestPlanSyncAction(t *testing.T) {
 		}
 	})
 
+	t.Run("it redacts secret references and never fetches them at plan time", func(t *testing.T) {
+		db := newMockDBAdapter()
+		db.synced["client.yaml"] = true
+		db.entityRows = []domain.TrackedRow{
+			{EntityFile: "client.yaml", TableName: "clients", RowPK: 4, PKColumn: "id", RefID: "c1", InsertionOrder: 0},
+		}
+		db.currentRows["clients|4"] = map[string]any{
+			"client_secret": "$argon2id$old",
+			"api_key":       "old-plain",
+		}
+
+		files := []*domain.EntityFile{
+			{
+				Path: "new.yaml",
+				Entities: []domain.Entity{
+					{Table: "keys", RefID: "k1", PKColumn: "id", Columns: map[string]any{
+						"key_hash": "{{ sha256|asm.seed.admin_key }}",
+						"plain":    "{{ asm.seed.plain_value }}",
+					}},
+				},
+			},
+		}
+		modified := []*domain.EntityFile{
+			{
+				Path: "client.yaml",
+				Entities: []domain.Entity{
+					{Table: "clients", RefID: "c1", PKColumn: "id", Columns: map[string]any{
+						"client_secret": "{{ argon2id|asm.seed.client_secret }}",
+						"api_key":       "{{ asm.seed.api_key }}",
+					}},
+				},
+			},
+		}
+
+		// PlanSyncAction takes no resolver at all: secret refs must short-circuit
+		// as non-deterministic before any resolution is attempted.
+		plan, err := (PlanSyncAction{DB: db, Files: files, Modified: modified}).Execute(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		for _, v := range plan.Inserts[0].Rows[0].Values {
+			if v.Note != "generated" {
+				t.Errorf("expected insert column %s note 'generated', got %+v", v.Column, v)
+			}
+			if v.Value != "" {
+				t.Errorf("insert column %s materialized a value: %+v", v.Column, v)
+			}
+		}
+
+		row := plan.Updates[0].Rows[0]
+		if len(row.Changes) != 2 {
+			t.Fatalf("expected 2 regenerated changes, got %+v", row.Changes)
+		}
+		for _, c := range row.Changes {
+			if !c.Regenerated || c.Before != "" || c.After != "" {
+				t.Errorf("expected column %s regenerated with no before/after, got %+v", c.Column, c)
+			}
+		}
+	})
+
 	t.Run("it still fails the plan for invalid templates", func(t *testing.T) {
 		db := newMockDBAdapter()
 

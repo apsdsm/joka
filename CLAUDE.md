@@ -80,7 +80,9 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 - **Connection**: by default the DSN comes from `DATABASE_URL` (`.env` or environment). The
   `.jokarc.yaml` may instead declare a `connection:` block (`internal/connection`) whose `source`
   is `env`, `literal` (inline `url:`/`password:`), or `aws_secrets_manager` (assemble from parts +
-  a secret key, or a whole-URL key). See README for the schema.
+  a secret key, or a whole-URL key). See README for the schema. A top-level (or per-profile)
+  `secrets:` map declares named Secrets Manager sources for entity template `asm.` references;
+  profile entries override same-named base sources.
   - MySQL: `user:pass@tcp(host:port)/dbname`
   - PostgreSQL: `postgresql://user:pass@host:port/dbname?sslmode=disable`
 - **Profiles**: `.jokarc.yaml` may define a `profiles:` map; `--profile <name>` overlays a profile
@@ -223,6 +225,7 @@ entities:
 - `{{ argon2id|<plaintext> }}` — Argon2id hash of the given plaintext
 - `{{ sha256|<value> }}` — SHA-256 hex digest of the given value
 - `{{ lookup|table,return_col,where_col=value }}` — Query a value from an existing table row (e.g. `{{ lookup|industry_types,id,code=RESTAURANT }}`). Useful for referencing rows seeded outside the entity file (via templates or migrations)
+- `{{ asm.<source>.<key> }}` — Value of JSON key `<key>` in the AWS Secrets Manager secret configured under source name `<source>` in the `.jokarc.yaml` `secrets:` map (`internal/secrets`). Also valid as the argument to `sha256|`/`argon2id|` (e.g. `{{ sha256|asm.seed.admin_key }}` hashes the secret's value); any hash argument not starting with `asm.` stays a literal. Each source is fetched once per command and cached. The planner treats all `asm.` expressions as non-deterministic, so plans/dry-runs show `(generated)`/`(regenerated)` and never fetch or print secret values.
 
 **Insertion behavior**:
 - Entities are inserted depth-first: parent first, then children in order

@@ -99,6 +99,19 @@ Two modes for `aws_secrets_manager`:
 
 AWS credentials come from the default chain (env vars, shared config, SSO, instance role). `source: env` requires no AWS setup.
 
+### Secret sources for entity templates
+
+Entity files can pull secret values from AWS Secrets Manager instead of embedding them as literals (see **Template expressions** below). Declare named sources in a top-level `secrets:` map — or per profile, where the profile's entries override same-named base sources and the rest are inherited:
+
+```yaml
+secrets:
+  seed:                            # referenced in templates as asm.seed.<key>
+    secret_id: my-app/seed/dev1    # Secrets Manager secret id (a JSON object)
+    region: ap-northeast-1
+```
+
+A template reference `{{ asm.seed.api_key }}` resolves to the value of JSON key `api_key` in that secret. Each source is fetched once per command and cached; resolved values are never printed (plans and dry-runs show them as generated).
+
 ### Profiles
 
 Define `profiles:` to keep multiple environments in one `.jokarc.yaml`, selected with `--profile`/`-p`. A profile overlays the base config — any field it sets wins, the rest is inherited:
@@ -222,8 +235,11 @@ String values wrapped in `{{ }}` are resolved at insert time:
 | `{{ argon2id\|password }}` | Argon2id hash of the given plaintext |
 | `{{ sha256\|value }}` | SHA-256 hex digest of the given value |
 | `{{ lookup\|table,return_col,where_col=value }}` | Query a value from an existing table row |
+| `{{ asm.<source>.<key> }}` | Value of JSON key `<key>` in the secret configured under `<source>` (see **Secret sources**) |
 
 The `lookup` expression is useful for referencing rows seeded outside the entity file (via templates or migrations), e.g. `{{ lookup|industry_types,id,code=RESTAURANT }}`.
+
+An `argon2id`/`sha256` argument starting with `asm.` is resolved as a secret reference before hashing — so `{{ sha256|asm.seed.admin_key }}` hashes the secret's value, and the real secret never lives in the YAML. Any other argument is a literal, exactly as before. `<source>` and `<key>` are dot-free identifiers; the secret id itself (which may contain `/`) lives in `.jokarc.yaml`. Resolved secret values never appear in output — plans and diffs display these columns as `(generated)`/`(regenerated)`.
 
 Entity files are tracked in a `joka_entities` table. Individual inserted rows are tracked in `joka_entity_rows` for reimport and update support. Files that have already been synced are skipped on subsequent runs.
 
@@ -283,7 +299,7 @@ Syncs entity YAML files to the database. New files have their entity graph inser
 
 If a modified file changed structurally (a different number of entities than tracked, an entity's table changed, or an `_id` that disagrees with the tracked row at that position), sync refuses to guess and recommends `entity reimport` instead.
 
-Before applying, sync prints a plan — new files show the rows to be inserted, and modified files show a per-column before/after diff. Use `--dry-run` to print the plan and exit without changing anything (and without taking the advisory lock). Non-deterministic columns like `{{ argon2id|… }}` and `{{ now }}` are shown as `(regenerated)`. A `{{ lookup|… }}` whose target row doesn't exist yet (e.g. it's inserted by another file in the same sync) is shown as `(lookup, resolved at apply time)` rather than failing the plan. With `--output json`, the plan is included as a `plan` object.
+Before applying, sync prints a plan — new files show the rows to be inserted, and modified files show a per-column before/after diff. Use `--dry-run` to print the plan and exit without changing anything (and without taking the advisory lock). Non-deterministic columns like `{{ argon2id|… }}` and `{{ now }}` are shown as `(regenerated)`; secret-backed columns (`{{ asm.… }}`, hashed or plain) are also redacted this way and are never fetched or displayed at plan time. A `{{ lookup|… }}` whose target row doesn't exist yet (e.g. it's inserted by another file in the same sync) is shown as `(lookup, resolved at apply time)` rather than failing the plan. With `--output json`, the plan is included as a `plan` object.
 
 ```bash
 # see exactly what a sync would change, without applying

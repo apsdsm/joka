@@ -363,3 +363,53 @@ func TestSyncEntitiesAction(t *testing.T) {
 		}
 	})
 }
+
+func TestSyncEntitiesActionSecrets(t *testing.T) {
+	t.Run("it resolves asm refs on both the insert and update paths", func(t *testing.T) {
+		db := newMockDBAdapter()
+		db.synced["client.yaml"] = true
+		db.entityHashes["client.yaml"] = "oldhash"
+		db.entityRows = []domain.TrackedRow{
+			{EntityFile: "client.yaml", TableName: "clients", RowPK: 4, PKColumn: "id", RefID: "c1", InsertionOrder: 0},
+		}
+
+		secrets := &secretsMock{data: map[string]map[string]string{
+			"seed": {"api_key": "plain-secret", "client_key": "updated-secret"},
+		}}
+
+		files := []*domain.EntityFile{
+			{
+				Path:        "new.yaml",
+				ContentHash: "hash1",
+				Entities: []domain.Entity{
+					{Table: "keys", RefID: "k1", PKColumn: "id", Columns: map[string]any{
+						"api_key": "{{ asm.seed.api_key }}",
+					}},
+				},
+			},
+		}
+		modified := []*domain.EntityFile{
+			{
+				Path:        "client.yaml",
+				ContentHash: "newhash",
+				Entities: []domain.Entity{
+					{Table: "clients", RefID: "c1", PKColumn: "id", Columns: map[string]any{
+						"client_key": "{{ asm.seed.client_key }}",
+					}},
+				},
+			},
+		}
+
+		_, err := (SyncEntitiesAction{DB: db, Secrets: secrets, Files: files, Modified: modified}).Execute(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(db.insertedRows) != 1 || db.insertedRows[0].Columns["api_key"] != "plain-secret" {
+			t.Errorf("expected inserted row with resolved secret, got %+v", db.insertedRows)
+		}
+		if len(db.updatedRows) != 1 || db.updatedRows[0].Columns["client_key"] != "updated-secret" {
+			t.Errorf("expected updated row with resolved secret, got %+v", db.updatedRows)
+		}
+	})
+}

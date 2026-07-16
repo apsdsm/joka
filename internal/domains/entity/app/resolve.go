@@ -13,6 +13,16 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// SecretResolver resolves a named secret source and key (from the `secrets:`
+// config map) to the secret's value. Implemented by internal/secrets.
+type SecretResolver interface {
+	Resolve(ctx context.Context, source, key string) (string, error)
+}
+
+// secretRefPrefix marks a template argument as a secret reference of the form
+// asm.<source>.<key> rather than a literal value.
+const secretRefPrefix = "asm."
+
 // resolveColumns processes template expressions in column values. String values
 // containing {{ ... }} are resolved:
 //   - {{ now }} — replaced with the provided now timestamp string
@@ -20,9 +30,13 @@ import (
 //   - {{ argon2id|<raw> }} — replaced with an argon2id hash of <raw>
 //   - {{ sha256|<raw> }} — replaced with the SHA-256 hex digest of <raw>
 //   - {{ lookup|table,return_col,where_col=value }} — replaced with a value queried from an existing table row
+//   - {{ asm.<source>.<key> }} — replaced with a value from a configured secret source
+//
+// An argon2id/sha256 argument starting with "asm." is resolved as a secret
+// reference before hashing; any other argument is a literal.
 //
 // Non-string values pass through unchanged.
-func resolveColumns(ctx context.Context, columns map[string]any, refMap map[string]int64, now string, db DBAdapter) (map[string]any, error) {
+func resolveColumns(ctx context.Context, columns map[string]any, refMap map[string]int64, now string, db DBAdapter, secrets SecretResolver) (map[string]any, error) {
 	resolved := make(map[string]any, len(columns))
 
 	for k, v := range columns {
@@ -32,7 +46,7 @@ func resolveColumns(ctx context.Context, columns map[string]any, refMap map[stri
 			continue
 		}
 
-		val, err := resolveValue(ctx, str, refMap, now, db)
+		val, err := resolveValue(ctx, str, refMap, now, db, secrets)
 		if err != nil {
 			return nil, fmt.Errorf("column %q: %w", k, err)
 		}
@@ -64,12 +78,19 @@ func templateExpr(v any) (string, bool) {
 // different result on every evaluation (argon2id uses a random salt; now is the
 // current time). A before/after diff of these would always show a spurious
 // change, so the planner labels them "regenerated" instead.
+//
+// Secret references (asm.*, alone or hashed) are included even though they are
+// deterministic: the planner must never print resolved secret material, and
+// short-circuiting here also avoids a Secrets Manager fetch at plan time.
 func isNonDeterministicTemplate(v any) bool {
 	expr, ok := templateExpr(v)
 	if !ok {
 		return false
 	}
-	return expr == "now" || strings.HasPrefix(expr, "argon2id|")
+	return expr == "now" ||
+		strings.HasPrefix(expr, "argon2id|") ||
+		strings.HasPrefix(expr, secretRefPrefix) ||
+		strings.HasPrefix(expr, "sha256|"+secretRefPrefix)
 }
 
 // refTemplate returns the referenced handle and true if the raw value is a
@@ -83,7 +104,7 @@ func refTemplate(v any) (string, bool) {
 	if expr == "now" {
 		return "", false
 	}
-	for _, fn := range []string{"argon2id|", "sha256|", "lookup|"} {
+	for _, fn := range []string{"argon2id|", "sha256|", "lookup|", secretRefPrefix} {
 		if strings.HasPrefix(expr, fn) {
 			return "", false
 		}
@@ -96,7 +117,7 @@ func refTemplate(v any) (string, bool) {
 
 // resolveValue checks whether a string is a template expression and resolves
 // it. Non-template strings are returned as-is.
-func resolveValue(ctx context.Context, s string, refMap map[string]int64, now string, db DBAdapter) (any, error) {
+func resolveValue(ctx context.Context, s string, refMap map[string]int64, now string, db DBAdapter, secrets SecretResolver) (any, error) {
 	trimmed := strings.TrimSpace(s)
 
 	if !strings.HasPrefix(trimmed, "{{") || !strings.HasSuffix(trimmed, "}}") {
@@ -110,7 +131,11 @@ func resolveValue(ctx context.Context, s string, refMap map[string]int64, now st
 	}
 
 	if strings.HasPrefix(expr, "argon2id|") {
-		raw := expr[len("argon2id|"):]
+		raw, err := resolveHashArg(ctx, expr[len("argon2id|"):], secrets)
+		if err != nil {
+			return nil, err
+		}
+
 		hash, err := hashArgon2id(raw)
 		if err != nil {
 			return nil, err
@@ -120,7 +145,11 @@ func resolveValue(ctx context.Context, s string, refMap map[string]int64, now st
 	}
 
 	if strings.HasPrefix(expr, "sha256|") {
-		raw := expr[len("sha256|"):]
+		raw, err := resolveHashArg(ctx, expr[len("sha256|"):], secrets)
+		if err != nil {
+			return nil, err
+		}
+
 		h := sha256.Sum256([]byte(raw))
 
 		return hex.EncodeToString(h[:]), nil
@@ -128,6 +157,10 @@ func resolveValue(ctx context.Context, s string, refMap map[string]int64, now st
 
 	if strings.HasPrefix(expr, "lookup|") {
 		return resolveLookup(ctx, expr[len("lookup|"):], db)
+	}
+
+	if strings.HasPrefix(expr, secretRefPrefix) {
+		return resolveSecretRef(ctx, expr, secrets)
 	}
 
 	if strings.HasSuffix(expr, ".id") {
@@ -142,6 +175,40 @@ func resolveValue(ctx context.Context, s string, refMap map[string]int64, now st
 	}
 
 	return nil, fmt.Errorf("%w: %q", domain.ErrInvalidTemplate, expr)
+}
+
+// resolveHashArg returns an argon2id/sha256 argument as-is unless it is a
+// secret reference (asm.<source>.<key>), in which case the secret value is
+// resolved first.
+func resolveHashArg(ctx context.Context, raw string, secrets SecretResolver) (string, error) {
+	if !strings.HasPrefix(raw, secretRefPrefix) {
+		return raw, nil
+	}
+	return resolveSecretRef(ctx, raw, secrets)
+}
+
+// parseSecretRef splits an "asm.<source>.<key>" reference into its source and
+// key. Both must be non-empty and dot-free (the secret_id, which may contain
+// slashes or dots, lives in config — not in the template).
+func parseSecretRef(s string) (source, key string, ok bool) {
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 || parts[0] != "asm" || parts[1] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[1], parts[2], true
+}
+
+// resolveSecretRef resolves an asm.<source>.<key> reference via the configured
+// secret resolver.
+func resolveSecretRef(ctx context.Context, ref string, secrets SecretResolver) (string, error) {
+	source, key, ok := parseSecretRef(ref)
+	if !ok {
+		return "", fmt.Errorf("%w: %q (want asm.<source>.<key>)", domain.ErrInvalidTemplate, ref)
+	}
+	if secrets == nil {
+		return "", fmt.Errorf("resolving %q: no secret sources configured (add a `secrets:` map to .jokarc.yaml)", ref)
+	}
+	return secrets.Resolve(ctx, source, key)
 }
 
 // resolveLookup parses a lookup expression of the form "table,return_col,where_col=value"

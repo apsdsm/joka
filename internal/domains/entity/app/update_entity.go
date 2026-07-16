@@ -26,6 +26,7 @@ type UpdateEntityEntry struct {
 // them via {{ parent.id }}.
 type UpdateEntityAction struct {
 	DB          DBAdapter
+	Secrets     SecretResolver
 	FilePath    string // relative path (tracking key)
 	FullPath    string // absolute path for parsing
 	ContentHash string
@@ -83,6 +84,7 @@ func (a UpdateEntityAction) Execute(ctx context.Context) (*UpdateEntityResult, e
 
 	action := &InsertGraphAction{
 		DB:          a.DB,
+		Secrets:     a.Secrets,
 		Entities:    file.Entities,
 		RefMap:      refMap,
 		EntityFile:  a.FilePath,

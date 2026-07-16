@@ -12,7 +12,8 @@ import (
 // credential chain (env vars, shared config, SSO, instance role, ...).
 type awsSecretsManager struct{}
 
-func newAWSSecretsManager() SecretFetcher { return &awsSecretsManager{} }
+// NewAWSSecretsManager returns the default AWS Secrets Manager fetcher.
+func NewAWSSecretsManager() SecretFetcher { return &awsSecretsManager{} }
 
 func (a *awsSecretsManager) Fetch(ctx context.Context, secretID, region string) (map[string]string, error) {
 	opts := []func(*awsconfig.LoadOptions) error{}

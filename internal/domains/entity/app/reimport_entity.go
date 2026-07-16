@@ -11,6 +11,7 @@ import (
 // (in reverse insertion order) and re-inserts from the YAML definition.
 type ReimportEntityAction struct {
 	DB          DBAdapter
+	Secrets     SecretResolver
 	FilePath    string // relative path (tracking key)
 	FullPath    string // absolute path for re-parsing
 	ContentHash string
@@ -59,6 +60,7 @@ func (a ReimportEntityAction) Execute(ctx context.Context) error {
 	refMap := make(map[string]int64)
 	action := &InsertGraphAction{
 		DB:         a.DB,
+		Secrets:    a.Secrets,
 		Entities:   file.Entities,
 		RefMap:     refMap,
 		EntityFile: a.FilePath,

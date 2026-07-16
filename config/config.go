@@ -13,8 +13,10 @@ type TableConfig struct {
 	Strategy domain.StrategyType `yaml:"strategy"`
 }
 
-// Secret describes where to pull connection secrets from when a Connection's
-// source is a secret provider (e.g. aws_secrets_manager).
+// Secret describes where to pull secrets from: either connection secrets when
+// a Connection's source is a secret provider (e.g. aws_secrets_manager), or a
+// named source in the top-level `secrets:` map referenced by entity templates
+// as {{ asm.<source>.<key> }} (only secret_id/region apply there).
 //
 // Two modes:
 //   - whole-URL: the secret holds a complete DSN. Set url_key to the JSON key
@@ -53,12 +55,13 @@ type Connection struct {
 // Profile overlays the base config. Set (non-nil) fields override the base;
 // unset fields inherit it.
 type Profile struct {
-	Migrations        *string       `yaml:"migrations"`
-	Templates         *string       `yaml:"templates"`
-	Entities          *string       `yaml:"entities"`
-	Tables            []TableConfig `yaml:"tables"`
-	IgnoreForeignKeys *bool         `yaml:"ignore_foreign_keys"`
-	Connection        *Connection   `yaml:"connection"`
+	Migrations        *string           `yaml:"migrations"`
+	Templates         *string           `yaml:"templates"`
+	Entities          *string           `yaml:"entities"`
+	Tables            []TableConfig     `yaml:"tables"`
+	IgnoreForeignKeys *bool             `yaml:"ignore_foreign_keys"`
+	Connection        *Connection       `yaml:"connection"`
+	Secrets           map[string]Secret `yaml:"secrets"`
 }
 
 type Config struct {
@@ -68,6 +71,7 @@ type Config struct {
 	Tables            []TableConfig      `yaml:"tables"`
 	IgnoreForeignKeys bool               `yaml:"ignore_foreign_keys"`
 	Connection        *Connection        `yaml:"connection"`
+	Secrets           map[string]Secret  `yaml:"secrets"`
 	Profiles          map[string]Profile `yaml:"profiles"`
 }
 
@@ -127,6 +131,16 @@ func applyProfile(base *Config, p Profile) *Config {
 	}
 	if p.Connection != nil {
 		merged.Connection = p.Connection
+	}
+	if len(p.Secrets) > 0 {
+		sources := make(map[string]Secret, len(base.Secrets)+len(p.Secrets))
+		for name, s := range base.Secrets {
+			sources[name] = s
+		}
+		for name, s := range p.Secrets {
+			sources[name] = s
+		}
+		merged.Secrets = sources
 	}
 
 	return &merged

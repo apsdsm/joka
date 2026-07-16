@@ -20,6 +20,7 @@ import (
 // still visited (they may be new). Used by entity update.
 type InsertGraphAction struct {
 	DB          DBAdapter
+	Secrets     SecretResolver
 	Entities    []domain.Entity
 	RefMap      map[string]int64
 	EntityFile  string
@@ -58,7 +59,7 @@ func (a *InsertGraphAction) insertEntity(ctx context.Context, entity domain.Enti
 		}
 	}
 
-	columns, err := resolveColumns(ctx, entity.Columns, a.RefMap, now, a.DB)
+	columns, err := resolveColumns(ctx, entity.Columns, a.RefMap, now, a.DB, a.Secrets)
 	if err != nil {
 		return fmt.Errorf("resolving %s: %w", entity.Table, err)
 	}

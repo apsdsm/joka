@@ -52,7 +52,7 @@ func Resolve(ctx context.Context, conn *config.Connection, fetcher SecretFetcher
 			return "", fmt.Errorf("connection source aws_secrets_manager requires secret.secret_id")
 		}
 		if fetcher == nil {
-			fetcher = newAWSSecretsManager()
+			fetcher = NewAWSSecretsManager()
 		}
 		values, err := fetcher.Fetch(ctx, conn.Secret.SecretID, conn.Secret.Region)
 		if err != nil {

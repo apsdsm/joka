@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,23 +18,35 @@ type lookupMock struct {
 	data map[string]any
 }
 
-func (l *lookupMock) EnsureTrackingTable(context.Context) error                                { panic("unused") }
-func (l *lookupMock) EnsureRowTrackingTable(context.Context) error                             { panic("unused") }
-func (l *lookupMock) EnsureContentHashColumn(context.Context) error                            { panic("unused") }
-func (l *lookupMock) IsEntitySynced(context.Context, string) (bool, error)                     { panic("unused") }
-func (l *lookupMock) RecordEntitySynced(context.Context, string) error                         { panic("unused") }
-func (l *lookupMock) RecordEntitySyncedWithHash(context.Context, string, string) error         { panic("unused") }
-func (l *lookupMock) UpdateEntitySynced(context.Context, string, string) error                 { panic("unused") }
-func (l *lookupMock) GetEntityHash(context.Context, string) (string, error)                    { panic("unused") }
-func (l *lookupMock) GetAllSyncedEntities(context.Context) (map[string]string, error)          { panic("unused") }
-func (l *lookupMock) RecordEntityRow(context.Context, domain.TrackedRow) error                 { panic("unused") }
-func (l *lookupMock) GetTrackedRows(context.Context, string) ([]domain.TrackedRow, error)      { panic("unused") }
-func (l *lookupMock) DeleteTrackedRows(context.Context, string) error                          { panic("unused") }
-func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error                   { panic("unused") }
-func (l *lookupMock) DeleteEntityRecord(context.Context, string) error                         { panic("unused") }
-func (l *lookupMock) InsertRow(context.Context, string, map[string]any, string) (int64, error) { panic("unused") }
-func (l *lookupMock) UpdateRow(context.Context, string, string, int64, map[string]any) error { panic("unused") }
-func (l *lookupMock) GetRow(context.Context, string, []string, string, int64) (map[string]any, error) { panic("unused") }
+func (l *lookupMock) EnsureTrackingTable(context.Context) error            { panic("unused") }
+func (l *lookupMock) EnsureRowTrackingTable(context.Context) error         { panic("unused") }
+func (l *lookupMock) EnsureContentHashColumn(context.Context) error        { panic("unused") }
+func (l *lookupMock) IsEntitySynced(context.Context, string) (bool, error) { panic("unused") }
+func (l *lookupMock) RecordEntitySynced(context.Context, string) error     { panic("unused") }
+func (l *lookupMock) RecordEntitySyncedWithHash(context.Context, string, string) error {
+	panic("unused")
+}
+func (l *lookupMock) UpdateEntitySynced(context.Context, string, string) error { panic("unused") }
+func (l *lookupMock) GetEntityHash(context.Context, string) (string, error)    { panic("unused") }
+func (l *lookupMock) GetAllSyncedEntities(context.Context) (map[string]string, error) {
+	panic("unused")
+}
+func (l *lookupMock) RecordEntityRow(context.Context, domain.TrackedRow) error { panic("unused") }
+func (l *lookupMock) GetTrackedRows(context.Context, string) ([]domain.TrackedRow, error) {
+	panic("unused")
+}
+func (l *lookupMock) DeleteTrackedRows(context.Context, string) error        { panic("unused") }
+func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error { panic("unused") }
+func (l *lookupMock) DeleteEntityRecord(context.Context, string) error       { panic("unused") }
+func (l *lookupMock) InsertRow(context.Context, string, map[string]any, string) (int64, error) {
+	panic("unused")
+}
+func (l *lookupMock) UpdateRow(context.Context, string, string, int64, map[string]any) error {
+	panic("unused")
+}
+func (l *lookupMock) GetRow(context.Context, string, []string, string, int64) (map[string]any, error) {
+	panic("unused")
+}
 func (l *lookupMock) LookupValue(_ context.Context, table, returnCol, whereCol string, whereVal any) (any, error) {
 	key := fmt.Sprintf("%s.%s.%s=%v", table, returnCol, whereCol, whereVal)
 
@@ -46,7 +60,7 @@ func (l *lookupMock) LookupValue(_ context.Context, table, returnCol, whereCol s
 
 func TestResolveValue(t *testing.T) {
 	t.Run("it returns plain strings unchanged", func(t *testing.T) {
-		val, err := resolveValue(context.Background(), "hello", nil, "", nil)
+		val, err := resolveValue(context.Background(), "hello", nil, "", nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -57,7 +71,7 @@ func TestResolveValue(t *testing.T) {
 	})
 
 	t.Run("it resolves {{ now }} to the provided timestamp", func(t *testing.T) {
-		val, err := resolveValue(context.Background(), "{{ now }}", nil, "2025-01-01 00:00:00", nil)
+		val, err := resolveValue(context.Background(), "{{ now }}", nil, "2025-01-01 00:00:00", nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -68,7 +82,7 @@ func TestResolveValue(t *testing.T) {
 	})
 
 	t.Run("it resolves {{now}} without spaces", func(t *testing.T) {
-		val, err := resolveValue(context.Background(), "{{now}}", nil, "2025-01-01 00:00:00", nil)
+		val, err := resolveValue(context.Background(), "{{now}}", nil, "2025-01-01 00:00:00", nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -81,7 +95,7 @@ func TestResolveValue(t *testing.T) {
 	t.Run("it resolves ref ID expressions to the stored PK", func(t *testing.T) {
 		refMap := map[string]int64{"parent": 42}
 
-		val, err := resolveValue(context.Background(), "{{ parent.id }}", refMap, "", nil)
+		val, err := resolveValue(context.Background(), "{{ parent.id }}", refMap, "", nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -99,7 +113,7 @@ func TestResolveValue(t *testing.T) {
 	t.Run("it returns ErrInvalidReference for missing ref IDs", func(t *testing.T) {
 		refMap := map[string]int64{}
 
-		_, err := resolveValue(context.Background(), "{{ missing.id }}", refMap, "", nil)
+		_, err := resolveValue(context.Background(), "{{ missing.id }}", refMap, "", nil, nil)
 		if err == nil {
 			t.Fatal("expected error for missing ref, got nil")
 		}
@@ -110,7 +124,7 @@ func TestResolveValue(t *testing.T) {
 	})
 
 	t.Run("it resolves argon2id expressions to a hash", func(t *testing.T) {
-		val, err := resolveValue(context.Background(), "{{ argon2id|password123 }}", nil, "", nil)
+		val, err := resolveValue(context.Background(), "{{ argon2id|password123 }}", nil, "", nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -126,7 +140,7 @@ func TestResolveValue(t *testing.T) {
 	})
 
 	t.Run("it resolves sha256 expressions to a hex digest", func(t *testing.T) {
-		val, err := resolveValue(context.Background(), "{{ sha256|password }}", nil, "", nil)
+		val, err := resolveValue(context.Background(), "{{ sha256|password }}", nil, "", nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -144,7 +158,7 @@ func TestResolveValue(t *testing.T) {
 	})
 
 	t.Run("it returns ErrInvalidTemplate for unknown expressions", func(t *testing.T) {
-		_, err := resolveValue(context.Background(), "{{ unknown_func }}", nil, "", nil)
+		_, err := resolveValue(context.Background(), "{{ unknown_func }}", nil, "", nil, nil)
 		if err == nil {
 			t.Fatal("expected error for unknown expression, got nil")
 		}
@@ -159,7 +173,7 @@ func TestResolveValue(t *testing.T) {
 			"industry_types.id.code=RESTAURANT": int64(7),
 		}}
 
-		val, err := resolveValue(context.Background(), "{{ lookup|industry_types,id,code=RESTAURANT }}", nil, "", db)
+		val, err := resolveValue(context.Background(), "{{ lookup|industry_types,id,code=RESTAURANT }}", nil, "", db, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -177,7 +191,7 @@ func TestResolveValue(t *testing.T) {
 	t.Run("it returns ErrLookupNotFound when lookup has no match", func(t *testing.T) {
 		db := &lookupMock{data: map[string]any{}}
 
-		_, err := resolveValue(context.Background(), "{{ lookup|industry_types,id,code=MISSING }}", nil, "", db)
+		_, err := resolveValue(context.Background(), "{{ lookup|industry_types,id,code=MISSING }}", nil, "", db, nil)
 		if err == nil {
 			t.Fatal("expected error for missing lookup, got nil")
 		}
@@ -188,7 +202,7 @@ func TestResolveValue(t *testing.T) {
 	})
 
 	t.Run("it returns ErrInvalidTemplate for lookup with bad params", func(t *testing.T) {
-		_, err := resolveValue(context.Background(), "{{ lookup|just_table }}", nil, "", nil)
+		_, err := resolveValue(context.Background(), "{{ lookup|just_table }}", nil, "", nil, nil)
 		if err == nil {
 			t.Fatal("expected error for bad lookup params, got nil")
 		}
@@ -199,7 +213,7 @@ func TestResolveValue(t *testing.T) {
 	})
 
 	t.Run("it returns ErrInvalidTemplate for lookup where clause missing equals", func(t *testing.T) {
-		_, err := resolveValue(context.Background(), "{{ lookup|table,col,no_equals }}", nil, "", nil)
+		_, err := resolveValue(context.Background(), "{{ lookup|table,col,no_equals }}", nil, "", nil, nil)
 		if err == nil {
 			t.Fatal("expected error for missing =, got nil")
 		}
@@ -208,6 +222,146 @@ func TestResolveValue(t *testing.T) {
 			t.Errorf("expected ErrInvalidTemplate, got: %v", err)
 		}
 	})
+}
+
+// secretsMock implements SecretResolver over a static source->key->value map.
+type secretsMock struct {
+	data  map[string]map[string]string
+	calls int
+}
+
+func (s *secretsMock) Resolve(_ context.Context, source, key string) (string, error) {
+	s.calls++
+	values, ok := s.data[source]
+	if !ok {
+		return "", fmt.Errorf("secret source %q not configured", source)
+	}
+	v, ok := values[key]
+	if !ok {
+		return "", fmt.Errorf("key %q not found in secret source %q", key, source)
+	}
+	return v, nil
+}
+
+func TestResolveValueSecrets(t *testing.T) {
+	secrets := &secretsMock{data: map[string]map[string]string{
+		"seed": {"api_key": "password"},
+	}}
+
+	t.Run("it resolves standalone asm refs to the secret value", func(t *testing.T) {
+		val, err := resolveValue(context.Background(), "{{ asm.seed.api_key }}", nil, "", nil, secrets)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if val != "password" {
+			t.Errorf("expected secret value, got %v", val)
+		}
+	})
+
+	t.Run("it resolves sha256|asm refs to the digest of the secret value", func(t *testing.T) {
+		val, err := resolveValue(context.Background(), "{{ sha256|asm.seed.api_key }}", nil, "", nil, secrets)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// SHA-256 of "password" (the resolved secret), not of the literal ref.
+		expected := "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+		if val != expected {
+			t.Errorf("expected %q, got %q", expected, val)
+		}
+	})
+
+	t.Run("it resolves argon2id|asm refs to a hash of the secret value", func(t *testing.T) {
+		val, err := resolveValue(context.Background(), "{{ argon2id|asm.seed.api_key }}", nil, "", nil, secrets)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		hash, ok := val.(string)
+		if !ok {
+			t.Fatalf("expected string, got %T", val)
+		}
+
+		if !strings.HasPrefix(hash, "$argon2id$") {
+			t.Errorf("expected argon2id hash prefix, got %q", hash)
+		}
+	})
+
+	t.Run("it propagates unknown source and missing key errors", func(t *testing.T) {
+		_, err := resolveValue(context.Background(), "{{ asm.nope.api_key }}", nil, "", nil, secrets)
+		if err == nil || !strings.Contains(err.Error(), `secret source "nope" not configured`) {
+			t.Fatalf("expected unknown-source error, got %v", err)
+		}
+
+		_, err = resolveValue(context.Background(), "{{ sha256|asm.seed.missing }}", nil, "", nil, secrets)
+		if err == nil || !strings.Contains(err.Error(), `key "missing" not found`) {
+			t.Fatalf("expected missing-key error, got %v", err)
+		}
+	})
+
+	t.Run("it returns ErrInvalidTemplate for malformed asm refs", func(t *testing.T) {
+		for _, s := range []string{"{{ asm.seed }}", "{{ asm.seed.a.b }}", "{{ asm..key }}", "{{ argon2id|asm.seed }}"} {
+			_, err := resolveValue(context.Background(), s, nil, "", nil, secrets)
+			if !errors.Is(err, domain.ErrInvalidTemplate) {
+				t.Errorf("%s: expected ErrInvalidTemplate, got %v", s, err)
+			}
+		}
+	})
+
+	t.Run("it errors on asm refs when no resolver is configured", func(t *testing.T) {
+		_, err := resolveValue(context.Background(), "{{ asm.seed.api_key }}", nil, "", nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "no secret sources configured") {
+			t.Fatalf("expected no-sources error, got %v", err)
+		}
+	})
+
+	t.Run("it still treats non-asm hash args as literals", func(t *testing.T) {
+		val, err := resolveValue(context.Background(), "{{ sha256|asmx_literal }}", nil, "", nil, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		h := sha256.Sum256([]byte("asmx_literal"))
+		if val != hex.EncodeToString(h[:]) {
+			t.Errorf("expected digest of the literal arg, got %v", val)
+		}
+	})
+}
+
+func TestSecretTemplatePredicates(t *testing.T) {
+	t.Run("asm expressions are non-deterministic to the planner", func(t *testing.T) {
+		for _, s := range []string{"{{ asm.seed.api_key }}", "{{ sha256|asm.seed.api_key }}", "{{ argon2id|asm.seed.api_key }}"} {
+			if !isNonDeterministicTemplate(s) {
+				t.Errorf("%s: expected non-deterministic", s)
+			}
+		}
+	})
+
+	t.Run("literal sha256 stays deterministic", func(t *testing.T) {
+		if isNonDeterministicTemplate("{{ sha256|literal }}") {
+			t.Error("expected sha256 of a literal to remain deterministic")
+		}
+	})
+
+	t.Run("asm refs are not entity references", func(t *testing.T) {
+		if _, ok := refTemplate("{{ asm.seed.id }}"); ok {
+			t.Error("asm ref ending in .id must not be treated as an entity reference")
+		}
+	})
+}
+
+func TestParseSecretRef(t *testing.T) {
+	source, key, ok := parseSecretRef("asm.seed.api_key")
+	if !ok || source != "seed" || key != "api_key" {
+		t.Errorf("expected (seed, api_key), got (%s, %s, %v)", source, key, ok)
+	}
+
+	for _, s := range []string{"asm.seed", "asm.seed.a.b", "asm..key", "asm.seed.", "notasm.seed.key"} {
+		if _, _, ok := parseSecretRef(s); ok {
+			t.Errorf("%s: expected parse to fail", s)
+		}
+	}
 }
 
 func TestResolveColumns(t *testing.T) {
@@ -222,7 +376,7 @@ func TestResolveColumns(t *testing.T) {
 		refMap := map[string]int64{"parent": 10}
 		now := "2025-06-01 12:00:00"
 
-		resolved, err := resolveColumns(context.Background(), columns, refMap, now, nil)
+		resolved, err := resolveColumns(context.Background(), columns, refMap, now, nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -254,7 +408,7 @@ func TestResolveColumns(t *testing.T) {
 			"ref": "{{ missing.id }}",
 		}
 
-		_, err := resolveColumns(context.Background(), columns, map[string]int64{}, "", nil)
+		_, err := resolveColumns(context.Background(), columns, map[string]int64{}, "", nil, nil)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}

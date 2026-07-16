@@ -159,3 +159,69 @@ profiles:
 		}
 	})
 }
+
+func TestLoadSecrets(t *testing.T) {
+	const cfgYAML = `secrets:
+  seed:
+    secret_id: lgc/seed/base
+    region: ap-northeast-1
+  shared:
+    secret_id: lgc/shared
+    region: ap-northeast-1
+profiles:
+  dev-remote:
+    secrets:
+      seed:
+        secret_id: lgc/seed/dev1
+        region: ap-northeast-1
+  plain:
+    entities: db/entities-plain
+`
+
+	writeCfg := func(t *testing.T) {
+		t.Helper()
+		dir := t.TempDir()
+		orig, _ := os.Getwd()
+		os.Chdir(dir)
+		t.Cleanup(func() { os.Chdir(orig) })
+		if err := os.WriteFile(".jokarc.yaml", []byte(cfgYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("base secrets are parsed", func(t *testing.T) {
+		writeCfg(t)
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Secrets["seed"].SecretID != "lgc/seed/base" {
+			t.Errorf("unexpected base seed source: %+v", cfg.Secrets["seed"])
+		}
+	})
+
+	t.Run("profile overlays secrets per source name, keeping base sources", func(t *testing.T) {
+		writeCfg(t)
+		cfg, err := Load("dev-remote")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Secrets["seed"].SecretID != "lgc/seed/dev1" {
+			t.Errorf("expected profile to override seed source, got %+v", cfg.Secrets["seed"])
+		}
+		if cfg.Secrets["shared"].SecretID != "lgc/shared" {
+			t.Errorf("expected base shared source retained, got %+v", cfg.Secrets["shared"])
+		}
+	})
+
+	t.Run("profile without secrets inherits the base map", func(t *testing.T) {
+		writeCfg(t)
+		cfg, err := Load("plain")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Secrets["seed"].SecretID != "lgc/seed/base" || cfg.Secrets["shared"].SecretID != "lgc/shared" {
+			t.Errorf("expected inherited base secrets, got %+v", cfg.Secrets)
+		}
+	})
+}

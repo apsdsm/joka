@@ -21,7 +21,8 @@ type SyncResult struct {
 // in place (matched by _id) and inserts any genuinely-new entities. Files whose
 // content is unchanged are skipped by the caller before reaching this action.
 type SyncEntitiesAction struct {
-	DB DBAdapter
+	DB      DBAdapter
+	Secrets SecretResolver
 	// Files are new files (not yet tracked) to insert.
 	Files []*domain.EntityFile
 	// Modified are tracked files whose content changed, to update in place.
@@ -51,6 +52,7 @@ func (a SyncEntitiesAction) Execute(ctx context.Context) (*SyncResult, error) {
 
 		action := &InsertGraphAction{
 			DB:         a.DB,
+			Secrets:    a.Secrets,
 			Entities:   file.Entities,
 			RefMap:     refMap,
 			EntityFile: file.Path,
@@ -115,7 +117,7 @@ func (a SyncEntitiesAction) updateFile(ctx context.Context, file *domain.EntityF
 	for i, e := range seq {
 		row := ordered[i]
 
-		columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB)
+		columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
 		if err != nil {
 			return fmt.Errorf("resolving %s: %w", e.Table, err)
 		}

@@ -10,6 +10,7 @@ import (
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/cmd/template"
 	jokadb "github.com/apsdsm/joka/db"
+	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/fatih/color"
@@ -19,7 +20,10 @@ import (
 // pipeline (init -> migrate up -> data sync -> entity sync). Destructive —
 // confirms once for the whole flow.
 type RunResetCommand struct {
-	DB                *sql.DB
+	DB *sql.DB
+	// Secrets resolves {{ asm.<source>.<key> }} entity template references
+	// against the `secrets:` sources in .jokarc.yaml.
+	Secrets           entityapp.SecretResolver
 	Driver            jokadb.Driver
 	MigrationsDir     string
 	TemplatesDir      string
@@ -137,6 +141,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	}
 	if err := (entity.RunEntitySyncCommand{
 		DB:           r.DB,
+		Secrets:      r.Secrets,
 		Driver:       r.Driver,
 		EntitiesDir:  r.EntitiesDir,
 		AutoConfirm:  true,

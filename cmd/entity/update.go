@@ -17,7 +17,10 @@ import (
 
 // RunEntityUpdateCommand handles the "entity update" command.
 type RunEntityUpdateCommand struct {
-	DB           *sql.DB
+	DB *sql.DB
+	// Secrets resolves {{ asm.<source>.<key> }} template references against the
+	// `secrets:` sources in .jokarc.yaml.
+	Secrets      app.SecretResolver
 	Driver       jokadb.Driver
 	EntitiesDir  string
 	FilePath     string // relative path argument
@@ -231,6 +234,7 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 
 	result, err := app.UpdateEntityAction{
 		DB:          txAdapter,
+		Secrets:     r.Secrets,
 		FilePath:    r.FilePath,
 		FullPath:    fullPath,
 		ContentHash: contentHash,

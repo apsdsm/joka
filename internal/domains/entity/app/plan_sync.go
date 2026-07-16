@@ -33,7 +33,7 @@ type RowInsertPlan struct {
 
 // ColumnValue is a column and the value it would be set to. Note is set for
 // values that cannot be shown concretely at plan time: "generated" for
-// non-deterministic templates (argon2id, now), "ref <handle>" for a
+// non-deterministic templates (argon2id, now, asm.* secrets), "ref <handle>" for a
 // reference to another entity's not-yet-assigned PK, or "lookup, resolved at
 // apply time" for a lookup whose target row doesn't exist yet (it may be
 // inserted earlier in the same sync).
@@ -58,8 +58,9 @@ type RowUpdatePlan struct {
 }
 
 // ColumnChange is a single column whose value would change. When Regenerated is
-// true the value is derived from a non-deterministic template and Before/After
-// are not meaningful (the value is rewritten on every sync). When Deferred is
+// true the value is derived from a non-deterministic template (or a secret
+// reference, which is never displayed) and Before/After are not meaningful
+// (the value is rewritten on every sync). When Deferred is
 // true the value is a lookup whose target row doesn't exist yet (it may be
 // inserted by this same sync, which applies inserts before updates) and After
 // can only be resolved at apply time.
@@ -202,13 +203,16 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 }
 
 // resolveColumnValue resolves a single raw column value. Non-string values pass
-// through unchanged; strings may be template expressions.
+// through unchanged; strings may be template expressions. No secret resolver is
+// passed: secret references (asm.*) are non-deterministic to the planner and
+// short-circuit before resolution, so their plaintext is never fetched or
+// materialized into the plan.
 func resolveColumnValue(ctx context.Context, raw any, refMap map[string]int64, now string, db DBAdapter) (any, error) {
 	s, ok := raw.(string)
 	if !ok {
 		return raw, nil
 	}
-	return resolveValue(ctx, s, refMap, now, db)
+	return resolveValue(ctx, s, refMap, now, db, nil)
 }
 
 // normalizeValue renders a value as a string for comparison and display. Byte

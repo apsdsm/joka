@@ -17,7 +17,10 @@ import (
 
 // RunEntitySyncCommand handles the "entity sync" command.
 type RunEntitySyncCommand struct {
-	DB           *sql.DB
+	DB *sql.DB
+	// Secrets resolves {{ asm.<source>.<key> }} template references against the
+	// `secrets:` sources in .jokarc.yaml.
+	Secrets      app.SecretResolver
 	Driver       jokadb.Driver
 	EntitiesDir  string
 	AutoConfirm  bool
@@ -218,6 +221,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	result, err := app.SyncEntitiesAction{
 		DB:       txAdapter,
+		Secrets:  r.Secrets,
 		Files:    pending,
 		Modified: modified,
 	}.Execute(ctx)
