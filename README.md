@@ -14,6 +14,8 @@ Build from source (requires Go 1.25+):
 go install github.com/apsdsm/joka@latest
 ```
 
+`joka migrate consolidate` additionally needs your database's own dump tool on `PATH` — `pg_dump` for PostgreSQL, `mysqldump` for MySQL. No other command requires them.
+
 ## Setup
 
 ### Database URL
@@ -272,9 +274,11 @@ Displays the schema snapshot captured after a migration was applied. Shows `CREA
 
 ### `joka migrate consolidate --up-to <migration_index>`
 
-Replaces all migration files up to and including the target with a single consolidated file. The consolidated file contains the schema snapshot at that point — the CREATE TABLE statements for every user table, ordered to respect foreign key dependencies.
+Squashes the applied migration history into a single baseline file, dumped by the database's own tool.
 
-Use `joka migrate status` to find migration indices:
+Joka does not write the schema itself. It shells out to **`pg_dump`** or **`mysqldump`** — they are the reference implementations, and anything joka reconstructed by hand would silently lose whatever it did not know about. Joka's job here is bookkeeping: write the baseline, remove the tracking rows it replaces, delete the files it supersedes.
+
+**Requires `pg_dump` (PostgreSQL) or `mysqldump` (MySQL) on `PATH`.** `pg_dump` also refuses to run against a server newer than itself, so keep the client version at or above the server's.
 
 ```
 $ joka migrate status
@@ -282,19 +286,21 @@ Migration 250115093000 - Status: applied
 Migration 250116140000 - Status: applied
 Migration 250201100000 - Status: applied
 
-$ joka migrate consolidate --up-to 250116140000
+$ joka migrate consolidate --up-to 250201100000
 ```
 
-This replaces the first two migration files with a single `250116140000_consolidated.sql` containing the full schema as of that point. The third migration file is left untouched.
+All three files are replaced by `250201100000_consolidated.sql`.
 
-All migrations up to the target must already be applied (snapshots are captured during `migrate up`).
+**`--up-to` must name the last applied migration.** A dump describes the schema as it is *now*, which reflects every applied migration — so consolidating "up to" an earlier index would write a baseline that does not match the index it carries. Pending (unapplied) files after the target are left alone. This is the one thing the command cannot do that the old snapshot-based version claimed to: keep recent migrations un-squashed.
 
-**Bookkeeping.** The consolidated file keeps the target's index, so the records it replaced are removed from `joka_migrations` (and their `joka_snapshots` rows with them) in a single transaction. The chain is matched positionally, so leaving stale rows behind would break every subsequent joka command on that database. Other databases that applied the original migrations still need their own `joka_migrations` reconciled before they can migrate against the consolidated directory.
+**Bookkeeping.** The baseline keeps the target's index, so the records it replaced are removed from `joka_migrations` (and their `joka_snapshots` rows with them) in a single transaction. The chain is matched positionally, so leaving stale rows behind would break every subsequent joka command on that database. Other databases that applied the original migrations still need their own `joka_migrations` reconciled before they can migrate against the consolidated directory.
 
-**Checks before anything is deleted.** Nothing is written or removed until the generated schema has been shown to work:
+**What the baseline contains, per driver:**
 
-- The schema is scanned for objects a snapshot cannot represent — views, materialized views, foreign and partitioned tables, standalone sequences, enum/composite/range types, domains, functions, procedures, triggers, and extensions installed in the schema. Consolidating would silently drop them, so the command refuses and lists them. Pass `--allow-unsupported` to proceed anyway (for example when they are created by a migration that is *not* being consolidated).
-- On PostgreSQL, the generated SQL is applied to a throwaway schema inside a transaction that is always rolled back. If it does not apply, the command stops and the migration files are left alone. MySQL cannot dry-run DDL (it is not transactional), so consolidation there reports that the SQL is unverified.
+- **PostgreSQL** — everything `pg_dump --schema-only` emits: tables, indexes, constraints, sequences, identity and generated columns, types, domains, views, materialized views, functions, triggers, extensions. Its `\restrict` / `\unrestrict` psql directives are stripped, since they are client commands rather than SQL. Foreign keys arrive as trailing `ALTER TABLE` statements, so table order does not matter.
+- **MySQL** — table structures only. `mysqldump` wraps views, routines and triggers in constructs joka's applier cannot run (`DELIMITER`, which is a mysql-client directive, and multi-line `/*!NNNNN ... */` conditional blocks), so consolidation **refuses** when the schema contains any of them and lists what it found. Pass `--allow-unsupported` if they are managed outside joka's migrations and you accept their absence from the baseline. mysqldump's single-line conditional statements are replaced with plain `SET FOREIGN_KEY_CHECKS` toggles, because joka's SQL splitter treats conditional comments as comments and would drop them.
+
+**Checks before anything is deleted.** The dump runs first; a missing binary, a version mismatch, or a dump that does not contain one `CREATE TABLE` per table in the database all abort before any file is written or removed.
 
 ### `joka data sync`
 
@@ -352,7 +358,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`) |
-| `--allow-unsupported` | | `false` | Consolidate even though the schema holds objects the baseline will not recreate |
+| `--allow-unsupported` | | `false` | Consolidate even though the dump will not carry every object (MySQL views/routines/triggers) |
 | `--ignore-foreign-keys` | | `false` | Disable FK checks during data sync truncate (MySQL) |
 
 ## How It Works

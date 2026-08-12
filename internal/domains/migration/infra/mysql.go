@@ -154,8 +154,9 @@ func (m *MySQLDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
 // joka_* tables) and returns the map of table -> CREATE TABLE statement.
 //
 // Base tables only: SHOW CREATE TABLE on a view returns a different result
-// shape, and a view has no place in a table snapshot. UnsupportedSchemaObjects
-// reports views and other uncaptured objects so consolidate can refuse.
+// shape, and a view has no place in a table snapshot. Snapshots therefore
+// describe table structure only — `migrate consolidate` builds its baseline from
+// mysqldump instead.
 func (m *MySQLDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
 	rows, err := m.conn.QueryContext(ctx, `
 		SELECT table_name
@@ -217,59 +218,6 @@ func (m *MySQLDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationInd
 		migrationIndex, string(jsonBytes),
 	)
 	return err
-}
-
-// UnsupportedSchemaObjects lists schema objects that ComputeSchema does not
-// capture — views, stored routines, triggers and scheduled events. Consolidate
-// refuses rather than emitting a baseline that silently drops them.
-func (m *MySQLDBAdapter) UnsupportedSchemaObjects(ctx context.Context) ([]string, error) {
-	rows, err := m.conn.QueryContext(ctx, `
-		SELECT description FROM (
-			SELECT CONCAT('view ', table_name) AS description
-			FROM information_schema.views
-			WHERE table_schema = DATABASE()
-
-			UNION ALL
-
-			SELECT CONCAT(LOWER(routine_type), ' ', routine_name)
-			FROM information_schema.routines
-			WHERE routine_schema = DATABASE()
-
-			UNION ALL
-
-			SELECT CONCAT('trigger ', trigger_name)
-			FROM information_schema.triggers
-			WHERE trigger_schema = DATABASE()
-
-			UNION ALL
-
-			SELECT CONCAT('event ', event_name)
-			FROM information_schema.events
-			WHERE event_schema = DATABASE()
-		) objects
-		ORDER BY description
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("listing unsupported schema objects: %w", err)
-	}
-	defer rows.Close()
-
-	var objects []string
-	for rows.Next() {
-		var description string
-		if err := rows.Scan(&description); err != nil {
-			return nil, err
-		}
-		objects = append(objects, description)
-	}
-	return objects, rows.Err()
-}
-
-// ValidateSchemaSQL is not supported on MySQL: DDL is not transactional, so
-// there is no way to apply a candidate schema and roll it back. Callers should
-// treat ErrSchemaValidationUnsupported as "unverified", not as a failure.
-func (m *MySQLDBAdapter) ValidateSchemaSQL(ctx context.Context, script string) error {
-	return domain.ErrSchemaValidationUnsupported
 }
 
 // RemoveMigrationRecords deletes the given migration indexes from

@@ -3,8 +3,6 @@ package migration
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,18 +17,22 @@ import (
 )
 
 // RunConsolidateCommand handles "migrate consolidate --up-to <index>". It
-// replaces all migration files up to and including the target with a single
-// file containing the schema snapshot at that point, with tables ordered to
-// respect foreign key dependencies.
+// replaces every migration file with a single baseline produced by the database's
+// own dump tool (pg_dump / mysqldump), and reconciles joka's tracking tables to
+// match.
 //
-// Nothing destructive happens until the generated SQL has been proven
-// applicable: the schema is checked for objects snapshots cannot represent, and
-// (on PostgreSQL) the generated file is applied to a throwaway schema inside a
-// rolled-back transaction. The tracking tables are reconciled with the files
-// so the database consolidate ran against can still migrate afterwards.
+// Joka does not generate schema DDL. The dump tool is the reference
+// implementation; joka's job here is bookkeeping — write the file, remove the
+// records the file no longer covers, delete the files it replaced.
+//
+// The target must be the most recently applied migration. A dump describes the
+// database as it is now, not as it was at some earlier migration, so
+// consolidating "up to" an older index would write a baseline that does not match
+// the index it carries.
 type RunConsolidateCommand struct {
 	DB               *sql.DB
 	Driver           jokadb.Driver
+	DSN              string
 	MigrationsDir    string
 	UpToIndex        string
 	AutoConfirm      bool
@@ -61,7 +63,7 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		return fail(err)
 	}
 
-	// 2. Find the target migration and validate everything up to it is applied.
+	// 2. Locate the target and check it is the last applied migration.
 	targetIdx := -1
 	for i, m := range chain {
 		if m.MigrationIndex == r.UpToIndex {
@@ -73,10 +75,18 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		return fail(fmt.Errorf("migration %s not found in chain", r.UpToIndex))
 	}
 
-	for i := 0; i <= targetIdx; i++ {
-		if chain[i].Status != domain.StatusApplied {
-			return fail(fmt.Errorf("migration %s is not applied — all migrations up to %s must be applied before consolidating", chain[i].MigrationIndex, r.UpToIndex))
+	lastApplied := -1
+	for i, m := range chain {
+		if m.Status == domain.StatusApplied {
+			lastApplied = i
 		}
+	}
+	if targetIdx != lastApplied {
+		if lastApplied < 0 {
+			return fail(fmt.Errorf("no migrations are applied — nothing to consolidate"))
+		}
+		return fail(fmt.Errorf("%w: --up-to must name the last applied migration (%s), not %s\n\nThe baseline is produced by dumping the live schema, which reflects every applied migration. Consolidating up to an earlier index would write a file that does not match the index it carries",
+			domain.ErrNotLastApplied, chain[lastApplied].MigrationIndex, r.UpToIndex))
 	}
 
 	// Must have at least 2 migrations to consolidate.
@@ -84,58 +94,37 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		return fail(fmt.Errorf("need at least 2 migrations to consolidate (found %d)", targetIdx+1))
 	}
 
-	// 3. Refuse if the schema holds objects a snapshot cannot represent. The
-	// snapshot only knows about tables, so consolidating a schema with views,
-	// enum types, functions or triggers would produce a baseline that is
-	// quietly missing them.
-	unsupported, err := adapter.UnsupportedSchemaObjects(ctx)
+	// 3. Refuse if the dump would leave objects behind.
+	dumper := infra.NewSchemaDumper(r.Driver, r.DB, r.DSN)
+
+	uncarried, err := dumper.UncarriedObjects(ctx)
 	if err != nil {
 		return fail(err)
 	}
-	if len(unsupported) > 0 && !r.AllowUnsupported {
-		return fail(fmt.Errorf("%w:\n  - %s\n\nMigration snapshots capture tables only, so a consolidated baseline would not recreate these.\nRe-run with --allow-unsupported if they are created by migrations that are not being consolidated,\nor build the baseline by hand (e.g. pg_dump --schema-only)",
-			domain.ErrUnsupportedSchemaObjects, joinLines(unsupported)))
+	if len(uncarried) > 0 && !r.AllowUnsupported {
+		return fail(fmt.Errorf("%w:\n  - %s\n\nA %s baseline for this driver carries table structures only, so these would be lost.\nRe-run with --allow-unsupported if they are managed outside joka's migrations",
+			domain.ErrUnsupportedSchemaObjects, joinLines(uncarried), dumper.Tool()))
 	}
 
-	// 4. Fetch the schema snapshot for the target migration.
-	snapshotJSON, err := adapter.GetSchemaSnapshot(ctx, r.UpToIndex)
-	if err != nil {
-		return fail(err)
-	}
-
-	var schema map[string]string
-	if err := json.Unmarshal([]byte(snapshotJSON), &schema); err != nil {
-		return fail(fmt.Errorf("parsing snapshot: %w", err))
-	}
-
-	// 5. Topologically sort tables by FK dependencies.
-	deps := app.ParseFKDependencies(schema)
-	order, err := app.TopologicalSort(deps)
+	// 4. Dump the schema. Nothing has been written or deleted yet, so a missing
+	// binary or a version mismatch aborts harmlessly.
+	dumped, err := dumper.Dump(ctx)
 	if err != nil {
 		return fail(err)
 	}
 
-	consolidatedSQL := app.GenerateConsolidatedSQL(schema, order)
-
-	// 6. Prove the generated SQL actually applies, before anything is written
-	// or deleted. This is the check whose absence let a broken file replace the
-	// migrations that produced it.
-	validated := true
-	if err := adapter.ValidateSchemaSQL(ctx, consolidatedSQL); err != nil {
-		if !errors.Is(err, domain.ErrSchemaValidationUnsupported) {
-			return fail(err)
-		}
-		validated = false
-	}
-
-	// 7. Show what will happen and confirm.
-	filesToDelete := chain[:targetIdx+1]
 	newFileName := fmt.Sprintf("%s_consolidated.sql", r.UpToIndex)
 	newFilePath := filepath.Join(r.MigrationsDir, newFileName)
+	baseline := fmt.Sprintf(
+		"-- Consolidated migration\n-- Generated by joka migrate consolidate using %s\n-- Replaces every migration up to and including %s\n\n%s",
+		dumper.Tool(), r.UpToIndex, dumped)
+
+	// 5. Show what will happen and confirm.
+	filesToDelete := chain[:targetIdx+1]
 
 	// The target migration keeps its record — the new file carries its index.
-	// Everything before it is replaced and must leave the tracking tables, or
-	// the chain (zipped positionally against files) breaks on the next command.
+	// Everything before it is replaced and must leave the tracking tables, or the
+	// chain (zipped positionally against files) breaks on the next command.
 	var recordsToRemove []string
 	for _, m := range chain[:targetIdx] {
 		recordsToRemove = append(recordsToRemove, m.MigrationIndex)
@@ -144,23 +133,15 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 	if !jsonOut {
 		color.Green("Consolidation plan:")
 		fmt.Printf("  Target: %s\n", r.UpToIndex)
+		fmt.Printf("  Schema dumped with: %s\n", dumper.Tool())
 		fmt.Printf("  Migrations to consolidate: %d\n", len(filesToDelete))
 		for _, m := range filesToDelete {
 			fmt.Printf("    - %s_%s.sql\n", m.MigrationIndex, m.FileName)
 		}
-		fmt.Printf("  Tables in snapshot: %d\n", len(schema))
-		for _, name := range order {
-			fmt.Printf("    - %s\n", name)
-		}
-		fmt.Printf("  New file: %s\n", newFileName)
+		fmt.Printf("  New file: %s (%d lines)\n", newFileName, countLines(baseline))
 		fmt.Printf("  Migration records to remove: %d\n", len(recordsToRemove))
-		if validated {
-			fmt.Println("  Generated SQL: verified applicable")
-		} else {
-			color.Yellow("  Generated SQL: NOT verified (this driver cannot dry-run DDL)")
-		}
-		if len(unsupported) > 0 {
-			color.Yellow("  Objects the baseline will NOT recreate:\n  - %s", joinLines(unsupported))
+		if len(uncarried) > 0 {
+			color.Yellow("  Objects the baseline will NOT recreate:\n  - %s", joinLines(uncarried))
 		}
 		fmt.Println()
 	}
@@ -172,19 +153,19 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		}
 	}
 
-	// 8. Write the consolidated file.
-	if err := os.WriteFile(newFilePath, []byte(consolidatedSQL), 0644); err != nil {
+	// 6. Write the baseline.
+	if err := os.WriteFile(newFilePath, []byte(baseline), 0644); err != nil {
 		return fail(fmt.Errorf("writing consolidated file: %w", err))
 	}
 
-	// 9. Reconcile the tracking tables. Done before deleting files so a failure
+	// 7. Reconcile the tracking tables. Done before deleting files so a failure
 	// here leaves the migrations directory intact and the database unchanged.
 	if err := adapter.RemoveMigrationRecords(ctx, recordsToRemove); err != nil {
-		os.Remove(newFilePath) //nolint:errcheck — best-effort rollback of step 8
+		os.Remove(newFilePath) //nolint:errcheck — best-effort rollback of step 6
 		return fail(fmt.Errorf("reconciling migration records: %w", err))
 	}
 
-	// 10. Delete the migration files the new file replaces.
+	// 8. Delete the migration files the baseline replaces.
 	var deleted []string
 	for _, m := range filesToDelete {
 		// The target file may already be the consolidated file we just wrote.
@@ -198,7 +179,7 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		deleted = append(deleted, m.MigrationIndex)
 	}
 
-	// 11. Report on the resulting migration directory.
+	// 9. Report on the resulting migration directory.
 	remaining, err := infra.ListMigrationFiles(r.MigrationsDir)
 	if err != nil {
 		if jsonOut {
@@ -215,8 +196,8 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 			"new_file":        newFileName,
 			"total_files":     len(remaining),
 			"records_removed": recordsToRemove,
-			"validated":       validated,
-			"unsupported":     unsupported,
+			"dump_tool":       dumper.Tool(),
+			"uncarried":       uncarried,
 		})
 		return nil
 	}
@@ -239,4 +220,15 @@ func joinLines(items []string) string {
 		out += item
 	}
 	return out
+}
+
+// countLines reports how many lines a script occupies, for the plan output.
+func countLines(script string) int {
+	count := 0
+	for _, c := range script {
+		if c == '\n' {
+			count++
+		}
+	}
+	return count
 }

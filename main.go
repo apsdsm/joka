@@ -34,6 +34,7 @@ func main() {
 		outputFormat  string
 		dbConn        *sql.DB
 		dbDriver      jokadb.Driver
+		dbDSN         string
 		cfg           *config.Config
 	)
 
@@ -81,6 +82,8 @@ func main() {
 			if err != nil {
 				return err
 			}
+			// Kept for `migrate consolidate`, which hands it to pg_dump/mysqldump.
+			dbDSN = dsn
 
 			dbConn, dbDriver, err = jokadb.Open(dsn)
 			if err != nil {
@@ -234,6 +237,7 @@ func main() {
 			return migration.RunConsolidateCommand{
 				DB:               dbConn,
 				Driver:           dbDriver,
+				DSN:              dbDSN,
 				MigrationsDir:    migrationsDir,
 				UpToIndex:        upTo,
 				AutoConfirm:      autoConfirm,

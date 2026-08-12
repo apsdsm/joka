@@ -142,10 +142,12 @@ func (p *PostgresDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
 // tx waits for the snapshot to finish — an unbreakable cross-connection
 // deadlock. Reading on the same tx connection avoids it (and correctly sees the
 // uncommitted in-tx schema).
+//
 // Only ordinary tables are captured: views, materialized views, foreign tables
 // and partitioned tables cannot be faithfully reconstructed here, and emitting
-// them as plain CREATE TABLE would produce a wrong schema. UnsupportedSchemaObjects
-// reports them so consolidation can refuse rather than silently drop them.
+// them as plain CREATE TABLE would produce a wrong schema. Snapshots therefore
+// describe table structure only — `migrate consolidate` builds its baseline from
+// pg_dump instead, precisely because this cannot represent the whole schema.
 func (p *PostgresDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT c.relname, quote_ident(c.relname)
@@ -367,145 +369,6 @@ func (p *PostgresDBAdapter) reconstructCreateTable(ctx context.Context, tableNam
 	}
 
 	return result, nil
-}
-
-// UnsupportedSchemaObjects lists schema objects that ComputeSchema cannot
-// represent — views, materialized views, foreign and partitioned tables,
-// standalone sequences, user-defined types and domains, functions, procedures,
-// triggers, and extensions installed into the current schema. Sequences owned
-// by a serial/identity column are excluded: those are recreated with their
-// column.
-//
-// Callers that turn a snapshot back into DDL (consolidate) must refuse when
-// this is non-empty; the alternative is a baseline that is quietly missing
-// objects the real schema has.
-func (p *PostgresDBAdapter) UnsupportedSchemaObjects(ctx context.Context) ([]string, error) {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT description FROM (
-			SELECT CASE c.relkind
-			         WHEN 'v' THEN 'view '
-			         WHEN 'm' THEN 'materialized view '
-			         WHEN 'f' THEN 'foreign table '
-			         WHEN 'p' THEN 'partitioned table '
-			       END || quote_ident(c.relname) AS description
-			FROM pg_class c
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE n.nspname = current_schema()
-			AND c.relkind IN ('v', 'm', 'f', 'p')
-
-			UNION ALL
-
-			SELECT 'sequence ' || quote_ident(c.relname)
-			FROM pg_class c
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE n.nspname = current_schema()
-			AND c.relkind = 'S'
-			AND NOT EXISTS (
-				SELECT 1 FROM pg_depend d
-				WHERE d.objid = c.oid
-				AND d.classid = 'pg_class'::regclass
-				AND d.deptype IN ('a', 'i')
-			)
-
-			UNION ALL
-
-			SELECT CASE t.typtype
-			         WHEN 'e' THEN 'enum type '
-			         WHEN 'c' THEN 'composite type '
-			         WHEN 'd' THEN 'domain '
-			         WHEN 'r' THEN 'range type '
-			       END || quote_ident(t.typname)
-			FROM pg_type t
-			JOIN pg_namespace n ON n.oid = t.typnamespace
-			LEFT JOIN pg_class c ON c.oid = t.typrelid
-			WHERE n.nspname = current_schema()
-			AND t.typtype IN ('e', 'c', 'd', 'r')
-			AND (t.typrelid = 0 OR c.relkind = 'c')
-			AND NOT EXISTS (
-				SELECT 1 FROM pg_depend d
-				WHERE d.objid = t.oid AND d.classid = 'pg_type'::regclass AND d.deptype = 'e'
-			)
-
-			UNION ALL
-
-			SELECT CASE p.prokind
-			         WHEN 'p' THEN 'procedure '
-			         WHEN 'a' THEN 'aggregate '
-			         ELSE 'function '
-			       END || quote_ident(p.proname)
-			FROM pg_proc p
-			JOIN pg_namespace n ON n.oid = p.pronamespace
-			WHERE n.nspname = current_schema()
-			AND NOT EXISTS (
-				SELECT 1 FROM pg_depend d
-				WHERE d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
-			)
-
-			UNION ALL
-
-			SELECT 'trigger ' || quote_ident(tg.tgname) || ' on ' || quote_ident(c.relname)
-			FROM pg_trigger tg
-			JOIN pg_class c ON c.oid = tg.tgrelid
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE n.nspname = current_schema()
-			AND NOT tg.tgisinternal
-			AND c.relname NOT LIKE 'joka\_%' ESCAPE '\'
-
-			UNION ALL
-
-			SELECT 'extension ' || quote_ident(e.extname)
-			FROM pg_extension e
-			JOIN pg_namespace n ON n.oid = e.extnamespace
-			WHERE n.nspname = current_schema()
-		) objects
-		ORDER BY description
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("listing unsupported schema objects: %w", err)
-	}
-	defer rows.Close()
-
-	var objects []string
-	for rows.Next() {
-		var description string
-		if err := rows.Scan(&description); err != nil {
-			return nil, err
-		}
-		objects = append(objects, description)
-	}
-	return objects, rows.Err()
-}
-
-// consolidateCheckSchema is the throwaway schema ValidateSchemaSQL applies
-// candidate DDL into. It only ever exists inside a rolled-back transaction.
-const consolidateCheckSchema = "joka_consolidate_check"
-
-// ValidateSchemaSQL applies the given SQL to a scratch schema inside a
-// transaction that is always rolled back, so a generated schema is proven
-// applicable before anything irreversible is done with it. The database is left
-// untouched either way.
-func (p *PostgresDBAdapter) ValidateSchemaSQL(ctx context.Context, script string) error {
-	tx, err := p.conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("starting validation transaction: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck — the rollback is the point; nothing is ever committed
-
-	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA `+consolidateCheckSchema); err != nil {
-		return fmt.Errorf("creating validation schema (needs CREATE on the database): %w", err)
-	}
-	// Scratch schema only — no public fallback, so a statement can't be
-	// satisfied by an existing table of the same name in the real schema.
-	if _, err := tx.ExecContext(ctx, `SET LOCAL search_path = `+consolidateCheckSchema); err != nil {
-		return fmt.Errorf("setting validation search_path: %w", err)
-	}
-
-	for _, stmt := range jokadb.SplitSQLStatements(script) {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("%w: %v\n\nfailing statement:\n%s", domain.ErrSchemaNotApplicable, err, strings.TrimSpace(stmt))
-		}
-	}
-	return nil
 }
 
 // RemoveMigrationRecords deletes the given migration indexes from

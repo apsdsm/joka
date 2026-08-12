@@ -4,16 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+
+	jokadb "github.com/apsdsm/joka/db"
 )
 
 var (
 	testPostgresDB  *sql.DB
+	testPostgresDSN string
 	pgOnce          sync.Once
 	pgInitErr       error
 )
@@ -69,6 +74,7 @@ func startPostgresContainer() (*sql.DB, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
+	testPostgresDSN = connStr
 	return db, nil
 }
 
@@ -79,4 +85,71 @@ func DropTablePostgres(t *testing.T, db *sql.DB, tableName string) {
 	if err != nil {
 		t.Logf("warning: failed to drop table %s: %v", tableName, err)
 	}
+}
+
+// GetTestPostgresDSN returns the connection string for the test PostgreSQL
+// container. Tests that shell out to pg_dump need the DSN, not just a *sql.DB.
+// It starts the container if it is not already running.
+func GetTestPostgresDSN() (string, error) {
+	if _, err := GetTestPostgresDB(); err != nil {
+		return "", err
+	}
+	return testPostgresDSN, nil
+}
+
+// ApplyToScratchPostgresDB creates a throwaway database, applies script to it
+// using joka's own SQL splitter (the same path `migrate up` takes), and drops it
+// again. It is how a generated baseline is proven to rebuild a schema from
+// nothing. Any statement that fails is reported with the statement text.
+func ApplyToScratchPostgresDB(t *testing.T, script, dbName string) error {
+	t.Helper()
+	ctx := context.Background()
+
+	admin, err := GetTestPostgresDB()
+	if err != nil {
+		return fmt.Errorf("getting test db: %w", err)
+	}
+	dsn, err := GetTestPostgresDSN()
+	if err != nil {
+		return err
+	}
+
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %q`, dbName)); err != nil {
+		return fmt.Errorf("dropping scratch database: %w", err)
+	}
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf(`CREATE DATABASE %q`, dbName)); err != nil {
+		return fmt.Errorf("creating scratch database: %w", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.ExecContext(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %q`, dbName)); err != nil {
+			t.Logf("warning: failed to drop scratch database %s: %v", dbName, err)
+		}
+	})
+
+	scratchDSN, err := replacePostgresDBName(dsn, dbName)
+	if err != nil {
+		return err
+	}
+	scratch, err := sql.Open("postgres", scratchDSN)
+	if err != nil {
+		return fmt.Errorf("opening scratch database: %w", err)
+	}
+	defer scratch.Close()
+
+	for _, stmt := range jokadb.SplitSQLStatements(script) {
+		if _, err := scratch.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("%w\n\nfailing statement:\n%s", err, strings.TrimSpace(stmt))
+		}
+	}
+	return nil
+}
+
+// replacePostgresDBName swaps the database name in a postgres connection URL.
+func replacePostgresDBName(dsn, dbName string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", fmt.Errorf("parsing test DSN: %w", err)
+	}
+	u.Path = "/" + dbName
+	return u.String(), nil
 }
