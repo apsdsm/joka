@@ -163,7 +163,7 @@ Snapshots cover **base tables only**, and are reconstructed per driver:
 
 Views, functions, types, triggers and standalone sequences are **not** captured. Snapshots feed `migrate snapshot` and `migrate verify` only — **not** consolidation, which dumps the schema with pg_dump precisely because a table snapshot cannot describe a whole schema.
 
-Note: the PostgreSQL reconstruction format changed after v0.12.0. Snapshots captured by an earlier version will show as drift in `migrate verify` until the next migration re-captures them.
+Note: the PostgreSQL reconstruction format changed in v0.13.0. Snapshots captured by v0.12.0 or earlier will show as drift in `migrate verify` until the next migration re-captures them.
 
 ## Consolidation
 

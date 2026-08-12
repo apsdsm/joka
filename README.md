@@ -358,6 +358,8 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`; must be the last applied migration) |
 | `--ignore-foreign-keys` | | `false` | Disable FK checks during data sync truncate (MySQL) |
+| `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`) |
+| `--force` | | `false` | Re-apply tracked files even when unchanged (`entity sync`) |
 
 ## How It Works
 
