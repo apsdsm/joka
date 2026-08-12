@@ -14,7 +14,7 @@ Build from source (requires Go 1.25+):
 go install github.com/apsdsm/joka@latest
 ```
 
-`joka migrate consolidate` additionally needs your database's own dump tool on `PATH` — `pg_dump` for PostgreSQL, `mysqldump` for MySQL. No other command requires them.
+`joka migrate consolidate` additionally needs `pg_dump` on `PATH`. It is PostgreSQL-only for now, and no other command requires an external binary.
 
 ## Setup
 
@@ -274,11 +274,13 @@ Displays the schema snapshot captured after a migration was applied. Shows `CREA
 
 ### `joka migrate consolidate --up-to <migration_index>`
 
-Squashes the applied migration history into a single baseline file, dumped by the database's own tool.
+Squashes the applied migration history into a single baseline file, dumped by `pg_dump`.
 
-Joka does not write the schema itself. It shells out to **`pg_dump`** or **`mysqldump`** — they are the reference implementations, and anything joka reconstructed by hand would silently lose whatever it did not know about. Joka's job here is bookkeeping: write the baseline, remove the tracking rows it replaces, delete the files it supersedes.
+**PostgreSQL only.** On MySQL the command refuses. `mysqldump` writes views, routines and triggers using `DELIMITER` (a mysql-client directive rather than SQL) and multi-line `/*!NNNNN ... */` conditional blocks, none of which joka's SQL splitter can run — that needs splitter work, and it is worth doing once this flow has proven itself on Postgres.
 
-**Requires `pg_dump` (PostgreSQL) or `mysqldump` (MySQL) on `PATH`.** `pg_dump` also refuses to run against a server newer than itself, so keep the client version at or above the server's.
+Joka does not write the schema itself. It shells out to `pg_dump` — the reference implementation — because anything joka reconstructed by hand would silently lose whatever it did not know about. Joka's job here is bookkeeping: write the baseline, remove the tracking rows it replaces, delete the files it supersedes.
+
+**Requires `pg_dump` on `PATH`.** It also refuses to run against a server newer than itself, so keep the client version at or above the server's.
 
 ```
 $ joka migrate status
@@ -295,10 +297,7 @@ All three files are replaced by `250201100000_consolidated.sql`.
 
 **Bookkeeping.** The baseline keeps the target's index, so the records it replaced are removed from `joka_migrations` (and their `joka_snapshots` rows with them) in a single transaction. The chain is matched positionally, so leaving stale rows behind would break every subsequent joka command on that database. Other databases that applied the original migrations still need their own `joka_migrations` reconciled before they can migrate against the consolidated directory.
 
-**What the baseline contains, per driver:**
-
-- **PostgreSQL** — everything `pg_dump --schema-only` emits: tables, indexes, constraints, sequences, identity and generated columns, types, domains, views, materialized views, functions, triggers, extensions. Its `\restrict` / `\unrestrict` psql directives are stripped, since they are client commands rather than SQL. Foreign keys arrive as trailing `ALTER TABLE` statements, so table order does not matter.
-- **MySQL** — table structures only. `mysqldump` wraps views, routines and triggers in constructs joka's applier cannot run (`DELIMITER`, which is a mysql-client directive, and multi-line `/*!NNNNN ... */` conditional blocks), so consolidation **refuses** when the schema contains any of them and lists what it found. Pass `--allow-unsupported` if they are managed outside joka's migrations and you accept their absence from the baseline. mysqldump's single-line conditional statements are replaced with plain `SET FOREIGN_KEY_CHECKS` toggles, because joka's SQL splitter treats conditional comments as comments and would drop them.
+**What the baseline contains.** Everything `pg_dump --schema-only` emits: tables, indexes, constraints, sequences, identity and generated columns, types, domains, views, materialized views, functions, triggers, extensions. The `joka_*` tracking tables are excluded, along with the sequences they own. `\restrict` / `\unrestrict` psql directives are stripped, since they are client commands rather than SQL. Foreign keys arrive as trailing `ALTER TABLE` statements, so table order does not matter.
 
 **Checks before anything is deleted.** The dump runs first; a missing binary, a version mismatch, or a dump that does not contain one `CREATE TABLE` per table in the database all abort before any file is written or removed.
 
@@ -357,8 +356,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--entities` | | `devops/entities` | Path to the entities directory |
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
-| `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`) |
-| `--allow-unsupported` | | `false` | Consolidate even though the dump will not carry every object (MySQL views/routines/triggers) |
+| `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`; must be the last applied migration) |
 | `--ignore-foreign-keys` | | `false` | Disable FK checks during data sync truncate (MySQL) |
 
 ## How It Works

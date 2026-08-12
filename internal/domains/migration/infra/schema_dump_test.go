@@ -55,25 +55,15 @@ func TestPgSchemaDumper(t *testing.T) {
 	execPG(t, db, `CREATE VIEW test_dump_view AS SELECT id, m FROM test_dump_parent`)
 	execPG(t, db, `CREATE FUNCTION test_dump_fn() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql`)
 
-	dumper := infra.NewSchemaDumper(jokadb.Postgres, db, dsn)
-	if dumper.Tool() != "pg_dump" {
-		t.Fatalf("expected pg_dump, got %s", dumper.Tool())
+	dumper, err := infra.NewSchemaDumper(jokadb.Postgres, db, dsn)
+	if err != nil {
+		t.Fatalf("NewSchemaDumper: %v", err)
 	}
 
 	script, err := dumper.Dump(ctx)
 	if err != nil {
 		t.Fatalf("Dump: %v", err)
 	}
-
-	t.Run("it reports nothing uncarried", func(t *testing.T) {
-		objects, err := dumper.UncarriedObjects(ctx)
-		if err != nil {
-			t.Fatalf("UncarriedObjects: %v", err)
-		}
-		if len(objects) != 0 {
-			t.Errorf("pg_dump carries everything, expected no exclusions, got %v", objects)
-		}
-	})
 
 	t.Run("it strips psql meta-commands", func(t *testing.T) {
 		for _, line := range strings.Split(script, "\n") {
@@ -114,75 +104,4 @@ func TestPgSchemaDumper(t *testing.T) {
 			t.Fatalf("dump did not apply:\n%v", err)
 		}
 	})
-}
-
-func TestMySQLSchemaDumper(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-	if _, err := exec.LookPath("mysqldump"); err != nil {
-		t.Skip("mysqldump not installed")
-	}
-
-	db, err := testlib.GetTestDB()
-	if err != nil {
-		t.Fatalf("getting test db: %v", err)
-	}
-	ctx := context.Background()
-
-	t.Cleanup(func() {
-		execMySQL(t, db, "DROP VIEW IF EXISTS test_mydump_view")
-		testlib.DropTable(t, db, "test_mydump_child")
-		testlib.DropTable(t, db, "test_mydump_parent")
-	})
-
-	execMySQL(t, db, "CREATE TABLE test_mydump_parent (id BIGINT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(255) NOT NULL UNIQUE)")
-	execMySQL(t, db, "CREATE TABLE test_mydump_child (id INT PRIMARY KEY, parent_id BIGINT, CONSTRAINT fk_mydump FOREIGN KEY (parent_id) REFERENCES test_mydump_parent(id))")
-
-	dsn, err := testlib.GetTestDSN()
-	if err != nil {
-		t.Fatalf("getting test dsn: %v", err)
-	}
-	dumper := infra.NewSchemaDumper(jokadb.MySQL, db, dsn)
-
-	t.Run("it reports views as uncarried", func(t *testing.T) {
-		execMySQL(t, db, "CREATE VIEW test_mydump_view AS SELECT id FROM test_mydump_parent")
-		objects, err := dumper.UncarriedObjects(ctx)
-		if err != nil {
-			t.Fatalf("UncarriedObjects: %v", err)
-		}
-		if !strings.Contains(strings.Join(objects, "\n"), "view test_mydump_view") {
-			t.Errorf("expected the view to be reported, got %v", objects)
-		}
-		execMySQL(t, db, "DROP VIEW test_mydump_view")
-	})
-
-	t.Run("it dumps tables with foreign key checks disabled", func(t *testing.T) {
-		script, err := dumper.Dump(ctx)
-		if err != nil {
-			t.Fatalf("Dump: %v", err)
-		}
-		if !strings.HasPrefix(script, "SET FOREIGN_KEY_CHECKS = 0;") {
-			t.Errorf("expected FK checks to be disabled up front, got:\n%s", firstLines(script, 3))
-		}
-		if !strings.Contains(script, "CREATE TABLE `test_mydump_parent`") {
-			t.Errorf("expected the parent table in the dump")
-		}
-		if strings.Contains(script, "joka_") {
-			t.Errorf("expected joka tables to be excluded")
-		}
-		for _, line := range strings.Split(script, "\n") {
-			if strings.Contains(line, "/*!") {
-				t.Errorf("conditional statement survived: %q", line)
-			}
-		}
-	})
-}
-
-func firstLines(s string, n int) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) > n {
-		lines = lines[:n]
-	}
-	return strings.Join(lines, "\n")
 }

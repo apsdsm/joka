@@ -14,7 +14,6 @@ import (
 
 var (
 	testDB  *sql.DB
-	testDSN string
 	once    sync.Once
 	initErr error
 )
@@ -69,7 +68,6 @@ func startContainer() (*sql.DB, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	testDSN = connStr
 	return db, nil
 }
 
@@ -81,14 +79,4 @@ func DropTable(t *testing.T, db *sql.DB, tableName string) {
 	if err != nil {
 		t.Logf("warning: failed to drop table %s: %v", tableName, err)
 	}
-}
-
-// GetTestDSN returns the connection string for the test MySQL container. Tests
-// that shell out to mysqldump need the DSN, not just a *sql.DB. It starts the
-// container if it is not already running.
-func GetTestDSN() (string, error) {
-	if _, err := GetTestDB(); err != nil {
-		return "", err
-	}
-	return testDSN, nil
 }

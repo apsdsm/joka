@@ -15,9 +15,10 @@ var (
 	// joka is able to apply, so it must not be written as a migration.
 	ErrDumpNotApplicable = errors.New("dump output is not applicable by joka")
 
-	// ErrUnsupportedSchemaObjects means the schema contains objects the dump
-	// cannot carry, so a consolidated baseline would silently drop them.
-	ErrUnsupportedSchemaObjects = errors.New("schema contains objects that cannot be consolidated")
+	// ErrDumpDriverUnsupported means joka cannot build a consolidated baseline
+	// for this driver yet. PostgreSQL only for now; MySQL needs SQL-splitter work
+	// before mysqldump output can be applied.
+	ErrDumpDriverUnsupported = errors.New("consolidation is not supported on this driver yet")
 
 	// ErrNotLastApplied means consolidation was asked to target a migration that
 	// is not the most recently applied one. A dump describes the schema now, so

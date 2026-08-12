@@ -227,27 +227,24 @@ func main() {
 
 	migrateConsolidateCmd := &cobra.Command{
 		Use:   "consolidate",
-		Short: "Consolidate migrations into a single file using a schema snapshot",
+		Short: "Squash applied migrations into one baseline dumped by pg_dump (PostgreSQL only)",
 		RunE: func(c *cobra.Command, _ []string) error {
 			upTo, _ := c.Flags().GetString("up-to")
 			if upTo == "" {
 				return fmt.Errorf("--up-to flag is required")
 			}
-			allowUnsupported, _ := c.Flags().GetBool("allow-unsupported")
 			return migration.RunConsolidateCommand{
-				DB:               dbConn,
-				Driver:           dbDriver,
-				DSN:              dbDSN,
-				MigrationsDir:    migrationsDir,
-				UpToIndex:        upTo,
-				AutoConfirm:      autoConfirm,
-				AllowUnsupported: allowUnsupported,
-				OutputFormat:     outputFormat,
+				DB:            dbConn,
+				Driver:        dbDriver,
+				DSN:           dbDSN,
+				MigrationsDir: migrationsDir,
+				UpToIndex:     upTo,
+				AutoConfirm:   autoConfirm,
+				OutputFormat:  outputFormat,
 			}.Execute(c.Context())
 		},
 	}
-	migrateConsolidateCmd.Flags().String("up-to", "", "Migration index to consolidate up to (required)")
-	migrateConsolidateCmd.Flags().Bool("allow-unsupported", false, "Consolidate even though the schema contains objects the baseline will not recreate (views, types, functions, triggers)")
+	migrateConsolidateCmd.Flags().String("up-to", "", "Migration index to consolidate up to (required; must be the last applied migration)")
 
 	migrateVerifyCmd := &cobra.Command{
 		Use:   "verify",

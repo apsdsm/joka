@@ -76,7 +76,7 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 ## Key Technical Details
 
 - **Go 1.25+** with `github.com/go-sql-driver/mysql` and `github.com/lib/pq`
-- **External binaries**: `migrate consolidate` requires `pg_dump` / `mysqldump` on `PATH`. No other command shells out. Tests that need them skip when absent (`exec.LookPath`).
+- **External binaries**: `migrate consolidate` requires `pg_dump` on `PATH` (PostgreSQL only). No other command shells out. Tests that need it skip when absent (`exec.LookPath`).
 - **Driver auto-detection**: The database driver is detected from the `DATABASE_URL` format. PostgreSQL DSNs start with `postgres://` or `postgresql://`; everything else is assumed MySQL.
 - **Multi-statement SQL**: MySQL DSN is configured with `multiStatements=true`; PostgreSQL handles multiple statements natively.
 - **Connection**: by default the DSN comes from `DATABASE_URL` (`.env` or environment). The
@@ -158,22 +158,23 @@ CREATE TABLE joka_entity_rows (
 
 Snapshots cover **base tables only**, and are reconstructed per driver:
 
-- **MySQL** — `SHOW CREATE TABLE`, used verbatim (no trailing `;`; `GenerateConsolidatedSQL` adds one).
+- **MySQL** — `SHOW CREATE TABLE`, used verbatim (no trailing `;`).
 - **PostgreSQL** — rebuilt from `pg_catalog` in `reconstructCreateTable`. Column types come from `format_type()`; identity, generated and serial columns are read from `pg_attribute`. `information_schema.columns` is deliberately **not** used: it reports `ARRAY` / `USER-DEFINED` instead of real types and has no way to express identity. Each statement it emits is terminated with `;`, including the index statements appended after the table body. Sequences owned by a `serial` column are recreated by rendering the column as `serial`/`bigserial`.
 
-Views, functions, types, triggers and standalone sequences are **not** captured. Snapshots feed `migrate snapshot` and `migrate verify` only — **not** consolidation, which dumps the schema with the database's own tool precisely because a table snapshot cannot describe a whole schema.
+Views, functions, types, triggers and standalone sequences are **not** captured. Snapshots feed `migrate snapshot` and `migrate verify` only — **not** consolidation, which dumps the schema with pg_dump precisely because a table snapshot cannot describe a whole schema.
 
 Note: the PostgreSQL reconstruction format changed after v0.12.0. Snapshots captured by an earlier version will show as drift in `migrate verify` until the next migration re-captures them.
 
 ## Consolidation
 
-`joka migrate consolidate --up-to <index>` squashes the applied history into one `<index>_consolidated.sql`, produced by shelling out to **pg_dump / mysqldump** (`internal/domains/migration/infra/schema_dump.go`, the `SchemaDumper` interface). Joka generates no schema DDL of its own here — the dump tool is the reference implementation, and hand-rolled reconstruction silently drops whatever it does not model.
+`joka migrate consolidate --up-to <index>` squashes the applied history into one `<index>_consolidated.sql`, produced by shelling out to **pg_dump** (`internal/domains/migration/infra/schema_dump.go`, the `SchemaDumper` interface). Joka generates no schema DDL of its own here — the dump tool is the reference implementation, and hand-rolled reconstruction silently drops whatever it does not model.
+
+**PostgreSQL only.** `NewSchemaDumper` returns `ErrDumpDriverUnsupported` for any other driver, and the command refuses before touching anything. MySQL is deliberately deferred: `mysqldump` writes views, routines and triggers with `DELIMITER` (a mysql-client directive) and multi-line `/*!NNNNN … */` conditional blocks, and `db.SplitSQLStatements` can run neither. Adding MySQL means teaching the splitter both — do it after this flow has proven itself, and note that the splitter is shared with every migration file, so changes there carry risk.
 
 - **`--up-to` must be the last applied migration** (`ErrNotLastApplied`). A dump reflects the schema now, so an earlier index would carry a baseline that does not match it. Pending files after the target are untouched. Partial squash is therefore not supported.
-- Consolidation no longer reads `joka_snapshots`, so it works on databases migrated before snapshots existed.
-- **Postgres**: `pg_dump --schema-only --no-owner --no-privileges --exclude-table=joka_*`. The wildcard also excludes the sequences owned by joka tables. `\restrict` / `\unrestrict` are stripped — psql client directives, not SQL. FKs come back as trailing `ALTER TABLE`s, which is why no FK ordering logic is needed. `UncarriedObjects` returns nothing: pg_dump carries every object class.
-- **MySQL**: tables only. `UncarriedObjects` reports views/routines/triggers/events and consolidation refuses (`ErrUnsupportedSchemaObjects`, waivable with `--allow-unsupported`), because mysqldump emits those with `DELIMITER` (a mysql-client directive) and multi-line `/*!NNNNN … */` blocks that `db.SplitSQLStatements` cannot run. Single-line conditional statements are stripped and replaced with plain `SET FOREIGN_KEY_CHECKS` toggles — the splitter classifies conditional comments as comments and drops them, which would otherwise leave mysqldump's alphabetical table order failing on FKs.
-- Passwords go to the dump tool via `PGPASSWORD` / `MYSQL_PWD`, never in argv.
+- Consolidation does not read `joka_snapshots`, so it works on databases migrated before snapshots existed.
+- `pg_dump --schema-only --no-owner --no-privileges --exclude-table=joka_*`. The wildcard also excludes the sequences owned by joka tables. `\restrict` / `\unrestrict` are stripped — psql client directives, not SQL. FKs come back as trailing `ALTER TABLE`s, which is why no FK ordering logic is needed.
+- The password goes to pg_dump via `PGPASSWORD`, never in argv.
 - `verifyTableCoverage` asserts one `CREATE TABLE` per table in the database before the dump is accepted.
 - Order of operations: dump → write file → `RemoveMigrationRecords` (one transaction) → delete old files. Bookkeeping precedes file deletion so a failure there leaves the directory intact. The target's own record is kept — the new file carries its index, and the chain is zipped positionally.
 
