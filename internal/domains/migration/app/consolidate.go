@@ -113,6 +113,10 @@ func GenerateConsolidatedSQL(schema map[string]string, order []string) string {
 	for _, table := range order {
 		ddl := strings.TrimSpace(schema[table])
 		ddl = autoIncPattern.ReplaceAllString(ddl, "")
+		// MySQL's SHOW CREATE TABLE returns a single unterminated statement, so
+		// it needs one added. The Postgres reconstruction terminates every
+		// statement it emits — including the index statements it appends after
+		// the table body, which this check cannot see.
 		if !strings.HasSuffix(ddl, ";") {
 			ddl += ";"
 		}

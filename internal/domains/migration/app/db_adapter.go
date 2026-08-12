@@ -34,4 +34,15 @@ type DBAdapter interface {
 	GetSchemaSnapshot(ctx context.Context, migrationIndex string) (string, error)
 	// GetLatestSnapshotIndex returns the migration index of the most recent snapshot.
 	GetLatestSnapshotIndex(ctx context.Context) (string, error)
+	// UnsupportedSchemaObjects returns human-readable descriptions of schema
+	// objects that ComputeSchema does not capture (views, types, functions,
+	// triggers, …). Empty means the snapshot fully describes the schema.
+	UnsupportedSchemaObjects(ctx context.Context) ([]string, error)
+	// ValidateSchemaSQL proves the given schema SQL applies cleanly, without
+	// modifying the database. Returns domain.ErrSchemaNotApplicable if it does
+	// not, or domain.ErrSchemaValidationUnsupported if the driver cannot check.
+	ValidateSchemaSQL(ctx context.Context, script string) error
+	// RemoveMigrationRecords deletes the given migration indexes (and their
+	// snapshots) from the tracking tables in a single transaction.
+	RemoveMigrationRecords(ctx context.Context, indexes []string) error
 }

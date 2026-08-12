@@ -24,6 +24,7 @@ go run . migrate up
 go run . migrate status
 go run . migrate snapshot
 go run . migrate verify
+go run . migrate consolidate --up-to 250116140000
 go run . data sync
 go run . entity sync
 go run . entity status
@@ -151,6 +152,27 @@ CREATE TABLE joka_entity_rows (
 - Useful for catching out-of-band DDL (manual `ALTER TABLE`, columns added without a migration, etc.).
 - MySQL `AUTO_INCREMENT=<n>` is stripped before comparison so row-insertion noise doesn't false-positive.
 - Exit code is non-zero when drift is detected — suitable for CI gating.
+
+## Schema snapshots
+
+Snapshots cover **base tables only**, and are reconstructed per driver:
+
+- **MySQL** — `SHOW CREATE TABLE`, used verbatim (no trailing `;`; `GenerateConsolidatedSQL` adds one).
+- **PostgreSQL** — rebuilt from `pg_catalog` in `reconstructCreateTable`. Column types come from `format_type()`; identity, generated and serial columns are read from `pg_attribute`. `information_schema.columns` is deliberately **not** used: it reports `ARRAY` / `USER-DEFINED` instead of real types and has no way to express identity. Each statement it emits is terminated with `;`, including the index statements appended after the table body. Sequences owned by a `serial` column are recreated by rendering the column as `serial`/`bigserial`.
+
+Views, functions, types, triggers and standalone sequences are **not** captured. `UnsupportedSchemaObjects` lists them so `migrate consolidate` can refuse rather than emit a baseline missing them.
+
+Note: the PostgreSQL reconstruction format changed after v0.12.0. Snapshots captured by an earlier version will show as drift in `migrate verify` until the next migration re-captures them.
+
+## Consolidation
+
+`joka migrate consolidate --up-to <index>` replaces every migration file up to and including the target with one `<index>_consolidated.sql` built from that migration's snapshot, FK-ordered.
+
+The command is destructive, so it verifies before it deletes:
+
+1. Refuses (`ErrUnsupportedSchemaObjects`) if the schema holds objects the snapshot cannot represent, listing them. `--allow-unsupported` waives this — appropriate when those objects come from a migration that is not being consolidated.
+2. Applies the generated SQL to a throwaway schema inside a rolled-back transaction (`ValidateSchemaSQL`). Failure aborts before anything is written. MySQL cannot do this — DDL is not transactional — and returns `ErrSchemaValidationUnsupported`, which the command reports as "unverified" rather than treating as failure.
+3. Writes the new file, then removes the superseded rows from `joka_migrations`/`joka_snapshots` (`RemoveMigrationRecords`, one transaction), then deletes the old files. The bookkeeping step comes before file deletion so a failure there leaves the directory intact. The target's own record is kept — the new file carries its index, and the chain is zipped positionally.
 
 ## Wipe and reseed
 

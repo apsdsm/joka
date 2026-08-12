@@ -22,6 +22,11 @@ type mockDBAdapter struct {
 	latestSnapshotIndex   string
 	schemaSnapshot        string
 	computedSchema        map[string]string
+	unsupportedObjects    []string
+	validateErr           error
+	validatedSQL          string
+	removedRecords        []string
+	removeRecordsErr      error
 }
 
 func (m *mockDBAdapter) HasMigrationsTable(ctx context.Context) (bool, error) {
@@ -56,6 +61,17 @@ func (m *mockDBAdapter) GetLatestSnapshotIndex(ctx context.Context) (string, err
 }
 func (m *mockDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
 	return m.computedSchema, nil
+}
+func (m *mockDBAdapter) UnsupportedSchemaObjects(ctx context.Context) ([]string, error) {
+	return m.unsupportedObjects, nil
+}
+func (m *mockDBAdapter) ValidateSchemaSQL(ctx context.Context, script string) error {
+	m.validatedSQL = script
+	return m.validateErr
+}
+func (m *mockDBAdapter) RemoveMigrationRecords(ctx context.Context, indexes []string) error {
+	m.removedRecords = indexes
+	return m.removeRecordsErr
 }
 
 func createTestFile(t *testing.T, dir, name string) {

@@ -230,17 +230,20 @@ func main() {
 			if upTo == "" {
 				return fmt.Errorf("--up-to flag is required")
 			}
+			allowUnsupported, _ := c.Flags().GetBool("allow-unsupported")
 			return migration.RunConsolidateCommand{
-				DB:            dbConn,
-				Driver:        dbDriver,
-				MigrationsDir: migrationsDir,
-				UpToIndex:     upTo,
-				AutoConfirm:   autoConfirm,
-				OutputFormat:  outputFormat,
+				DB:               dbConn,
+				Driver:           dbDriver,
+				MigrationsDir:    migrationsDir,
+				UpToIndex:        upTo,
+				AutoConfirm:      autoConfirm,
+				AllowUnsupported: allowUnsupported,
+				OutputFormat:     outputFormat,
 			}.Execute(c.Context())
 		},
 	}
 	migrateConsolidateCmd.Flags().String("up-to", "", "Migration index to consolidate up to (required)")
+	migrateConsolidateCmd.Flags().Bool("allow-unsupported", false, "Consolidate even though the schema contains objects the baseline will not recreate (views, types, functions, triggers)")
 
 	migrateVerifyCmd := &cobra.Command{
 		Use:   "verify",

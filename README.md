@@ -287,7 +287,14 @@ $ joka migrate consolidate --up-to 250116140000
 
 This replaces the first two migration files with a single `250116140000_consolidated.sql` containing the full schema as of that point. The third migration file is left untouched.
 
-All migrations up to the target must already be applied (snapshots are captured during `migrate up`). This command does not modify the `joka_migrations` tracking table — existing databases that already applied the original migrations are unaffected.
+All migrations up to the target must already be applied (snapshots are captured during `migrate up`).
+
+**Bookkeeping.** The consolidated file keeps the target's index, so the records it replaced are removed from `joka_migrations` (and their `joka_snapshots` rows with them) in a single transaction. The chain is matched positionally, so leaving stale rows behind would break every subsequent joka command on that database. Other databases that applied the original migrations still need their own `joka_migrations` reconciled before they can migrate against the consolidated directory.
+
+**Checks before anything is deleted.** Nothing is written or removed until the generated schema has been shown to work:
+
+- The schema is scanned for objects a snapshot cannot represent — views, materialized views, foreign and partitioned tables, standalone sequences, enum/composite/range types, domains, functions, procedures, triggers, and extensions installed in the schema. Consolidating would silently drop them, so the command refuses and lists them. Pass `--allow-unsupported` to proceed anyway (for example when they are created by a migration that is *not* being consolidated).
+- On PostgreSQL, the generated SQL is applied to a throwaway schema inside a transaction that is always rolled back. If it does not apply, the command stops and the migration files are left alone. MySQL cannot dry-run DDL (it is not transactional), so consolidation there reports that the SQL is unverified.
 
 ### `joka data sync`
 
@@ -345,6 +352,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`) |
+| `--allow-unsupported` | | `false` | Consolidate even though the schema holds objects the baseline will not recreate |
 | `--ignore-foreign-keys` | | `false` | Disable FK checks during data sync truncate (MySQL) |
 
 ## How It Works

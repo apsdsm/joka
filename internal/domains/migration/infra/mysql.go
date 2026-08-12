@@ -152,11 +152,16 @@ func (m *MySQLDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
 
 // ComputeSchema queries SHOW CREATE TABLE for all user tables (excluding
 // joka_* tables) and returns the map of table -> CREATE TABLE statement.
+//
+// Base tables only: SHOW CREATE TABLE on a view returns a different result
+// shape, and a view has no place in a table snapshot. UnsupportedSchemaObjects
+// reports views and other uncaptured objects so consolidate can refuse.
 func (m *MySQLDBAdapter) ComputeSchema(ctx context.Context) (map[string]string, error) {
 	rows, err := m.conn.QueryContext(ctx, `
 		SELECT table_name
 		FROM information_schema.tables
 		WHERE table_schema = DATABASE()
+		AND table_type = 'BASE TABLE'
 		AND table_name NOT LIKE 'joka\_%'
 		ORDER BY table_name
 	`)
@@ -212,6 +217,88 @@ func (m *MySQLDBAdapter) CaptureSchemaSnapshot(ctx context.Context, migrationInd
 		migrationIndex, string(jsonBytes),
 	)
 	return err
+}
+
+// UnsupportedSchemaObjects lists schema objects that ComputeSchema does not
+// capture — views, stored routines, triggers and scheduled events. Consolidate
+// refuses rather than emitting a baseline that silently drops them.
+func (m *MySQLDBAdapter) UnsupportedSchemaObjects(ctx context.Context) ([]string, error) {
+	rows, err := m.conn.QueryContext(ctx, `
+		SELECT description FROM (
+			SELECT CONCAT('view ', table_name) AS description
+			FROM information_schema.views
+			WHERE table_schema = DATABASE()
+
+			UNION ALL
+
+			SELECT CONCAT(LOWER(routine_type), ' ', routine_name)
+			FROM information_schema.routines
+			WHERE routine_schema = DATABASE()
+
+			UNION ALL
+
+			SELECT CONCAT('trigger ', trigger_name)
+			FROM information_schema.triggers
+			WHERE trigger_schema = DATABASE()
+
+			UNION ALL
+
+			SELECT CONCAT('event ', event_name)
+			FROM information_schema.events
+			WHERE event_schema = DATABASE()
+		) objects
+		ORDER BY description
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("listing unsupported schema objects: %w", err)
+	}
+	defer rows.Close()
+
+	var objects []string
+	for rows.Next() {
+		var description string
+		if err := rows.Scan(&description); err != nil {
+			return nil, err
+		}
+		objects = append(objects, description)
+	}
+	return objects, rows.Err()
+}
+
+// ValidateSchemaSQL is not supported on MySQL: DDL is not transactional, so
+// there is no way to apply a candidate schema and roll it back. Callers should
+// treat ErrSchemaValidationUnsupported as "unverified", not as a failure.
+func (m *MySQLDBAdapter) ValidateSchemaSQL(ctx context.Context, script string) error {
+	return domain.ErrSchemaValidationUnsupported
+}
+
+// RemoveMigrationRecords deletes the given migration indexes from
+// joka_migrations, along with any snapshots captured for them, in a single
+// transaction. Used by consolidate to keep the bookkeeping in step with the
+// files it replaced.
+func (m *MySQLDBAdapter) RemoveMigrationRecords(ctx context.Context, indexes []string) error {
+	if len(indexes) == 0 {
+		return nil
+	}
+	if err := m.EnsureSnapshotsTable(ctx); err != nil {
+		return fmt.Errorf("ensuring snapshots table: %w", err)
+	}
+
+	tx, err := m.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck — no-op once committed
+
+	for _, index := range indexes {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM joka_migrations WHERE migration_index = ?`, index); err != nil {
+			return fmt.Errorf("removing migration record %s: %w", index, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM joka_snapshots WHERE migration_index = ?`, index); err != nil {
+			return fmt.Errorf("removing snapshot for %s: %w", index, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // GetSchemaSnapshot retrieves the stored schema snapshot for a given migration index.
