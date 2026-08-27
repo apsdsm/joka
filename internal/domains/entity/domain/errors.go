@@ -36,13 +36,6 @@ var (
 	// it has already been tracked.
 	ErrEntityMissingRefID = errors.New("all entities must have _id for entity update")
 
-	// ErrStructuralChange is returned when a modified entity file cannot be
-	// updated in place because its structure changed relative to what was
-	// tracked (an entity was removed, its table changed, or an entity lacks
-	// an _id needed to match a tracked row). The caller should fall back to
-	// 'entity reimport'.
-	ErrStructuralChange = errors.New("entity file changed structurally; use 'entity reimport'")
-
 	// ErrRowsStillLive is returned when entity forget is asked to drop the
 	// tracking for a file whose rows are still in the database. Forgetting
 	// them would leave rows nothing tracks, and the next sync would insert a
@@ -55,4 +48,9 @@ var (
 	// []EntitySetProblem the validator returns, which carries the file and
 	// position of every entity involved.
 	ErrEntitySetInvalid = errors.New("entity set is not valid")
+
+	// ErrEntityTableChanged means an _id is tracked as a row in one table but is
+	// now declared in another. An _id names one row; the new declaration is a
+	// different thing wearing the same name.
+	ErrEntityTableChanged = errors.New("_id now declares a different table")
 )

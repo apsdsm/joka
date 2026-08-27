@@ -76,9 +76,6 @@ func deriveActions(r Report) []Action {
 					plural(file.Tracked, "row", "rows")),
 				"joka entity forget "+file.Path)
 
-		case file.Structural != "":
-			add(ScopeEntities, file.Path, file.Structural, "joka entity reimport "+file.Path)
-
 		// The file still declares these rows, so restoring them is the action
 		// that makes the database match the devops folder. Forget is the
 		// answer when the deletion was deliberate, which is a decision only

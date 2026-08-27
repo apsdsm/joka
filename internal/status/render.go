@@ -170,7 +170,7 @@ func renderEntities(w io.Writer, e Entities) {
 		case string(entitydomain.StatusOrphaned):
 			sev = sevBad
 		}
-		if f.Structural != "" || f.MissingRows > 0 || f.ParseError != "" || len(f.IdentityProblems) > 0 {
+		if f.MissingRows > 0 || f.ParseError != "" || len(f.IdentityProblems) > 0 {
 			sev = sevBad
 		}
 
@@ -181,12 +181,6 @@ func renderEntities(w io.Writer, e Entities) {
 
 		for _, problem := range f.IdentityProblems {
 			notes = append(notes, identityNote(problem))
-		}
-		if f.Structural != "" {
-			notes = append(notes, "sync would refuse: "+trimStructuralPrefix(f.Structural))
-			if f.KeyedByID {
-				notes = append(notes, "every declared entity and tracked row carries an _id")
-			}
 		}
 		if f.MissingRows > 0 {
 			notes = append(notes, fmt.Sprintf("%s tracked for this file %s not in the database",
@@ -297,7 +291,7 @@ func renderActions(w io.Writer, actions []Action) {
 
 		sev.color().Fprintf(w, "  %s  %s\n", pad(a.Scope, width, alignLeft), command)
 
-		reason := trimStructuralPrefix(a.Reason)
+		reason := a.Reason
 		// The subject is only worth repeating when neither the command nor the
 		// reason already names it.
 		if a.Subject != "" && !strings.Contains(command, a.Subject) && !strings.Contains(reason, a.Subject) {
@@ -396,15 +390,6 @@ func firstN(values []string, n int) []string {
 		return values
 	}
 	return values[:n]
-}
-
-// trimStructuralPrefix drops the sentinel that prefixes every structural-change
-// message. Status keeps the message verbatim in the report (both it and sync
-// get it from the same check, and JSON consumers want what sync would print),
-// but the sentinel names the remedy, which the report already names in the
-// actions list.
-func trimStructuralPrefix(message string) string {
-	return strings.TrimPrefix(message, entitydomain.ErrStructuralChange.Error()+": ")
 }
 
 // writtenByLabel names the joka that last wrote this database's bookkeeping.

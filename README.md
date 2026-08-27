@@ -471,6 +471,36 @@ Syncs entity YAML files to the database. New files have their entity graph inser
 
 If a modified file changed structurally (a different number of entities than tracked, an entity's table changed, or an `_id` that disagrees with the tracked row at that position), sync refuses to guess and recommends `entity reimport` instead.
 
+**Matching is by `_id`, across the whole set.** A declared entity is matched to
+the row tracked under the same `_id`, wherever that row was declared before:
+
+| Edit | What sync does |
+|---|---|
+| add an entity | one INSERT; everything else keeps its primary key |
+| remove an entity | reports it as no longer declared. **Nothing is deleted** |
+| reorder entities | nothing, beyond re-recording the new positions |
+| rename a file | re-points the rows and clears the old file's record |
+| move an entity between files | the same — the row does not change |
+| change an entity's `_is` | refused: an `_id` names one row, and a different table is a different thing |
+
+Because every tracked row's primary key is known before the run starts, a
+`{{ ref.id }}` resolves whether its target is written this time or was written
+previously — including a reference to an entity declared in another file. Files
+are processed in load order, so the target's file has to sort first, the same
+rule as within a file.
+
+An entity that no file declares any more is reported, never deleted — a seed
+file edited by mistake should not take data with it:
+
+```
+2 tracked entities are no longer declared in any file:
+  field_ceo  fields id 3  (last declared in 03_ceo.yaml)
+  field_ceo_v1  field_versions id 3  (last declared in 03_ceo.yaml)
+
+  Nothing was deleted. 'joka entity forget <file>' drops the tracking,
+  'joka entity diff <file>' shows what each one points at.
+```
+
 Before applying, sync prints a plan — new files show the rows to be inserted, and modified files show a per-column before/after diff. Use `--dry-run` to print the plan and exit without changing anything (and without taking the advisory lock). Non-deterministic columns like `{{ argon2id|… }}` and `{{ now }}` are shown as `(regenerated)`; secret-backed columns (`{{ asm.… }}`, hashed or plain) are also redacted this way and are never fetched or displayed at plan time. A `{{ lookup|… }}` whose target row doesn't exist yet (e.g. it's inserted by another file in the same sync) is shown as `(lookup, resolved at apply time)` rather than failing the plan. With `--output json`, the plan is included as a `plan` object.
 
 ```bash

@@ -79,6 +79,11 @@ type EntityDiff struct {
 	// writing to the wrong row.
 	PositionalBreak int `json:"positional_break"`
 
+	// TableChanged names an entity whose _id is tracked as a row in a different
+	// table. An _id names one row, so sync refuses rather than guess which of
+	// the two the author meant.
+	TableChanged []string `json:"table_changed"`
+
 	// SyncVerdict is the error entity sync would return for this file, or
 	// empty when sync would proceed. It comes from sync's own check.
 	SyncVerdict string `json:"sync_verdict,omitempty"`
@@ -183,14 +188,6 @@ func (a DiffEntityAction) Execute(ctx context.Context) (*EntityDiff, error) {
 		diff.MatchedBy = MatchByID
 	} else {
 		diff.MatchedBy = MatchByPosition
-	}
-
-	// The verdict sync itself would give, so the diff and a real sync can
-	// never disagree about whether the file is updatable in place.
-	if synced && a.OnDisk {
-		if _, _, err := AlignTrackedRows(a.Path, a.Entities, tracked); err != nil {
-			diff.SyncVerdict = err.Error()
-		}
 	}
 
 	if err := a.buildLines(ctx, diff, declared, depths, tracked, pairs); err != nil {

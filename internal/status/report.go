@@ -143,10 +143,6 @@ type EntityFile struct {
 	Live          int      `json:"live"`
 	MissingRows   int      `json:"missing_rows"`
 	MissingTables []string `json:"missing_tables"`
-	// Structural is the reason `entity sync` would refuse to update this file
-	// in place, verbatim from the same check sync itself runs. Empty when sync
-	// would proceed.
-	Structural string `json:"structural,omitempty"`
 	// KeyedByID reports whether every declared entity and every tracked row
 	// carries an _id, which is what an identity-keyed match would need. Always
 	// false when the file is not on disk, since there is nothing to check

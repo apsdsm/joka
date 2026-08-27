@@ -168,25 +168,54 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	if len(pending) == 0 && len(modified) == 0 {
-		if jsonOut {
-			shared.PrintJSON(map[string]any{"status": "ok", "synced": []string{}, "updated": []string{}, "message": "all entity files already synced"})
-			return nil
-		}
-		color.Green("All entity files already synced.")
-		return nil
+	dirty := make(map[string]bool, len(pending)+len(modified))
+	for _, f := range pending {
+		dirty[f.Path] = true
+	}
+	for _, f := range modified {
+		dirty[f.Path] = true
 	}
 
+	// The plan comes before the early return. A run with no dirty files can
+	// still have something to say: deleting a file leaves every other file
+	// unchanged, and the entities it declared are now declared nowhere.
 	plan, err := app.PlanSyncAction{
 		DB:       dbAdapter,
-		Files:    pending,
-		Modified: modified,
+		Declared: all,
+		Dirty:    dirty,
 	}.Execute(ctx)
 	if err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
 		}
 		return err
+	}
+
+	if !plan.HasChanges() {
+		if jsonOut {
+			shared.PrintJSON(map[string]any{
+				"status": "ok", "inserted": []string{}, "updated": []string{},
+				"files": []string{}, "undeclared": []map[string]any{},
+				"message": "all entity files already synced",
+			})
+			return nil
+		}
+		color.Green("All entity files already synced.")
+		return nil
+	}
+
+	// Nothing to write, but tracked entities no file declares any more. Report
+	// and stop: there is no transaction to open.
+	if len(pending) == 0 && len(modified) == 0 {
+		if jsonOut {
+			shared.PrintJSON(map[string]any{
+				"status": "ok", "inserted": []string{}, "updated": []string{},
+				"files": []string{}, "undeclared": undeclaredJSON(plan.Undeclared),
+			})
+			return nil
+		}
+		reportUndeclared(plan.Undeclared)
+		return nil
 	}
 
 	if r.DryRun {
@@ -222,11 +251,11 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
 
-	result, err := app.SyncEntitiesAction{
+	result, err := app.ApplySetAction{
 		DB:       txAdapter,
 		Secrets:  r.Secrets,
-		Files:    pending,
-		Modified: modified,
+		Declared: all,
+		Dirty:    dirty,
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
@@ -243,41 +272,71 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
-	syncedPaths := result.Synced
-	if syncedPaths == nil {
-		syncedPaths = []string{}
-	}
-	updatedPaths := result.Updated
-	if updatedPaths == nil {
-		updatedPaths = []string{}
-	}
-
 	if jsonOut {
-		shared.PrintJSON(map[string]any{"status": "ok", "synced": syncedPaths, "updated": updatedPaths, "forced": r.Force, "plan": planJSON(plan)})
+		shared.PrintJSON(map[string]any{
+			"status": "ok", "forced": r.Force, "plan": planJSON(plan),
+			"inserted": orEmpty(result.Inserted), "updated": orEmpty(result.Updated),
+			"files": orEmpty(result.Files), "moved": result.Moved,
+			"undeclared":      undeclaredJSON(result.Undeclared),
+			"forgotten_files": orEmpty(result.ForgottenFiles),
+		})
 		return nil
 	}
 
 	fmt.Println()
 
-	for _, path := range syncedPaths {
+	for _, path := range result.Files {
 		color.Green("  Synced: %s", path)
 	}
 
-	for _, path := range updatedPaths {
-		color.Green("  Updated: %s", path)
+	for _, move := range result.Moved {
+		color.Cyan("  Moved:  %s  %s → %s", move.RefID, move.From, move.To)
 	}
 
-	if r.Force {
-		color.Green("\nForced entity re-sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
-	} else {
-		color.Green("\nEntity sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
+	for _, path := range result.ForgottenFiles {
+		color.Cyan("  Cleared tracking for %s (every entity it held moved elsewhere)", path)
 	}
+
+	fmt.Println()
+	color.Green("Entity sync complete. %d inserted, %d updated across %d files.",
+		len(result.Inserted), len(result.Updated), len(result.Files))
+
+	// Nothing is deleted on an undeclared entity's account: a seed file edited
+	// by mistake should not take data with it.
+	reportUndeclared(result.Undeclared)
+
+	fmt.Println()
 
 	return nil
 }
 
-// printPlan renders a SyncPlan as a human-readable preview: new rows to insert
-// and per-column before/after diffs for modified files.
+// orEmpty keeps a nil slice out of the JSON.
+func orEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func firstRows(rows []domain.TrackedRow, n int) []domain.TrackedRow {
+	if len(rows) <= n {
+		return rows
+	}
+	return rows[:n]
+}
+
+// undeclaredJSON renders the tracked rows no file declares.
+func undeclaredJSON(rows []domain.TrackedRow) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, map[string]any{
+			"ref_id": row.RefID, "table": row.TableName,
+			"pk_column": row.PKColumn, "pk_value": row.RowPK,
+			"last_declared_in": row.EntityFile,
+		})
+	}
+	return out
+}
 func printPlan(plan *app.SyncPlan) {
 	red := color.New(color.FgRed)
 	green := color.New(color.FgGreen)
@@ -384,4 +443,27 @@ func planJSON(plan *app.SyncPlan) map[string]any {
 	}
 
 	return map[string]any{"inserts": inserts, "updates": updates}
+}
+
+// reportUndeclared prints the tracked entities no file declares any more.
+// Nothing is deleted on their account: a seed file edited by mistake should not
+// take data with it.
+func reportUndeclared(rows []domain.TrackedRow) {
+	if len(rows) == 0 {
+		return
+	}
+
+	fmt.Println()
+	color.Yellow("%d tracked entities are no longer declared in any file:", len(rows))
+	for _, row := range firstRows(rows, 10) {
+		color.Yellow("  %s  %s %s %d  (last declared in %s)",
+			row.RefID, row.TableName, row.PKColumn, row.RowPK, row.EntityFile)
+	}
+	if extra := len(rows) - 10; extra > 0 {
+		color.Yellow("  … and %d more", extra)
+	}
+	fmt.Println()
+	color.Yellow("  Nothing was deleted. 'joka entity forget <file>' drops the tracking,")
+	color.Yellow("  'joka entity diff <file>' shows what each one points at.")
+	fmt.Println()
 }

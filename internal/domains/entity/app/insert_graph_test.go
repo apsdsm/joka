@@ -109,6 +109,23 @@ func (m *mockDBAdapter) GetTrackedRows(_ context.Context, entityFile string) ([]
 	return rows, nil
 }
 
+func (m *mockDBAdapter) GetAllTrackedRows(_ context.Context) ([]domain.TrackedRow, error) {
+	out := make([]domain.TrackedRow, len(m.entityRows))
+	copy(out, m.entityRows)
+	return out, nil
+}
+
+func (m *mockDBAdapter) RetrackEntityRow(_ context.Context, refID, entityFile string, insertionOrder int) error {
+	for i := range m.entityRows {
+		if m.entityRows[i].RefID == refID {
+			m.entityRows[i].EntityFile = entityFile
+			m.entityRows[i].InsertionOrder = insertionOrder
+			return nil
+		}
+	}
+	return nil
+}
+
 func (m *mockDBAdapter) DeleteTrackedRows(_ context.Context, entityFile string) error {
 	m.deletedTracking = append(m.deletedTracking, entityFile)
 	var remaining []domain.TrackedRow

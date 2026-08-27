@@ -32,7 +32,7 @@ func TestPlanSyncAction(t *testing.T) {
 			},
 		}
 
-		plan, err := (PlanSyncAction{DB: db, Modified: modified}).Execute(context.Background())
+		plan, err := (PlanSyncAction{DB: db, Declared: modified, Dirty: dirtySet(modified)}).Execute(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -77,7 +77,7 @@ func TestPlanSyncAction(t *testing.T) {
 			},
 		}
 
-		plan, err := (PlanSyncAction{DB: db, Modified: modified}).Execute(context.Background())
+		plan, err := (PlanSyncAction{DB: db, Declared: modified, Dirty: dirtySet(modified)}).Execute(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -114,7 +114,7 @@ func TestPlanSyncAction(t *testing.T) {
 			},
 		}
 
-		plan, err := (PlanSyncAction{DB: db, Files: files}).Execute(context.Background())
+		plan, err := (PlanSyncAction{DB: db, Declared: files, Dirty: dirtySet(files)}).Execute(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestPlanSyncAction(t *testing.T) {
 			},
 		}
 
-		plan, err := (PlanSyncAction{DB: db, Files: files}).Execute(context.Background())
+		plan, err := (PlanSyncAction{DB: db, Declared: files, Dirty: dirtySet(files)}).Execute(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -191,7 +191,7 @@ func TestPlanSyncAction(t *testing.T) {
 			},
 		}
 
-		plan, err := (PlanSyncAction{DB: db, Files: files}).Execute(context.Background())
+		plan, err := (PlanSyncAction{DB: db, Declared: files, Dirty: dirtySet(files)}).Execute(context.Background())
 		if err != nil {
 			t.Fatalf("expected plan to defer unresolved lookup, got error: %v", err)
 		}
@@ -238,7 +238,7 @@ func TestPlanSyncAction(t *testing.T) {
 			},
 		}
 
-		plan, err := (PlanSyncAction{DB: db, Modified: modified}).Execute(context.Background())
+		plan, err := (PlanSyncAction{DB: db, Declared: modified, Dirty: dirtySet(modified)}).Execute(context.Background())
 		if err != nil {
 			t.Fatalf("expected plan to defer unresolved lookup, got error: %v", err)
 		}
@@ -289,7 +289,7 @@ func TestPlanSyncAction(t *testing.T) {
 
 		// PlanSyncAction takes no resolver at all: secret refs must short-circuit
 		// as non-deterministic before any resolution is attempted.
-		plan, err := (PlanSyncAction{DB: db, Files: files, Modified: modified}).Execute(context.Background())
+		plan, err := (PlanSyncAction{DB: db, Declared: append(append([]*domain.EntityFile{}, files...), modified...), Dirty: dirtySet(append(append([]*domain.EntityFile{}, files...), modified...))}).Execute(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -328,32 +328,50 @@ func TestPlanSyncAction(t *testing.T) {
 			},
 		}
 
-		_, err := (PlanSyncAction{DB: db, Files: files}).Execute(context.Background())
+		_, err := (PlanSyncAction{DB: db, Declared: files, Dirty: dirtySet(files)}).Execute(context.Background())
 		if !errors.Is(err, domain.ErrInvalidTemplate) {
 			t.Fatalf("expected ErrInvalidTemplate, got %v", err)
 		}
 	})
 
-	t.Run("it propagates structural-change errors from alignment", func(t *testing.T) {
-		db := newMockDBAdapter()
-		db.synced["client.yaml"] = true
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "client.yaml", TableName: "clients", RowPK: 4, PKColumn: "id", RefID: "c1", InsertionOrder: 0},
-			{EntityFile: "client.yaml", TableName: "grants", RowPK: 9, PKColumn: "id", RefID: "g1", InsertionOrder: 1},
-		}
+}
 
-		modified := []*domain.EntityFile{
-			{
-				Path: "client.yaml",
-				Entities: []domain.Entity{
-					{Table: "clients", RefID: "c1", PKColumn: "id", Columns: map[string]any{"name": "only one"}},
-				},
-			},
-		}
+// dirtySet marks every given file as needing a write, which is what the plan
+// fixtures mean by handing one over.
+func dirtySet(files []*domain.EntityFile) map[string]bool {
+	dirty := make(map[string]bool, len(files))
+	for _, f := range files {
+		dirty[f.Path] = true
+	}
+	return dirty
+}
 
-		_, err := (PlanSyncAction{DB: db, Modified: modified}).Execute(context.Background())
-		if !errors.Is(err, domain.ErrStructuralChange) {
-			t.Fatalf("expected ErrStructuralChange, got %v", err)
-		}
-	})
+func TestPlanSyncReportsUndeclared(t *testing.T) {
+	// An entity dropped from the file is reported, not refused and not deleted.
+	db := newMockDBAdapter()
+	db.synced["client.yaml"] = true
+	db.entityRows = []domain.TrackedRow{
+		{EntityFile: "client.yaml", TableName: "clients", RowPK: 4, PKColumn: "id", RefID: "c1", InsertionOrder: 0},
+		{EntityFile: "client.yaml", TableName: "grants", RowPK: 9, PKColumn: "id", RefID: "g1", InsertionOrder: 1},
+	}
+	db.currentRows["clients|4"] = map[string]any{"name": "only one"}
+
+	files := []*domain.EntityFile{{
+		Path: "client.yaml",
+		Entities: []domain.Entity{
+			{Table: "clients", RefID: "c1", PKColumn: "id", Columns: map[string]any{"name": "only one"}},
+		},
+	}}
+
+	plan, err := (PlanSyncAction{DB: db, Declared: files, Dirty: dirtySet(files)}).Execute(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(plan.Undeclared) != 1 {
+		t.Fatalf("expected the dropped entity reported, got %+v", plan.Undeclared)
+	}
+	if plan.Undeclared[0].RefID != "g1" {
+		t.Errorf("expected g1 undeclared, got %q", plan.Undeclared[0].RefID)
+	}
 }

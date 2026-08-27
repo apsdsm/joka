@@ -53,7 +53,7 @@ func (p *PostgresDBAdapter) EnsureTrackingTable(ctx context.Context) error {
 // IsEntitySynced returns true if the given file path has already been recorded.
 func (p *PostgresDBAdapter) IsEntitySynced(ctx context.Context, filePath string) (bool, error) {
 	var exists int
-	err := p.conn.QueryRowContext(ctx,
+	err := p.db.QueryRowContext(ctx,
 		`SELECT 1 FROM joka_entities WHERE entity_file = $1`,
 		filePath,
 	).Scan(&exists)
@@ -68,7 +68,7 @@ func (p *PostgresDBAdapter) IsEntitySynced(ctx context.Context, filePath string)
 
 // RecordEntitySynced inserts a row into joka_entities to mark the file as synced.
 func (p *PostgresDBAdapter) RecordEntitySynced(ctx context.Context, filePath string) error {
-	_, err := p.conn.ExecContext(ctx,
+	_, err := p.db.ExecContext(ctx,
 		`INSERT INTO joka_entities (entity_file) VALUES ($1)`,
 		filePath,
 	)
@@ -300,7 +300,7 @@ func (p *PostgresDBAdapter) EnsureContentHashColumn(ctx context.Context) error {
 // RecordEntitySyncedWithHash inserts a row into joka_entities with a content
 // hash for change detection.
 func (p *PostgresDBAdapter) RecordEntitySyncedWithHash(ctx context.Context, filePath, contentHash string) error {
-	_, err := p.conn.ExecContext(ctx,
+	_, err := p.db.ExecContext(ctx,
 		`INSERT INTO joka_entities (entity_file, content_hash) VALUES ($1, $2)
 		 ON CONFLICT (entity_file) DO UPDATE SET content_hash = EXCLUDED.content_hash, synced_at = NOW()`,
 		filePath, contentHash,
@@ -311,7 +311,7 @@ func (p *PostgresDBAdapter) RecordEntitySyncedWithHash(ctx context.Context, file
 // UpdateEntitySynced updates an existing joka_entities row with a new content
 // hash and synced_at timestamp.
 func (p *PostgresDBAdapter) UpdateEntitySynced(ctx context.Context, filePath, contentHash string) error {
-	_, err := p.conn.ExecContext(ctx,
+	_, err := p.db.ExecContext(ctx,
 		`UPDATE joka_entities SET content_hash = $1, synced_at = NOW() WHERE entity_file = $2`,
 		contentHash, filePath,
 	)
@@ -321,7 +321,7 @@ func (p *PostgresDBAdapter) UpdateEntitySynced(ctx context.Context, filePath, co
 // GetEntityHash returns the content_hash stored for a synced entity file.
 func (p *PostgresDBAdapter) GetEntityHash(ctx context.Context, filePath string) (string, error) {
 	var hash sql.NullString
-	err := p.conn.QueryRowContext(ctx,
+	err := p.db.QueryRowContext(ctx,
 		`SELECT content_hash FROM joka_entities WHERE entity_file = $1`,
 		filePath,
 	).Scan(&hash)
@@ -336,7 +336,7 @@ func (p *PostgresDBAdapter) GetEntityHash(ctx context.Context, filePath string) 
 
 // GetAllSyncedEntities returns all entity_file paths mapped to content hashes.
 func (p *PostgresDBAdapter) GetAllSyncedEntities(ctx context.Context) (map[string]string, error) {
-	rows, err := p.conn.QueryContext(ctx,
+	rows, err := p.db.QueryContext(ctx,
 		`SELECT entity_file, content_hash FROM joka_entities`,
 	)
 	if err != nil {
@@ -379,7 +379,7 @@ func (p *PostgresDBAdapter) RecordEntityRow(ctx context.Context, row domain.Trac
 // GetTrackedRows returns all tracked rows for a given entity file in reverse
 // insertion order (for deletion).
 func (p *PostgresDBAdapter) GetTrackedRows(ctx context.Context, entityFile string) ([]domain.TrackedRow, error) {
-	rows, err := p.conn.QueryContext(ctx,
+	rows, err := p.db.QueryContext(ctx,
 		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
 		 FROM joka_entity_rows WHERE entity_file = $1 ORDER BY insertion_order DESC`,
 		entityFile,
@@ -429,8 +429,12 @@ func (p *PostgresDBAdapter) DeleteRow(ctx context.Context, table, pkColumn strin
 }
 
 // DeleteEntityRecord removes the joka_entities row for a given file path.
+//
+// joka_entities DML runs on the same handle as the rows it describes, so a
+// rolled-back sync does not leave a file recorded as synced with no rows behind
+// it.
 func (p *PostgresDBAdapter) DeleteEntityRecord(ctx context.Context, filePath string) error {
-	_, err := p.conn.ExecContext(ctx,
+	_, err := p.db.ExecContext(ctx,
 		`DELETE FROM joka_entities WHERE entity_file = $1`,
 		filePath,
 	)
@@ -466,7 +470,7 @@ func (p *PostgresDBAdapter) RowExists(ctx context.Context, table, pkColumn strin
 // between files, so the row it corresponds to may be tracked against a file
 // other than the one now declaring it. Reading per file cannot see that.
 func (p *PostgresDBAdapter) GetAllTrackedRows(ctx context.Context) ([]domain.TrackedRow, error) {
-	rows, err := p.conn.QueryContext(ctx,
+	rows, err := p.db.QueryContext(ctx,
 		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
 		 FROM joka_entity_rows ORDER BY entity_file, insertion_order`)
 	if err != nil {
@@ -483,7 +487,7 @@ func (p *PostgresDBAdapter) GetTrackedRowByRefID(ctx context.Context, refID stri
 	var row domain.TrackedRow
 	var ref sql.NullString
 
-	err := p.conn.QueryRowContext(ctx,
+	err := p.db.QueryRowContext(ctx,
 		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
 		 FROM joka_entity_rows WHERE ref_id = $1`, refID,
 	).Scan(&row.EntityFile, &row.TableName, &row.RowPK, &row.PKColumn, &ref, &row.InsertionOrder)
@@ -516,4 +520,18 @@ func scanTrackedRows(rows *sql.Rows) ([]domain.TrackedRow, error) {
 	}
 
 	return out, rows.Err()
+}
+
+// RetrackEntityRow re-points a tracked row at the file and position now
+// declaring it. Used when an entity moves between files or shifts position:
+// the row it identifies is unchanged, only the record of where it was declared.
+func (p *PostgresDBAdapter) RetrackEntityRow(ctx context.Context, refID, entityFile string, insertionOrder int) error {
+	_, err := p.db.ExecContext(ctx,
+		`UPDATE joka_entity_rows SET entity_file = $1, insertion_order = $2 WHERE ref_id = $3`,
+		entityFile, insertionOrder, refID,
+	)
+	if err != nil {
+		return fmt.Errorf("re-pointing the tracking for %q: %w", refID, err)
+	}
+	return nil
 }

@@ -15,7 +15,7 @@ import (
 
 // syncEntityFile mirrors what `entity sync` does for a single file: parse the
 // YAML at fullPath, attach the relative path and current content hash, then
-// insert its entity graph (and tracking rows) through SyncEntitiesAction in a
+// insert its entity graph (and tracking rows) through ApplySetAction in a
 // transaction against the real adapter. It returns nothing; failures fail t.
 func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 	t.Helper()
@@ -40,7 +40,7 @@ func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.SyncEntitiesAction{DB: txAdapter, Files: []*domain.EntityFile{file}}).Execute(ctx); err != nil {
+	if _, err := (app.ApplySetAction{DB: txAdapter, Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("initial sync of %s: %v", rel, err)
 	}
@@ -75,7 +75,7 @@ func classify(t *testing.T, db *sql.DB, entitiesDir, rel string) domain.FileStat
 }
 
 // applyModified mirrors the sync command's update path for a single modified
-// file: re-parse, re-hash, and run SyncEntitiesAction with the file in the
+// file: re-parse, re-hash, and run ApplySetAction with the file in the
 // Modified slice so its tracked rows are UPDATEd in place.
 func applyModified(t *testing.T, db *sql.DB, fullPath, rel string) {
 	t.Helper()
@@ -100,7 +100,7 @@ func applyModified(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.SyncEntitiesAction{DB: txAdapter, Modified: []*domain.EntityFile{file}}).Execute(ctx); err != nil {
+	if _, err := (app.ApplySetAction{DB: txAdapter, Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("update sync of %s: %v", rel, err)
 	}

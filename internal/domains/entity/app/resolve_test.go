@@ -35,9 +35,13 @@ func (l *lookupMock) RecordEntityRow(context.Context, domain.TrackedRow) error {
 func (l *lookupMock) GetTrackedRows(context.Context, string) ([]domain.TrackedRow, error) {
 	panic("unused")
 }
-func (l *lookupMock) DeleteTrackedRows(context.Context, string) error        { panic("unused") }
-func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error { panic("unused") }
-func (l *lookupMock) TableExists(context.Context, string) (bool, error)      { panic("unused") }
+func (l *lookupMock) DeleteTrackedRows(context.Context, string) error { panic("unused") }
+func (l *lookupMock) GetAllTrackedRows(context.Context) ([]domain.TrackedRow, error) {
+	panic("unused")
+}
+func (l *lookupMock) RetrackEntityRow(context.Context, string, string, int) error { panic("unused") }
+func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error      { panic("unused") }
+func (l *lookupMock) TableExists(context.Context, string) (bool, error)           { panic("unused") }
 func (l *lookupMock) RowExists(context.Context, string, string, int64) (bool, error) {
 	panic("unused")
 }

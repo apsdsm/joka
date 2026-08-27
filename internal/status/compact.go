@@ -90,7 +90,7 @@ func compactEntities(e Entities) string {
 		if f.Status == string(entitydomain.StatusOrphaned) {
 			continue
 		}
-		if f.Structural != "" || f.MissingRows > 0 || f.ParseError != "" {
+		if f.MissingRows > 0 || f.ParseError != "" {
 			broken++
 		}
 	}

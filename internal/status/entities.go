@@ -121,14 +121,6 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 		if parsed != nil {
 			file.KeyedByID = allHaveRefID(parsed.Entities) && allRowsHaveRefID(trackedRows)
 
-			// Only a modified file is ever put through the in-place update
-			// path, so only a modified file can be refused for a structural
-			// change. Reporting it for the others would be noise.
-			if file.Status == string(entitydomain.StatusModified) && len(trackedRows) > 0 {
-				if _, _, err := entityapp.AlignTrackedRows(rel, parsed.Entities, trackedRows); err != nil {
-					file.Structural = err.Error()
-				}
-			}
 		}
 
 		out.Files = append(out.Files, file)

@@ -265,26 +265,6 @@ func TestDiffEntityAction(t *testing.T) {
 		}
 	})
 
-	t.Run("it reports the verdict sync itself would give", func(t *testing.T) {
-		db := newMockDBAdapter()
-		diffFixture(db, "a.yaml", row("fields", "first", 1, 0))
-
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
-			entity("fields", "first", nil),
-			entity("fields", "second", nil),
-		}}.Execute(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if d.SyncVerdict == "" {
-			t.Fatal("expected the structural refusal reported")
-		}
-		if !contains(d.SyncVerdict, "2 entities but 1 are tracked") {
-			t.Errorf("expected sync's own message, got %q", d.SyncVerdict)
-		}
-	})
-
 	t.Run("it reports the columns that changed on a matched row", func(t *testing.T) {
 		db := newMockDBAdapter()
 		diffFixture(db, "a.yaml", row("fields", "first", 1, 0))

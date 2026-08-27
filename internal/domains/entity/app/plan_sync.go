@@ -18,6 +18,9 @@ import (
 type SyncPlan struct {
 	Inserts []FileInsertPlan
 	Updates []FileUpdatePlan
+	// Undeclared are tracked rows no file declares any more. Nothing would be
+	// deleted on their account; they are here so a dry run reports them.
+	Undeclared []domain.TrackedRow
 }
 
 // FileInsertPlan is the set of rows a new (untracked) file would insert.
@@ -79,16 +82,19 @@ type ColumnChange struct {
 
 // HasChanges reports whether the plan would actually do anything.
 func (p *SyncPlan) HasChanges() bool {
-	return len(p.Inserts) > 0 || len(p.Updates) > 0
+	return len(p.Inserts) > 0 || len(p.Updates) > 0 || len(p.Undeclared) > 0
 }
 
-// PlanSyncAction computes a SyncPlan from the same new/modified file lists that
-// SyncEntitiesAction applies. It is read-only: it resolves template values and
-// reads the current values of rows that would be updated, but writes nothing.
+// PlanSyncAction computes a SyncPlan from the same declared set ApplySetAction
+// applies, matching on _id the same way. It is read-only: it resolves template
+// values and reads the current values of rows that would change, but writes
+// nothing.
 type PlanSyncAction struct {
-	DB       DBAdapter
-	Files    []*domain.EntityFile // new files to insert
-	Modified []*domain.EntityFile // modified files to update in place
+	DB DBAdapter
+	// Declared is every file in the set, in load order.
+	Declared []*domain.EntityFile
+	// Dirty names the files that would be written.
+	Dirty map[string]bool
 }
 
 // Execute builds the plan.
@@ -96,86 +102,122 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	plan := &SyncPlan{}
 
-	for _, file := range a.Files {
-		fp := FileInsertPlan{Path: file.Path}
-		for _, e := range flattenEntities(file.Entities, nil) {
-			rip := RowInsertPlan{Table: e.Table, RefID: e.RefID}
-			for _, k := range sortedKeys(e.Columns) {
-				raw := e.Columns[k]
-				cv := ColumnValue{Column: k}
-
-				switch {
-				case isNonDeterministicTemplate(raw):
-					cv.Note = "generated"
-				default:
-					if ref, ok := refTemplate(raw); ok {
-						cv.Note = "ref " + ref
-						break
-					}
-					// Deterministic value (plain, sha256, or lookup). Refs are
-					// handled above, so resolution never needs the refMap here.
-					val, err := resolveColumnValue(ctx, raw, nil, now, a.DB)
-					if err != nil {
-						// The plan runs before any inserts, so a lookup may
-						// target a row this same sync is about to insert
-						// (e.g. from another new file). Apply resolves it
-						// after inserts; don't fail the plan over it.
-						if errors.Is(err, domain.ErrLookupNotFound) {
-							cv.Note = "lookup, resolved at apply time"
-							break
-						}
-						return nil, fmt.Errorf("%s: previewing %s.%s: %w", file.Path, e.Table, k, err)
-					}
-					cv.Value = normalizeValue(val)
-				}
-
-				rip.Values = append(rip.Values, cv)
-			}
-			fp.Rows = append(fp.Rows, rip)
-		}
-		plan.Inserts = append(plan.Inserts, fp)
+	tracked, err := a.DB.GetAllTrackedRows(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	for _, file := range a.Modified {
-		tracked, err := a.DB.GetTrackedRows(ctx, file.Path)
-		if err != nil {
-			return nil, err
+	byRef := make(map[string]domain.TrackedRow, len(tracked))
+	refMap := make(map[string]int64, len(tracked))
+	for _, row := range tracked {
+		byRef[row.RefID] = row
+		refMap[row.RefID] = row.RowPK
+	}
+
+	declared := make(map[string]bool)
+
+	for _, file := range a.Declared {
+		entities := flattenEntities(file.Entities, nil)
+		for _, e := range entities {
+			declared[e.RefID] = true
 		}
 
-		seq, ordered, err := AlignTrackedRows(file.Path, file.Entities, tracked)
-		if err != nil {
-			return nil, err
+		if !a.Dirty[file.Path] {
+			continue
 		}
 
+		fp := FileInsertPlan{Path: file.Path}
 		fup := FileUpdatePlan{Path: file.Path}
-		refMap := make(map[string]int64)
 
-		for i, e := range seq {
-			row := ordered[i]
+		for _, e := range entities {
+			row, isTracked := byRef[e.RefID]
+
+			if !isTracked {
+				rip, err := a.planInsert(ctx, e, now)
+				if err != nil {
+					return nil, fmt.Errorf("%s: previewing: %w", file.Path, err)
+				}
+				fp.Rows = append(fp.Rows, rip)
+				continue
+			}
+
+			// A table change is refused at apply time; the plan says so rather
+			// than reading a row that does not describe this entity.
+			if row.TableName != e.Table {
+				fup.Rows = append(fup.Rows, RowUpdatePlan{
+					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.RowPK,
+					Changes: []ColumnChange{{
+						Column: "_is",
+						Before: row.TableName,
+						After:  e.Table,
+					}},
+				})
+				continue
+			}
 
 			changes, err := ResolveRowChanges(ctx, a.DB, e, row.PKColumn, row.RowPK, refMap, now)
 			if err != nil {
-				return nil, fmt.Errorf("%s: previewing %s: %w", file.Path, e.Table, err)
+				return nil, fmt.Errorf("%s: previewing %s (_id %s): %w", file.Path, e.Table, e.RefID, err)
 			}
-
-			if e.RefID != "" {
-				refMap[e.RefID] = row.RowPK
-			}
-
 			if len(changes) > 0 {
 				fup.Rows = append(fup.Rows, RowUpdatePlan{
-					Table:    e.Table,
-					PKColumn: row.PKColumn,
-					PKValue:  row.RowPK,
-					Changes:  changes,
+					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.RowPK, Changes: changes,
 				})
 			}
 		}
 
-		plan.Updates = append(plan.Updates, fup)
+		if len(fp.Rows) > 0 {
+			plan.Inserts = append(plan.Inserts, fp)
+		}
+		if len(fup.Rows) > 0 {
+			plan.Updates = append(plan.Updates, fup)
+		}
+	}
+
+	for _, row := range tracked {
+		if !declared[row.RefID] {
+			plan.Undeclared = append(plan.Undeclared, row)
+		}
 	}
 
 	return plan, nil
+}
+
+// planInsert describes one row that would be inserted. A template that cannot
+// be resolved fails the plan rather than being reported as a note: the point of
+// a dry run is to find out before applying, and a plan that quietly carried an
+// unresolvable value would not do that. The exception is a lookup whose target
+// row does not exist yet — it may be inserted earlier in the same run.
+func (a PlanSyncAction) planInsert(ctx context.Context, e domain.Entity, now string) (RowInsertPlan, error) {
+	rip := RowInsertPlan{Table: e.Table, RefID: e.RefID}
+
+	for _, k := range sortedKeys(e.Columns) {
+		raw := e.Columns[k]
+		cv := ColumnValue{Column: k}
+
+		switch {
+		case isNonDeterministicTemplate(raw):
+			cv.Note = "generated"
+		default:
+			if ref, ok := refTemplate(raw); ok {
+				cv.Note = "ref " + ref
+				break
+			}
+			val, err := resolveColumnValue(ctx, raw, nil, now, a.DB)
+			if err != nil {
+				if errors.Is(err, domain.ErrLookupNotFound) {
+					cv.Note = "lookup, resolved at apply time"
+					break
+				}
+				return rip, fmt.Errorf("%s.%s (_id %s): %w", e.Table, k, e.RefID, err)
+			}
+			cv.Value = normalizeValue(val)
+		}
+
+		rip.Values = append(rip.Values, cv)
+	}
+
+	return rip, nil
 }
 
 // resolveColumnValue resolves a single raw column value. Non-string values pass

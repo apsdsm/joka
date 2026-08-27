@@ -488,10 +488,10 @@ re-binding after a rebuild where primary keys changed. Every entity in jjc2 alre
 
 1. ~~Validation: `_id` mandatory and unique, `_key` parsed.~~ Done.
 2. ~~Re-key `joka_entity_rows` on `ref_id`.~~ Done — see **Tracking upgrades** below.
-3. Identity matching in sync: reorder becomes a no-op, mid-file insert works, moving an entity
-   between files works, a file rename stops orphaning.
-4. `_key` adoption, and reporting entities that are tracked but no longer declared anywhere
-   (reported, never deleted — see `proposal_entity_identity_20260826.md`).
+3. ~~Identity matching in sync.~~ Done — see **Identity matching** below.
+4. `_key` adoption: find a row joka did not insert, and re-bind after a rebuild where primary keys
+   changed. Undeclared reporting is done (step 3); what remains is `entity diff --undeclared` and
+   `entity forget --undeclared` to act on it in bulk.
 
 ## Tracking upgrades
 
@@ -536,3 +536,48 @@ Blocked by two things, both real rather than theoretical:
 
 `RecordEntityRow` rejects an empty `ref_id` with `ErrEntitySetInvalid` rather than letting the
 constraint fire — a constraint violation is a worse way to learn that than being told.
+
+## Identity matching (`ApplySetAction`)
+
+`entity sync` matches a declared entity to its tracked row on `_id`, across the whole set. This
+replaced matching on (file, position), which is what `AlignTrackedRows` and `ErrStructuralChange`
+existed for — both are gone.
+
+What each edit costs now:
+
+| Edit | Before | Now |
+|---|---|---|
+| add an entity | `ErrStructuralChange` → reimport deleted every row the file owned | one INSERT |
+| remove an entity | same | reported as undeclared; nothing deleted |
+| reorder entities | refused when keyed, **silently swapped row contents** when not | nothing but re-recorded positions |
+| rename a file | orphaned every row, re-inserted duplicates | rows re-pointed; the old record is cleared |
+| move an entity between files | same | same |
+
+### Design notes
+
+- **The whole set is read, not one file.** An entity can move between files, so the row it
+  corresponds to may be tracked against a file other than the one declaring it. `GetAllTrackedRows`
+  is what makes that visible; a per-file read cannot.
+- **`refMap` starts pre-populated from every tracked row.** A `{{ ref.id }}` resolves whether its
+  target is written this run or was written some previous one — which also makes cross-file
+  references work. Files are processed in load order, so a reference resolves when its target's file
+  sorts first, the same rule as within a file.
+- **An unchanged file is still read.** It contributes its declarations, which is what makes an `_id`
+  claimed elsewhere and an entity declared nowhere both visible. Only dirty files are written.
+- **Nothing is deleted for an undeclared entity.** A seed file edited by mistake must not take data
+  with it. They are reported, with `entity forget` and `entity diff` named.
+- **A table change is refused** (`ErrEntityTableChanged`). An `_id` names one row; the same `_id` on
+  a different table is a different thing wearing the same name, and guessing would be worse.
+- **`forgetEmptyFiles`** drops the `joka_entities` record of a file that is gone and whose every row
+  moved elsewhere. Without it a rename leaves a permanent ghost nothing but a manual forget clears.
+- **The plan runs before the early return.** A run with no dirty files can still have something to
+  report: deleting a file leaves every other file unchanged, and its entities declared nowhere.
+  Found by testing a deletion, not by review.
+
+### Transaction discipline
+
+Identity matching made a latent bug reachable and it is now fixed: `joka_entities` DML and every
+tracked-row read run on the adapter's `DBTX` handle, not the raw connection. A run that re-points a
+row and then asks which files still hold rows must see its own writes, and a rolled-back sync must
+not leave a file recorded as synced with no rows behind it. Only DDL (`Ensure*`) still uses the raw
+connection, because DDL cannot run in the transaction.

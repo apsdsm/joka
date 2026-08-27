@@ -42,7 +42,7 @@ func TestDemoRender(t *testing.T) {
 				{
 					Path: "04_fields/system_fields.yaml", Status: "modified",
 					Declared: 48, Tracked: 38, Live: 38, KeyedByID: true,
-					Structural: "entity file changed structurally; use 'entity reimport': 04_fields/system_fields.yaml now defines 48 entities but 38 are tracked (an entity was added or removed)",
+					MissingRows: 2,
 				},
 				{Path: "08_mappings/system_mappings.yaml", Status: "new", Declared: 12},
 				{

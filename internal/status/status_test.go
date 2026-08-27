@@ -419,64 +419,6 @@ func TestBuildEntities(t *testing.T) {
 		}
 	})
 
-	t.Run("it predicts the structural refusal sync would give", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFile(t, dir, "a.yaml", threeEntityFile)
-
-		in := entityInputs(dir,
-			fakeEntities{
-				// A stale hash makes the file modified, which is the only
-				// state sync puts through the in-place update path.
-				synced: map[string]string{"a.yaml": "stale"},
-				rows: map[string][]entitydomain.TrackedRow{"a.yaml": {
-					{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
-					{TableName: "profiles", RowPK: 2, PKColumn: "id", RefID: "admin_profile", InsertionOrder: 1},
-				}},
-			},
-			fakeProbe{tables: map[string]bool{"joka_entities": true, "joka_entity_rows": true, "users": true, "profiles": true}},
-		)
-
-		e, err := buildEntities(context.Background(), in)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		file := findEntity(t, e, "a.yaml")
-		if file.Status != string(entitydomain.StatusModified) {
-			t.Errorf("expected modified, got %q", file.Status)
-		}
-		if file.Structural == "" {
-			t.Fatal("expected the structural refusal to be predicted")
-		}
-		if !strings.Contains(file.Structural, "3 entities but 2 are tracked") {
-			t.Errorf("expected sync's own message, got %q", file.Structural)
-		}
-	})
-
-	t.Run("it does not report a structural change for an unmodified file", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFile(t, dir, "a.yaml", twoEntityFile)
-
-		in := entityInputs(dir,
-			fakeEntities{
-				synced: map[string]string{"a.yaml": hashOf(t, dir, "a.yaml")},
-				rows: map[string][]entitydomain.TrackedRow{"a.yaml": {
-					{TableName: "users", RowPK: 1, PKColumn: "id", InsertionOrder: 0},
-				}},
-			},
-			fakeProbe{tables: map[string]bool{"joka_entities": true, "joka_entity_rows": true, "users": true}},
-		)
-
-		e, err := buildEntities(context.Background(), in)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if file := findEntity(t, e, "a.yaml"); file.Structural != "" {
-			t.Errorf("expected no structural finding on a synced file, got %q", file.Structural)
-		}
-	})
-
 	t.Run("it reports a new file with nothing tracked", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "a.yaml", twoEntityFile)
@@ -610,20 +552,6 @@ func TestDeriveActions(t *testing.T) {
 		}
 		if !strings.Contains(actions[0].Reason, "2 pending migrations") {
 			t.Errorf("expected the count in the reason, got %q", actions[0].Reason)
-		}
-	})
-
-	t.Run("it names reimport for a structural change", func(t *testing.T) {
-		r := Report{Entities: Entities{Files: []EntityFile{
-			{Path: "a.yaml", Status: "modified", Structural: "changed structurally"},
-		}}}
-
-		action, ok := findAction(deriveActions(r), "a.yaml")
-		if !ok {
-			t.Fatal("expected an action for the file")
-		}
-		if action.Command != "joka entity reimport a.yaml" {
-			t.Errorf("expected reimport, got %q", action.Command)
 		}
 	})
 

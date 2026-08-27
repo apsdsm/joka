@@ -52,6 +52,16 @@ type DBAdapter interface {
 	// individual inserted entity row.
 	RecordEntityRow(ctx context.Context, row domain.TrackedRow) error
 
+	// GetAllTrackedRows returns every row in joka_entity_rows. Identity
+	// matching is a property of the whole set — an entity can move between
+	// files, so the row it corresponds to may be tracked against a file other
+	// than the one now declaring it, which a per-file read cannot see.
+	GetAllTrackedRows(ctx context.Context) ([]domain.TrackedRow, error)
+
+	// RetrackEntityRow re-points a tracked row at the file and position now
+	// declaring it. The row it identifies does not change.
+	RetrackEntityRow(ctx context.Context, refID, entityFile string, insertionOrder int) error
+
 	// GetTrackedRows returns all rows from joka_entity_rows for a given
 	// entity file, ordered by insertion_order DESC (for reverse deletion).
 	GetTrackedRows(ctx context.Context, entityFile string) ([]domain.TrackedRow, error)
