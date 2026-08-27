@@ -58,6 +58,10 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 		}
 	}
 
+	// parsedFiles keeps every file that read cleanly, so the set-level _id check
+	// can see across all of them.
+	parsedFiles := make(map[string]*entitydomain.EntityFile)
+
 	// tableExists caches existence checks, which repeat across files that seed
 	// the same tables.
 	tableExists := make(map[string]bool)
@@ -97,6 +101,8 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 			}
 		} else {
 			file.Declared = entityapp.CountEntities(parsed.Entities)
+			parsed.Path = rel
+			parsedFiles[rel] = parsed
 		}
 
 		var trackedRows []entitydomain.TrackedRow
@@ -156,6 +162,31 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 		}
 
 		out.Files = append(out.Files, file)
+	}
+
+	// _id uniqueness is a property of the whole set, so it can only be checked
+	// once every file has been read. Each problem is attached to every file it
+	// names, so a duplicate shows against both claimants.
+	files := make([]*entitydomain.EntityFile, 0, len(parsedFiles))
+	for _, f := range parsedFiles {
+		files = append(files, f)
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+
+	byPath := make(map[string][]entityapp.EntitySetProblem)
+	for _, problem := range entityapp.ValidateEntitySet(files) {
+		seen := make(map[string]bool)
+		for _, loc := range problem.Where {
+			if seen[loc.File] {
+				continue
+			}
+			seen[loc.File] = true
+			byPath[loc.File] = append(byPath[loc.File], problem)
+		}
+	}
+
+	for i := range out.Files {
+		out.Files[i].IdentityProblems = byPath[out.Files[i].Path]
 	}
 
 	sort.Slice(out.Files, func(i, j int) bool {

@@ -48,4 +48,11 @@ var (
 	// them would leave rows nothing tracks, and the next sync would insert a
 	// second copy, so the caller must pass --force to mean it.
 	ErrRowsStillLive = errors.New("tracked rows are still in the database")
+
+	// ErrEntitySetInvalid means the entity set breaks an invariant the _id
+	// identity model needs: every entity declares an _id, and no _id is claimed
+	// twice. Callers needing to know which invariant broke inspect the
+	// []EntitySetProblem the validator returns, which carries the file and
+	// position of every entity involved.
+	ErrEntitySetInvalid = errors.New("entity set is not valid")
 )

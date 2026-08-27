@@ -445,3 +445,51 @@ newer joka already wrote: it has no way to know the format moved. `Check` makes 
 - **An unparseable version is treated as too new.** joka writes a decimal string, so anything else
   came from something this build does not understand.
 - `joka status` reports the marker in its header (`written by joka 0.14.0`) and in JSON under `meta`.
+
+## Entity identity (`_id`)
+
+joka identifies every seeded row by its `_id`. This is being moved to gradually; the steps done so
+far and the ones still open are recorded here.
+
+### The invariants
+
+- **Every entity declares an `_id`.** An entity without one cannot be matched across an edit, so
+  there is no way to say which row it became.
+- **No `_id` is claimed twice.** One `_id` identifies one row.
+- **Scope is the loaded set, not the filesystem.** Uniqueness is checked across the files the
+  resolved `entities:` directory contains. Parallel per-environment trees (jjc2 has `local/`,
+  `dev1/` and `e2e/`) deliberately share `_id`s — they are the same logical entity for different
+  environments and only one set is ever loaded. Checking any wider scope would reject a correct
+  arrangement. It follows that an `_id` is unique *per database*, not universally.
+
+`app.ValidateEntitySet` checks both and returns **every** problem rather than the first: a set that
+has never been validated usually has several, and fixing them one error message at a time is
+miserable. `EntitySetError` renders them into one error wrapping `domain.ErrEntitySetInvalid`.
+
+### Where it is enforced
+
+- **`entity sync`** validates the whole set before writing anything, and refuses.
+- **`joka status`** reports problems per file (`EntityFile.IdentityProblems`) and raises an action
+  with no command — an `_id` has to be authored, and choosing one is a decision about what the
+  entity is.
+- Sync now **parses every file**, including ones the content hash says are unchanged: `_id`
+  uniqueness is a property of the whole set, so an unchanged file still has to be read to know what
+  it claims. The hash decides whether a file is *written*, not whether it is *read*.
+
+### `_key`
+
+`_key: <column>` names a column whose value identifies the row in the database independently of its
+primary key (`domain.Entity.KeyColumn`). Parsed and reserved — it is not inserted as a column — but
+**not yet used for matching**. It is the input to adoption: finding a row joka did not insert, and
+re-binding after a rebuild where primary keys changed. Every entity in jjc2 already carries an
+`xid`, which is a ready-made `_key`.
+
+### Still open
+
+1. ~~Validation: `_id` mandatory and unique, `_key` parsed.~~ Done.
+2. Re-key `joka_entity_rows` on `ref_id` (unique index; `entity_file` demoted to metadata). A
+   tracking format change, so `meta.TrackingVersion` goes to 2 and existing rows need an upgrade path.
+3. Identity matching in sync: reorder becomes a no-op, mid-file insert works, moving an entity
+   between files works, a file rename stops orphaning.
+4. `_key` adoption, and reporting entities that are tracked but no longer declared anywhere
+   (reported, never deleted — see `proposal_entity_identity_20260826.md`).

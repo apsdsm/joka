@@ -450,6 +450,43 @@ Before applying, sync prints a plan — new files show the rows to be inserted, 
 joka entity sync --dry-run
 ```
 
+### Entity identity
+
+Every entity must declare an `_id`, and no `_id` may be claimed twice:
+
+```yaml
+entities:
+  - _is: fields
+    _id: field_company_ceo     # required — identifies this row
+    _key: xid                  # optional — the column that identifies it in the DB
+    xid: fld_0000000000000001
+```
+
+`joka entity sync` validates the whole set before writing anything and refuses
+if either invariant is broken, naming every problem at once:
+
+```
+Error: entity set is not valid: 1 entity without an _id and 1 _id claimed twice
+  no _id: a.yaml entity #2 (fields)
+  _id "alpha" is claimed by:
+    a.yaml entity #1 (fields)
+    b.yaml entity #1 (fields)
+```
+
+`joka status` reports the same problems per file, so you can see them without
+running a sync.
+
+**Scope is the entity set joka loads for this run** — whatever `entities:`
+resolves to after the profile overlay — not the whole filesystem. Parallel
+per-environment trees (`devops/entities/local`, `devops/entities/dev1`) share
+`_id`s on purpose: they are the same logical entity for different environments,
+and only one set is ever loaded. An `_id` is therefore unique per database, not
+universally.
+
+`_key` names a column whose value identifies the row in the database
+independently of its primary key. It is parsed and reserved (never inserted as a
+column) but not yet used for matching.
+
 ### `joka entity status`
 
 Shows the sync status of each entity file: `synced` (hash matches), `modified` (file changed since last sync), `new` (not yet synced), or `orphaned` (tracked but file deleted). Uses SHA-256 content hashing.

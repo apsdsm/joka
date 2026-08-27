@@ -808,3 +808,90 @@ func hashOf(t *testing.T, dir, name string) string {
 	}
 	return h
 }
+
+func TestBuildEntitiesIdentityProblems(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("it reports an entity with no _id against its file", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "a.yaml", "entities:\n  - _is: users\n    _id: admin\n  - _is: users\n    name: no id\n")
+
+		e, err := buildEntities(ctx, entityInputs(dir, fakeEntities{}, fakeProbe{tables: map[string]bool{"joka_entities": true}}))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		file := findEntity(t, e, "a.yaml")
+		if len(file.IdentityProblems) != 1 {
+			t.Fatalf("expected 1 identity problem, got %+v", file.IdentityProblems)
+		}
+		if file.IdentityProblems[0].Kind != entityapp.ProblemMissingID {
+			t.Errorf("expected missing_id, got %q", file.IdentityProblems[0].Kind)
+		}
+	})
+
+	t.Run("it reports a duplicate _id against both files", func(t *testing.T) {
+		// The problem only exists across files, so it has to be attached to
+		// each claimant or one of them looks clean.
+		dir := t.TempDir()
+		writeFile(t, dir, "a.yaml", "entities:\n  - _is: users\n    _id: admin\n")
+		writeFile(t, dir, "b.yaml", "entities:\n  - _is: users\n    _id: admin\n")
+
+		e, err := buildEntities(ctx, entityInputs(dir, fakeEntities{}, fakeProbe{tables: map[string]bool{"joka_entities": true}}))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		for _, path := range []string{"a.yaml", "b.yaml"} {
+			file := findEntity(t, e, path)
+			if len(file.IdentityProblems) != 1 {
+				t.Errorf("%s: expected the duplicate reported, got %+v", path, file.IdentityProblems)
+				continue
+			}
+			if file.IdentityProblems[0].RefID != "admin" {
+				t.Errorf("%s: expected the _id named, got %q", path, file.IdentityProblems[0].RefID)
+			}
+		}
+	})
+
+	t.Run("it reports nothing for a valid set", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "a.yaml", "entities:\n  - _is: users\n    _id: admin\n")
+		writeFile(t, dir, "b.yaml", "entities:\n  - _is: users\n    _id: other\n")
+
+		e, err := buildEntities(ctx, entityInputs(dir, fakeEntities{}, fakeProbe{tables: map[string]bool{"joka_entities": true}}))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		for _, f := range e.Files {
+			if len(f.IdentityProblems) != 0 {
+				t.Errorf("%s: expected no problems, got %+v", f.Path, f.IdentityProblems)
+			}
+		}
+	})
+}
+
+func TestIdentityActionHasNoCommand(t *testing.T) {
+	// An _id has to be authored; choosing one is a decision about what the
+	// entity is, so joka has nothing to run.
+	r := Report{Entities: Entities{Files: []EntityFile{{
+		Path:   "a.yaml",
+		Status: "new",
+		IdentityProblems: []entityapp.EntitySetProblem{{
+			Kind:  entityapp.ProblemMissingID,
+			Where: []entityapp.EntityLocation{{File: "a.yaml", Position: 2, Table: "users"}},
+		}},
+	}}}}
+
+	action, ok := findAction(deriveActions(r), "a.yaml")
+	if !ok {
+		t.Fatal("expected an action for the file")
+	}
+	if action.Command != "" {
+		t.Errorf("expected no command, got %q", action.Command)
+	}
+	if !strings.Contains(action.Reason, "without an _id") {
+		t.Errorf("expected the reason to name the problem, got %q", action.Reason)
+	}
+}

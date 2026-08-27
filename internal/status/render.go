@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	entitydomain "github.com/apsdsm/joka/internal/domains/entity/domain"
 	"github.com/apsdsm/joka/internal/meta"
 	"github.com/fatih/color"
@@ -169,13 +170,17 @@ func renderEntities(w io.Writer, e Entities) {
 		case string(entitydomain.StatusOrphaned):
 			sev = sevBad
 		}
-		if f.Structural != "" || f.MissingRows > 0 || f.ParseError != "" {
+		if f.Structural != "" || f.MissingRows > 0 || f.ParseError != "" || len(f.IdentityProblems) > 0 {
 			sev = sevBad
 		}
 
 		var notes []string
 		if f.ParseError != "" {
 			notes = append(notes, f.ParseError)
+		}
+
+		for _, problem := range f.IdentityProblems {
+			notes = append(notes, identityNote(problem))
 		}
 		if f.Structural != "" {
 			notes = append(notes, "sync would refuse: "+trimStructuralPrefix(f.Structural))
@@ -410,4 +415,18 @@ func writtenByLabel(m meta.State) string {
 		return ""
 	}
 	return "written by joka " + m.JokaVersion
+}
+
+// identityNote describes one thing standing between a file and identity-keyed
+// tracking.
+func identityNote(p entityapp.EntitySetProblem) string {
+	if p.Kind == entityapp.ProblemMissingID {
+		return fmt.Sprintf("entity #%d (%s) has no _id", p.Where[0].Position, p.Where[0].Table)
+	}
+
+	others := make([]string, 0, len(p.Where))
+	for _, loc := range p.Where {
+		others = append(others, fmt.Sprintf("%s #%d", loc.File, loc.Position))
+	}
+	return fmt.Sprintf("_id %q is claimed by %s", p.RefID, strings.Join(others, " and "))
 }

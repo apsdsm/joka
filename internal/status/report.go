@@ -19,7 +19,10 @@
 // fix on the way past.
 package status
 
-import "github.com/apsdsm/joka/internal/meta"
+import (
+	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
+	"github.com/apsdsm/joka/internal/meta"
+)
 
 // Report is the whole picture for one database.
 type Report struct {
@@ -150,6 +153,10 @@ type EntityFile struct {
 	// against.
 	KeyedByID  bool   `json:"keyed_by_id"`
 	ParseError string `json:"parse_error,omitempty"`
+	// IdentityProblems are the entities in this file with no _id, or whose _id
+	// another file also claims. Empty when the file is ready for identity-keyed
+	// tracking.
+	IdentityProblems []entityapp.EntitySetProblem `json:"identity_problems"`
 }
 
 // Templates is the template section: one row per table declared in the
@@ -228,6 +235,9 @@ func (r *Report) normalize() {
 		r.Entities.Files = []EntityFile{}
 	}
 	for i := range r.Entities.Files {
+		if r.Entities.Files[i].IdentityProblems == nil {
+			r.Entities.Files[i].IdentityProblems = []entityapp.EntitySetProblem{}
+		}
 		if r.Entities.Files[i].MissingTables == nil {
 			r.Entities.Files[i].MissingTables = []string{}
 		}

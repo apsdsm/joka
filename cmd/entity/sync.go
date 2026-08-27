@@ -98,6 +98,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	var pending []*domain.EntityFile  // new files to insert
 	var modified []*domain.EntityFile // tracked files whose content changed
+	var all []*domain.EntityFile      // every file, for set-level validation
 
 	for _, rel := range relPaths {
 		fullPath := filepath.Join(r.EntitiesDir, rel)
@@ -110,6 +111,21 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			return err
 		}
 
+		// Every file is parsed, including ones the hash says are unchanged.
+		// _id uniqueness is a property of the whole set, so an unchanged file
+		// still has to be read to know what it claims. The hash decides
+		// whether a file is written, not whether it is read.
+		file, err := app.ParseEntityAction{Path: fullPath}.Execute()
+		if err != nil {
+			if jsonOut {
+				return shared.PrintErrorJSON(err)
+			}
+			return err
+		}
+		file.Path = rel
+		file.ContentHash = hash
+		all = append(all, file)
+
 		already, err := dbAdapter.IsEntitySynced(ctx, rel)
 		if err != nil {
 			if jsonOut {
@@ -118,38 +134,12 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			return err
 		}
 
-		if already {
-			dbHash, err := dbAdapter.GetEntityHash(ctx, rel)
-			if err != nil {
-				if jsonOut {
-					return shared.PrintErrorJSON(err)
-				}
-				return err
-			}
-
-			// A stored hash that matches means the file is unchanged. An
-			// empty stored hash (synced before hashing existed) is treated
-			// as modified, matching `entity status`; the update path then
-			// backfills the hash. --force overrides this so an unchanged
-			// file is re-applied anyway.
-			if !r.Force && dbHash != "" && dbHash == hash {
-				continue
-			}
-
-			file, err := app.ParseEntityAction{Path: fullPath}.Execute()
-			if err != nil {
-				if jsonOut {
-					return shared.PrintErrorJSON(err)
-				}
-				return err
-			}
-			file.Path = rel
-			file.ContentHash = hash
-			modified = append(modified, file)
+		if !already {
+			pending = append(pending, file)
 			continue
 		}
 
-		file, err := app.ParseEntityAction{Path: fullPath}.Execute()
+		dbHash, err := dbAdapter.GetEntityHash(ctx, rel)
 		if err != nil {
 			if jsonOut {
 				return shared.PrintErrorJSON(err)
@@ -157,10 +147,25 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			return err
 		}
 
-		file.Path = rel
-		file.ContentHash = hash
+		// A stored hash that matches means the file is unchanged. An empty
+		// stored hash (synced before hashing existed) is treated as modified,
+		// matching `entity status`; the update path then backfills the hash.
+		// --force overrides this so an unchanged file is re-applied anyway.
+		if !r.Force && dbHash != "" && dbHash == hash {
+			continue
+		}
 
-		pending = append(pending, file)
+		modified = append(modified, file)
+	}
+
+	// Validate the whole set before anything is written: an _id claimed twice
+	// is only visible across files, and a set that cannot be identified is not
+	// one joka should start writing from.
+	if err := app.EntitySetError(app.ValidateEntitySet(all)); err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
 	}
 
 	if len(pending) == 0 && len(modified) == 0 {

@@ -3,6 +3,7 @@ package status
 import (
 	"fmt"
 
+	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	entitydomain "github.com/apsdsm/joka/internal/domains/entity/domain"
 	templatedomain "github.com/apsdsm/joka/internal/domains/template/domain"
 )
@@ -61,6 +62,11 @@ func deriveActions(r Report) []Action {
 
 	for _, file := range r.Entities.Files {
 		switch {
+		case len(file.IdentityProblems) > 0:
+			// No command fixes this: an _id has to be authored, and choosing
+			// one is a decision about what the entity is.
+			add(ScopeEntities, file.Path, identityReason(file.IdentityProblems), "")
+
 		case file.ParseError != "":
 			add(ScopeEntities, file.Path, "cannot be parsed: "+file.ParseError, "")
 
@@ -141,4 +147,29 @@ func isAre(n int) string {
 		return "is"
 	}
 	return "are"
+}
+
+// identityReason summarises why a file is not ready for identity-keyed
+// tracking. joka has no command for it — an _id has to be authored.
+func identityReason(problems []entityapp.EntitySetProblem) string {
+	missing, duplicate := 0, 0
+	for _, p := range problems {
+		if p.Kind == entityapp.ProblemMissingID {
+			missing++
+			continue
+		}
+		duplicate++
+	}
+
+	switch {
+	case missing > 0 && duplicate > 0:
+		return fmt.Sprintf("%s without an _id and %s claimed by another file; joka identifies every seeded row by _id",
+			plural(missing, "entity", "entities"), plural(duplicate, "_id", "_ids"))
+	case missing > 0:
+		return fmt.Sprintf("%s without an _id; joka identifies every seeded row by _id",
+			plural(missing, "entity", "entities"))
+	default:
+		return fmt.Sprintf("%s also claimed by another file; an _id identifies one row, so it can only be claimed once",
+			plural(duplicate, "_id", "_ids"))
+	}
 }
