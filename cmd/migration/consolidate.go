@@ -10,7 +10,6 @@ import (
 	"github.com/fatih/color"
 
 	"github.com/apsdsm/joka/cmd/shared"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
 	"github.com/apsdsm/joka/internal/domains/migration/infra"
@@ -24,15 +23,12 @@ import (
 // implementation; joka's job here is bookkeeping — write the file, remove the
 // records the file no longer covers, delete the files it replaced.
 //
-// PostgreSQL only for now (domain.ErrDumpDriverUnsupported on anything else).
-//
 // The target must be the most recently applied migration. A dump describes the
 // database as it is now, not as it was at some earlier migration, so
 // consolidating "up to" an older index would write a baseline that does not match
 // the index it carries.
 type RunConsolidateCommand struct {
 	DB            *sql.DB
-	Driver        jokadb.Driver
 	DSN           string
 	MigrationsDir string
 	UpToIndex     string
@@ -52,13 +48,10 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	adapter := newMigrationAdapter(r.Driver, r.DB)
+	adapter := infra.NewPostgresDBAdapter(r.DB)
 
 	// 0. Refuse drivers joka cannot dump, before touching anything.
-	dumper, err := infra.NewSchemaDumper(r.Driver, r.DB, r.DSN)
-	if err != nil {
-		return fail(err)
-	}
+	dumper := infra.NewSchemaDumper(r.DB, r.DSN)
 
 	// 1. Build the migration chain.
 	chain, chainErr := app.GetMigrationChainAction{

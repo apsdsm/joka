@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
+	"github.com/fatih/color"
 )
 
 // RunSnapshotCommand handles "migrate snapshot [migration_index]". It retrieves
@@ -17,7 +17,6 @@ import (
 // it shows the most recent snapshot.
 type RunSnapshotCommand struct {
 	DB             *sql.DB
-	Driver         jokadb.Driver
 	MigrationIndex string // empty = latest
 	OutputFormat   string
 }
@@ -26,7 +25,7 @@ type RunSnapshotCommand struct {
 // CREATE TABLE statement, sorted alphabetically by table name.
 func (r RunSnapshotCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
-	adapter := newMigrationAdapter(r.Driver, r.DB)
+	adapter := infra.NewPostgresDBAdapter(r.DB)
 
 	// Resolve which snapshot to show — explicit index or fall back to latest.
 	index := r.MigrationIndex

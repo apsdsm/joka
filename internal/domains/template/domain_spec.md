@@ -100,7 +100,7 @@ Infrastructure implementations.
 
 - `GetTables()` — Reads `_config.yaml`, discovers subdirectories and record files, returns `[]Table`.
 - `LoadRecord()` — Parses a single YAML or CSV file into `[]map[string]any`.
-- `MySQLDBAdapter` — Implements `DBAdapter` with dynamic SQL (column names from map keys, parameterized values).
+- `PostgresDBAdapter` — Implements `DBAdapter` with dynamic SQL (column names from map keys, parameterized values).
 - `models/` — `TemplatesConfig` and `TableConfig` for YAML unmarshaling.
 
 ## Commands

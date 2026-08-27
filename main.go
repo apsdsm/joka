@@ -5,23 +5,32 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
-	"github.com/joho/godotenv"
 	"github.com/apsdsm/joka/cmd/dbtools"
 	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/shared"
+	"github.com/apsdsm/joka/cmd/status"
 	"github.com/apsdsm/joka/cmd/template"
 	"github.com/apsdsm/joka/config"
-	"github.com/apsdsm/joka/internal/connection"
-	"github.com/apsdsm/joka/internal/secrets"
-	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	jokadb "github.com/apsdsm/joka/db"
+	"github.com/apsdsm/joka/internal/connection"
+	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
+	"github.com/apsdsm/joka/internal/meta"
+	"github.com/apsdsm/joka/internal/secrets"
+	"github.com/fatih/color"
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
-const version = "0.13.0"
+const version = "0.14.0"
+
+// annotationMutates marks a command that writes to the database, so the root
+// command knows whether to stamp joka_meta. Read-only commands must not.
+const annotationMutates = "joka:mutates"
+
+// mutates is the annotation map for a command that writes.
+var mutates = map[string]string{annotationMutates: "true"}
 
 func main() {
 	var (
@@ -33,7 +42,6 @@ func main() {
 		autoConfirm   bool
 		outputFormat  string
 		dbConn        *sql.DB
-		dbDriver      jokadb.Driver
 		dbDSN         string
 		cfg           *config.Config
 	)
@@ -82,12 +90,27 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Kept for `migrate consolidate`, which hands it to pg_dump/mysqldump.
+			// Kept for `migrate consolidate`, which hands it to pg_dump.
 			dbDSN = dsn
 
-			dbConn, dbDriver, err = jokadb.Open(dsn)
+			dbConn, err = jokadb.Open(dsn)
 			if err != nil {
 				return fmt.Errorf("error connecting to database: %w", err)
+			}
+
+			// Refuse a database whose bookkeeping a newer joka has already
+			// moved on: this build would read the new shape as the old one.
+			if err := meta.Check(c.Context(), dbConn); err != nil {
+				return err
+			}
+
+			// Record what wrote here, but only for commands that write. A
+			// read-only command must leave a bare database bare — that is what
+			// makes a missing tracking table reportable.
+			if c.Annotations[annotationMutates] == "true" {
+				if err := meta.Stamp(c.Context(), dbConn, version); err != nil {
+					return err
+				}
 			}
 
 			return nil
@@ -108,10 +131,11 @@ func main() {
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 
 	initCmd := &cobra.Command{
-		Use:   "init",
-		Short: "Initialize the migrations table",
+		Use:         "init",
+		Short:       "Initialize the migrations table",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return migration.RunInitCommand{DB: dbConn, Driver: dbDriver, OutputFormat: outputFormat}.Execute(c.Context())
+			return migration.RunInitCommand{DB: dbConn, OutputFormat: outputFormat}.Execute(c.Context())
 		},
 	}
 
@@ -128,18 +152,51 @@ func main() {
 		},
 	}
 
+	var statusCompact bool
+
+	statusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Report what the devops folder declares, what joka tracks, and what the database contains",
+		RunE: func(c *cobra.Command, _ []string) error {
+			if statusCompact && outputFormat == shared.OutputJSON {
+				return fmt.Errorf("--compact applies to text output; --output json already returns the whole report")
+			}
+
+			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
+			for i, t := range cfg.Tables {
+				tables[i] = templateinfra.TableConfig{
+					Name:     t.Name,
+					Strategy: t.Strategy,
+				}
+			}
+
+			return status.RunStatusCommand{
+				DB:            dbConn,
+				Profile:       profile,
+				MigrationsDir: migrationsDir,
+				TemplatesDir:  templatesDir,
+				EntitiesDir:   entitiesDir,
+				Tables:        tables,
+				Compact:       statusCompact,
+				OutputFormat:  outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
+	statusCmd.Flags().BoolVar(&statusCompact, "compact", false, "Print the report as a single line")
+
 	migrateCmd := &cobra.Command{
 		Use:   "migrate",
 		Short: "Database migration commands",
 	}
 
 	migrateUpCmd := &cobra.Command{
-		Use:   "up",
-		Short: "Apply pending migrations",
+		Use:         "up",
+		Short:       "Apply pending migrations",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateUpCommand{
 				DB:            dbConn,
-				Driver:        dbDriver,
 				MigrationsDir: migrationsDir,
 				AutoConfirm:   autoConfirm,
 				OutputFormat:  outputFormat,
@@ -153,7 +210,6 @@ func main() {
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateStatusCommand{
 				DB:            dbConn,
-				Driver:        dbDriver,
 				MigrationsDir: migrationsDir,
 				OutputFormat:  outputFormat,
 			}.Execute(c.Context())
@@ -168,8 +224,9 @@ func main() {
 	var ignoreForeignKeys bool
 
 	dataSyncCmd := &cobra.Command{
-		Use:   "sync",
-		Short: "Sync template data to the database",
+		Use:         "sync",
+		Short:       "Sync template data to the database",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
 			for i, t := range cfg.Tables {
@@ -187,7 +244,6 @@ func main() {
 
 			return template.RunDataSyncCommand{
 				DB:                dbConn,
-				Driver:            dbDriver,
 				TemplatesDir:      templatesDir,
 				Tables:            tables,
 				AutoConfirm:       autoConfirm,
@@ -197,20 +253,22 @@ func main() {
 		},
 	}
 
-	dataSyncCmd.Flags().BoolVar(&ignoreForeignKeys, "ignore-foreign-keys", false, "Disable foreign key checks during truncate (MySQL)")
+	dataSyncCmd.Flags().BoolVar(&ignoreForeignKeys, "ignore-foreign-keys", false, "Defer foreign key constraint checks during truncate")
 
 	unlockCmd := &cobra.Command{
-		Use:   "unlock",
-		Short: "Force-release a held lock",
+		Use:         "unlock",
+		Short:       "Force-release a held lock",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return lock.RunUnlockCommand{DB: dbConn, Driver: dbDriver, OutputFormat: outputFormat}.Execute(c.Context())
+			return lock.RunUnlockCommand{DB: dbConn, OutputFormat: outputFormat}.Execute(c.Context())
 		},
 	}
 
 	migrateSnapshotCmd := &cobra.Command{
-		Use:   "snapshot [migration_index]",
-		Short: "View schema snapshot for a migration",
-		Args:  cobra.MaximumNArgs(1),
+		Use:         "snapshot [migration_index]",
+		Short:       "View schema snapshot for a migration",
+		Args:        cobra.MaximumNArgs(1),
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, args []string) error {
 			var index string
 			if len(args) > 0 {
@@ -218,7 +276,6 @@ func main() {
 			}
 			return migration.RunSnapshotCommand{
 				DB:             dbConn,
-				Driver:         dbDriver,
 				MigrationIndex: index,
 				OutputFormat:   outputFormat,
 			}.Execute(c.Context())
@@ -226,8 +283,9 @@ func main() {
 	}
 
 	migrateConsolidateCmd := &cobra.Command{
-		Use:   "consolidate",
-		Short: "Squash applied migrations into one baseline dumped by pg_dump (PostgreSQL only)",
+		Use:         "consolidate",
+		Short:       "Squash applied migrations into one baseline dumped by pg_dump (PostgreSQL only)",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			upTo, _ := c.Flags().GetString("up-to")
 			if upTo == "" {
@@ -235,7 +293,6 @@ func main() {
 			}
 			return migration.RunConsolidateCommand{
 				DB:            dbConn,
-				Driver:        dbDriver,
 				DSN:           dbDSN,
 				MigrationsDir: migrationsDir,
 				UpToIndex:     upTo,
@@ -252,7 +309,6 @@ func main() {
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunVerifyCommand{
 				DB:           dbConn,
-				Driver:       dbDriver,
 				OutputFormat: outputFormat,
 			}.Execute(c.Context())
 		},
@@ -283,13 +339,13 @@ without applying anything.
 
 Use --force to re-apply every tracked file's row updates regardless of its
 stored hash. This is the escape hatch when change detection is in doubt.`,
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
 			force, _ := c.Flags().GetBool("force")
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
 				Secrets:      secrets.New(cfg.Secrets),
-				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
@@ -307,22 +363,78 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return entity.RunEntityStatusCommand{
 				DB:           dbConn,
-				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				OutputFormat: outputFormat,
 			}.Execute(c.Context())
 		},
 	}
 
-	entityReimportCmd := &cobra.Command{
-		Use:   "reimport [file]",
-		Short: "Re-sync an entity file (delete old rows, re-insert)",
+	var diffNoValues bool
+
+	entityDiffCmd := &cobra.Command{
+		Use:   "diff [file]",
+		Short: "Line an entity file's declared graph up against the rows joka tracks and the rows in the database",
 		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			return entity.RunEntityDiffCommand{
+				DB:           dbConn,
+				EntitiesDir:  entitiesDir,
+				FilePath:     args[0],
+				SkipValues:   diffNoValues,
+				OutputFormat: outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
+	entityDiffCmd.Flags().BoolVar(&diffNoValues, "no-values", false, "Skip the per-row column comparison (saves one query per matched row)")
+
+	var (
+		forgetOrphans bool
+		forgetForce   bool
+	)
+
+	entityForgetCmd := &cobra.Command{
+		Use:         "forget [file]",
+		Short:       "Remove joka's tracking for an entity file without touching its database rows",
+		Args:        cobra.MaximumNArgs(1),
+		Annotations: mutates,
+		RunE: func(c *cobra.Command, args []string) error {
+			if forgetOrphans && len(args) > 0 {
+				return fmt.Errorf("pass either a file or --orphans, not both")
+			}
+			if !forgetOrphans && len(args) == 0 {
+				return fmt.Errorf("specify an entity file to forget, or --orphans to forget every tracked file that is no longer on disk")
+			}
+
+			filePath := ""
+			if len(args) > 0 {
+				filePath = args[0]
+			}
+
+			return entity.RunEntityForgetCommand{
+				DB:           dbConn,
+				EntitiesDir:  entitiesDir,
+				FilePath:     filePath,
+				Orphans:      forgetOrphans,
+				Force:        forgetForce,
+				AutoConfirm:  autoConfirm,
+				OutputFormat: outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
+	entityForgetCmd.Flags().BoolVar(&forgetOrphans, "orphans", false, "Forget every tracked entity file that is no longer on disk")
+	entityForgetCmd.Flags().BoolVar(&forgetForce, "force", false, "Forget the tracking even for rows that are still in the database")
+
+	entityReimportCmd := &cobra.Command{
+		Use:         "reimport [file]",
+		Short:       "Re-sync an entity file (delete old rows, re-insert)",
+		Args:        cobra.ExactArgs(1),
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, args []string) error {
 			return entity.RunEntityReimportCommand{
 				DB:           dbConn,
 				Secrets:      secrets.New(cfg.Secrets),
-				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				FilePath:     args[0],
 				AutoConfirm:  autoConfirm,
@@ -332,14 +444,14 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 	}
 
 	entityUpdateCmd := &cobra.Command{
-		Use:   "update [file]",
-		Short: "Add new entities from a file without deleting existing rows",
-		Args:  cobra.ExactArgs(1),
+		Use:         "update [file]",
+		Short:       "Add new entities from a file without deleting existing rows",
+		Args:        cobra.ExactArgs(1),
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, args []string) error {
 			return entity.RunEntityUpdateCommand{
 				DB:           dbConn,
 				Secrets:      secrets.New(cfg.Secrets),
-				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				FilePath:     args[0],
 				AutoConfirm:  autoConfirm,
@@ -349,12 +461,12 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 	}
 
 	dropCmd := &cobra.Command{
-		Use:   "drop",
-		Short: "Drop every table in the database (including joka_* tracking)",
+		Use:         "drop",
+		Short:       "Drop every table in the database (including joka_* tracking)",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return dbtools.RunDropCommand{
 				DB:           dbConn,
-				Driver:       dbDriver,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 			}.Execute(c.Context())
@@ -362,8 +474,9 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 	}
 
 	resetCmd := &cobra.Command{
-		Use:   "reset",
-		Short: "Drop everything and re-run init, migrations, data sync, entity sync",
+		Use:         "reset",
+		Short:       "Drop everything and re-run init, migrations, data sync, entity sync",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
 			for i, t := range cfg.Tables {
@@ -376,7 +489,6 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 			return dbtools.RunResetCommand{
 				DB:                dbConn,
 				Secrets:           secrets.New(cfg.Secrets),
-				Driver:            dbDriver,
 				MigrationsDir:     migrationsDir,
 				TemplatesDir:      templatesDir,
 				EntitiesDir:       entitiesDir,
@@ -390,7 +502,7 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
 	dataCmd.AddCommand(dataSyncCmd)
-	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd, entityUpdateCmd)
+	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityDiffCmd, entityReimportCmd, entityUpdateCmd, entityForgetCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
@@ -403,7 +515,7 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 		},
 	}
 
-	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, makeCmd, statusCmd, migrateCmd, dataCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		if outputFormat == shared.OutputJSON {

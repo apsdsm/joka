@@ -5,18 +5,16 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	"github.com/apsdsm/joka/internal/domains/entity/infra"
+	"github.com/fatih/color"
 )
 
 // RunEntityStatusCommand handles the "entity status" command.
 type RunEntityStatusCommand struct {
 	DB           *sql.DB
-	Driver       jokadb.Driver
 	EntitiesDir  string
 	OutputFormat string
 }
@@ -24,7 +22,7 @@ type RunEntityStatusCommand struct {
 func (r RunEntityStatusCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	dbAdapter := newEntityAdapter(r.Driver, r.DB)
+	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
 	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
 		if jsonOut {

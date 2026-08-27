@@ -74,7 +74,7 @@ Pure data types and error sentinels. No dependencies on infrastructure.
 - `ErrNoMigrationTable`, `ErrMigrationAlreadyExists`, `ErrMigrationTableCreation` — Domain error types.
 
 ### `app/`
-Use-case actions. Depend on the `DBAdapter` interface, not on MySQL directly.
+Use-case actions. Depend on the `DBAdapter` interface, not on the driver directly.
 
 - `CreateMigrationTableAction` — Creates the `joka_migrations` table (idempotent-ish: returns error if exists).
 - `GetMigrationChainAction` — Reads files + applied rows, merges into chain, validates integrity.
@@ -84,7 +84,7 @@ Use-case actions. Depend on the `DBAdapter` interface, not on MySQL directly.
 ### `infra/`
 Infrastructure implementations.
 
-- `MySQLDBAdapter` — Implements `DBAdapter` for MySQL. Can wrap either a raw `*sql.DB` or a `*sql.Tx`.
+- `PostgresDBAdapter` — Implements `DBAdapter` for PostgreSQL. Can wrap either a raw `*sql.DB` or a `*sql.Tx`.
 - `ListMigrationFiles()` — Scans a directory for migration files matching the naming pattern.
 - `CreateMigrationFile()` — Creates a new empty `.sql` file with a timestamped name.
 - `models/` — Flat data structs for rows (`MigrationRow`) and files (`MigrationFile`).

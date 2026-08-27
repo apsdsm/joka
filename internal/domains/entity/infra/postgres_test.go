@@ -3,6 +3,7 @@ package infra_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -253,7 +254,7 @@ func TestPostgresInsertRow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("creating join table: %v", err)
 		}
-		t.Cleanup(func() { testlib.DropTable(t, db, tableName) })
+		t.Cleanup(func() { testlib.DropTablePostgres(t, db, tableName) })
 
 		adapter := infra.NewPostgresDBAdapter(db)
 
@@ -280,7 +281,7 @@ func TestPostgresInsertRow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("creating join table: %v", err)
 		}
-		t.Cleanup(func() { testlib.DropTable(t, db, tableName) })
+		t.Cleanup(func() { testlib.DropTablePostgres(t, db, tableName) })
 
 		adapter := infra.NewPostgresDBAdapter(db)
 
@@ -695,7 +696,7 @@ func TestPostgresDeleteRow(t *testing.T) {
 			t.Fatal("expected FK error, got nil")
 		}
 
-		if !errorIs(err, domain.ErrForeignKeyConflict) {
+		if !errors.Is(err, domain.ErrForeignKeyConflict) {
 			t.Errorf("expected ErrForeignKeyConflict, got: %v", err)
 		}
 	})
@@ -849,6 +850,67 @@ func TestGetRowPostgres(t *testing.T) {
 		}
 		if got["email"] != "alice@test.com" {
 			t.Errorf("expected email string, got %#v", got["email"])
+		}
+	})
+}
+
+func TestPostgresRowAndTableExists(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	db, err := testlib.GetTestPostgresDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+
+	ctx := context.Background()
+	createPostgresTestTable(t, db, "exists_test")
+
+	adapter := infra.NewPostgresDBAdapter(db)
+
+	var id int64
+	if err := db.QueryRowContext(ctx,
+		`INSERT INTO "exists_test" (name) VALUES ('kept') RETURNING id`,
+	).Scan(&id); err != nil {
+		t.Fatalf("seeding row: %v", err)
+	}
+
+	t.Run("it finds a row that is present", func(t *testing.T) {
+		live, err := adapter.RowExists(ctx, "exists_test", "id", id)
+		if err != nil {
+			t.Fatalf("RowExists: %v", err)
+		}
+		if !live {
+			t.Error("expected the seeded row to be found")
+		}
+	})
+
+	t.Run("it reports a missing row without erroring", func(t *testing.T) {
+		live, err := adapter.RowExists(ctx, "exists_test", "id", id+9999)
+		if err != nil {
+			t.Fatalf("RowExists: %v", err)
+		}
+		if live {
+			t.Error("expected a primary key that was never inserted to be absent")
+		}
+	})
+
+	t.Run("it reports whether a table exists", func(t *testing.T) {
+		exists, err := adapter.TableExists(ctx, "exists_test")
+		if err != nil {
+			t.Fatalf("TableExists: %v", err)
+		}
+		if !exists {
+			t.Error("expected exists_test to exist")
+		}
+
+		exists, err = adapter.TableExists(ctx, "never_created_table")
+		if err != nil {
+			t.Fatalf("TableExists: %v", err)
+		}
+		if exists {
+			t.Error("expected a table that was never created to be absent")
 		}
 	})
 }

@@ -9,7 +9,6 @@ import (
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/cmd/template"
-	jokadb "github.com/apsdsm/joka/db"
 	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
@@ -24,7 +23,6 @@ type RunResetCommand struct {
 	// Secrets resolves {{ asm.<source>.<key> }} entity template references
 	// against the `secrets:` sources in .jokarc.yaml.
 	Secrets           entityapp.SecretResolver
-	Driver            jokadb.Driver
 	MigrationsDir     string
 	TemplatesDir      string
 	EntitiesDir       string
@@ -38,7 +36,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
 	// Single outer lock covers the whole reset.
-	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+	lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 	if err := lockAdapter.Acquire(ctx, "reset"); err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
@@ -71,7 +69,6 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	}
 	if err := (RunDropCommand{
 		DB:           r.DB,
-		Driver:       r.Driver,
 		AutoConfirm:  true,
 		OutputFormat: "text",
 		SkipLock:     true,
@@ -88,7 +85,6 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	}
 	if err := (migration.RunInitCommand{
 		DB:           r.DB,
-		Driver:       r.Driver,
 		OutputFormat: "text",
 	}).Execute(ctx); err != nil {
 		if jsonOut {
@@ -103,7 +99,6 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	}
 	if err := (migration.RunMigrateUpCommand{
 		DB:            r.DB,
-		Driver:        r.Driver,
 		MigrationsDir: r.MigrationsDir,
 		AutoConfirm:   true,
 		OutputFormat:  "text",
@@ -121,7 +116,6 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	}
 	if err := (template.RunDataSyncCommand{
 		DB:                r.DB,
-		Driver:            r.Driver,
 		TemplatesDir:      r.TemplatesDir,
 		Tables:            r.Tables,
 		AutoConfirm:       true,
@@ -142,7 +136,6 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	if err := (entity.RunEntitySyncCommand{
 		DB:           r.DB,
 		Secrets:      r.Secrets,
-		Driver:       r.Driver,
 		EntitiesDir:  r.EntitiesDir,
 		AutoConfirm:  true,
 		OutputFormat: "text",

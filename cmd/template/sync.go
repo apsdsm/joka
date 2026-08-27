@@ -5,20 +5,18 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 	"github.com/apsdsm/joka/internal/domains/template/app"
 	"github.com/apsdsm/joka/internal/domains/template/domain"
 	"github.com/apsdsm/joka/internal/domains/template/infra"
+	"github.com/fatih/color"
 )
 
 // RunDataSyncCommand handles the "data sync" command. It reads table configs
 // and data files from the templates directory, then syncs them to the database.
 type RunDataSyncCommand struct {
 	DB                *sql.DB
-	Driver            jokadb.Driver
 	TemplatesDir      string
 	Tables            []infra.TableConfig
 	AutoConfirm       bool
@@ -36,7 +34,7 @@ func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 
 	if !r.SkipLock {
 		// Acquire advisory lock to prevent concurrent sync/migration runs.
-		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 		if err := lockAdapter.Acquire(ctx, "data sync"); err != nil {
 			if jsonOut {
 				return shared.PrintErrorJSON(err)
@@ -108,7 +106,7 @@ func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	txAdapter := newTemplateTxAdapter(r.Driver, tx, r.DB)
+	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
 
 	if r.IgnoreForeignKeys {
 		if err := txAdapter.DisableForeignKeys(ctx); err != nil {
@@ -178,11 +176,4 @@ func (r RunDataSyncCommand) Execute(ctx context.Context) error {
 	fmt.Println()
 	color.Green("Sync complete.")
 	return nil
-}
-
-func newTemplateTxAdapter(driver jokadb.Driver, tx *sql.Tx, conn *sql.DB) app.DBAdapter {
-	if driver == jokadb.Postgres {
-		return infra.NewPostgresTxDBAdapter(tx, conn)
-	}
-	return infra.NewMySQLTxDBAdapter(tx, conn)
 }

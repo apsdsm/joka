@@ -1,6 +1,6 @@
 # Migration
 
-Tracks and applies SQL migration files against a MySQL database. Migrations are ordered by a timestamp index and applied within transactions. A `migrations` table in the database records which migrations have been applied.
+Tracks and applies SQL migration files against a PostgreSQL database. Migrations are ordered by a timestamp index and applied within transactions. A `migrations` table in the database records which migrations have been applied.
 
 ## domain
 

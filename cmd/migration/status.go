@@ -6,16 +6,15 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
+	"github.com/fatih/color"
 )
 
 type RunMigrateStatusCommand struct {
 	DB            *sql.DB
-	Driver        jokadb.Driver
 	MigrationsDir string
 	OutputFormat  string
 }
@@ -28,7 +27,7 @@ func (r RunMigrateStatusCommand) Execute(ctx context.Context) error {
 	}
 
 	chain, err := app.GetMigrationChainAction{
-		DB:            newMigrationAdapter(r.Driver, r.DB),
+		DB:            infra.NewPostgresDBAdapter(r.DB),
 		MigrationsDir: r.MigrationsDir,
 	}.Execute(ctx)
 

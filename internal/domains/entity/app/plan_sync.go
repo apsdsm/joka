@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
@@ -64,12 +66,15 @@ type RowUpdatePlan struct {
 // true the value is a lookup whose target row doesn't exist yet (it may be
 // inserted by this same sync, which applies inserts before updates) and After
 // can only be resolved at apply time.
+// The json tags match the keys `entity sync --dry-run` writes by hand in
+// cmd/entity/sync.go, so a column change reads the same whichever command
+// produced it.
 type ColumnChange struct {
-	Column      string
-	Before      string
-	After       string
-	Regenerated bool
-	Deferred    bool
+	Column      string `json:"column"`
+	Before      string `json:"before,omitempty"`
+	After       string `json:"after,omitempty"`
+	Regenerated bool   `json:"regenerated,omitempty"`
+	Deferred    bool   `json:"deferred,omitempty"`
 }
 
 // HasChanges reports whether the plan would actually do anything.
@@ -137,7 +142,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 			return nil, err
 		}
 
-		seq, ordered, err := alignTrackedRows(file.Path, file.Entities, tracked)
+		seq, ordered, err := AlignTrackedRows(file.Path, file.Entities, tracked)
 		if err != nil {
 			return nil, err
 		}
@@ -147,39 +152,10 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 
 		for i, e := range seq {
 			row := ordered[i]
-			cols := sortedKeys(e.Columns)
 
-			current, err := a.DB.GetRow(ctx, e.Table, cols, row.PKColumn, row.RowPK)
+			changes, err := ResolveRowChanges(ctx, a.DB, e, row.PKColumn, row.RowPK, refMap, now)
 			if err != nil {
 				return nil, fmt.Errorf("%s: previewing %s: %w", file.Path, e.Table, err)
-			}
-
-			var changes []ColumnChange
-			for _, k := range cols {
-				raw := e.Columns[k]
-
-				if isNonDeterministicTemplate(raw) {
-					changes = append(changes, ColumnChange{Column: k, Regenerated: true})
-					continue
-				}
-
-				after, err := resolveColumnValue(ctx, raw, refMap, now, a.DB)
-				if err != nil {
-					// Same as the insert path: the lookup target may be a row
-					// inserted by this sync (inserts apply before updates), so
-					// defer resolution to apply time instead of failing.
-					if errors.Is(err, domain.ErrLookupNotFound) {
-						changes = append(changes, ColumnChange{Column: k, Before: normalizeValue(current[k]), Deferred: true})
-						continue
-					}
-					return nil, fmt.Errorf("%s: previewing %s.%s: %w", file.Path, e.Table, k, err)
-				}
-
-				before := normalizeValue(current[k])
-				afterStr := normalizeValue(after)
-				if before != afterStr {
-					changes = append(changes, ColumnChange{Column: k, Before: before, After: afterStr})
-				}
 			}
 
 			if e.RefID != "" {
@@ -240,4 +216,135 @@ func sortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ResolveRowChanges compares one entity's declared columns against the row it
+// is tracked against, and returns only the columns that would change.
+//
+// It reads the live row, so the row must exist. Non-deterministic templates
+// (argon2id, now, asm.* secrets) are reported as Regenerated rather than
+// compared, because they produce a new value on every sync and a hash-vs-hash
+// diff would say nothing. A lookup whose target row does not exist yet is
+// reported as Deferred rather than failing: the row may be inserted earlier in
+// the same sync, which applies inserts before updates.
+//
+// Shared by the sync preview (`entity sync --dry-run`) and `entity diff`, so
+// the two can never disagree about what a column change is.
+func ResolveRowChanges(
+	ctx context.Context,
+	db DBAdapter,
+	e domain.Entity,
+	pkColumn string,
+	pkValue int64,
+	refMap map[string]int64,
+	now string,
+) ([]ColumnChange, error) {
+	cols := sortedKeys(e.Columns)
+
+	current, err := db.GetRow(ctx, e.Table, cols, pkColumn, pkValue)
+	if err != nil {
+		return nil, err
+	}
+
+	var changes []ColumnChange
+
+	for _, k := range cols {
+		raw := e.Columns[k]
+
+		if isNonDeterministicTemplate(raw) {
+			changes = append(changes, ColumnChange{Column: k, Regenerated: true})
+			continue
+		}
+
+		after, err := resolveColumnValue(ctx, raw, refMap, now, db)
+		if err != nil {
+			if errors.Is(err, domain.ErrLookupNotFound) {
+				changes = append(changes, ColumnChange{Column: k, Before: normalizeValue(current[k]), Deferred: true})
+				continue
+			}
+			return nil, fmt.Errorf("%s.%s: %w", e.Table, k, err)
+		}
+
+		before := normalizeValue(current[k])
+		afterStr := normalizeValue(after)
+		if !valuesEqual(before, afterStr) {
+			// Show both sides in the same canonical form when they are JSON,
+			// so the difference is visible instead of being buried in a
+			// disagreement about key order.
+			before, afterStr = alignForDisplay(before, afterStr)
+			changes = append(changes, ColumnChange{Column: k, Before: before, After: afterStr})
+		}
+	}
+
+	return changes, nil
+}
+
+// valuesEqual reports whether a declared value and the value in the database
+// mean the same thing.
+//
+// Raw string comparison is not enough for JSON columns. PostgreSQL renders
+// jsonb in its own key order with a space after each colon, while the YAML
+// carries whatever the author typed — so a value nobody has touched compares
+// unequal and the whole row reads as changed. When both sides parse as JSON,
+// they are compared as canonicalised JSON (keys sorted, no insignificant
+// whitespace) instead.
+//
+// Only both-sides-JSON is canonicalised. A plain string that merely looks like
+// JSON on one side is compared raw, so nothing is silently reinterpreted.
+func valuesEqual(before, after string) bool {
+	if before == after {
+		return true
+	}
+
+	beforeJSON, ok := canonicalJSON(before)
+	if !ok {
+		return false
+	}
+	afterJSON, ok := canonicalJSON(after)
+	if !ok {
+		return false
+	}
+
+	return beforeJSON == afterJSON
+}
+
+// canonicalJSON re-encodes a JSON document with sorted keys and no
+// insignificant whitespace. It reports false for anything that is not a JSON
+// object or array — a bare string, number or boolean round-trips through JSON
+// unchanged, so treating those as JSON would buy nothing and risk equating
+// values that differ only in quoting.
+func canonicalJSON(s string) (string, bool) {
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return "", false
+	}
+
+	var v any
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+		return "", false
+	}
+
+	// encoding/json sorts map keys on the way out, which is the canonical form
+	// we want.
+	out, err := json.Marshal(v)
+	if err != nil {
+		return "", false
+	}
+
+	return string(out), true
+}
+
+// alignForDisplay re-renders two differing values in the same canonical form
+// when both are JSON, so a reader comparing them sees only what actually
+// differs. Values that are not both JSON are returned unchanged.
+func alignForDisplay(before, after string) (string, string) {
+	beforeJSON, ok := canonicalJSON(before)
+	if !ok {
+		return before, after
+	}
+	afterJSON, ok := canonicalJSON(after)
+	if !ok {
+		return before, after
+	}
+	return beforeJSON, afterJSON
 }

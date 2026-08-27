@@ -41,7 +41,7 @@ type Secret struct {
 // non-sensitive databases.
 type Connection struct {
 	Source   string            `yaml:"source"` // "env" | "literal" | "aws_secrets_manager"
-	Driver   string            `yaml:"driver"` // "mysql" (default) | "postgres"
+	Driver   string            `yaml:"driver"` // "postgres" (default); joka is PostgreSQL only
 	Host     string            `yaml:"host"`
 	Port     int               `yaml:"port"`
 	User     string            `yaml:"user"`

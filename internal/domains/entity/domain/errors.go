@@ -42,4 +42,10 @@ var (
 	// an _id needed to match a tracked row). The caller should fall back to
 	// 'entity reimport'.
 	ErrStructuralChange = errors.New("entity file changed structurally; use 'entity reimport'")
+
+	// ErrRowsStillLive is returned when entity forget is asked to drop the
+	// tracking for a file whose rows are still in the database. Forgetting
+	// them would leave rows nothing tracks, and the next sync would insert a
+	// second copy, so the caller must pass --force to mean it.
+	ErrRowsStillLive = errors.New("tracked rows are still in the database")
 )

@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	"github.com/apsdsm/joka/internal/domains/entity/infra"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
+	"github.com/fatih/color"
 )
 
 // RunEntitySyncCommand handles the "entity sync" command.
@@ -21,7 +20,6 @@ type RunEntitySyncCommand struct {
 	// Secrets resolves {{ asm.<source>.<key> }} template references against the
 	// `secrets:` sources in .jokarc.yaml.
 	Secrets      app.SecretResolver
-	Driver       jokadb.Driver
 	EntitiesDir  string
 	AutoConfirm  bool
 	OutputFormat string
@@ -46,7 +44,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}
 
 	if !r.SkipLock && !r.DryRun {
-		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 
 		if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
 			if jsonOut {
@@ -58,7 +56,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		defer lockAdapter.Release(ctx) //nolint:errcheck
 	}
 
-	dbAdapter := newEntityAdapter(r.Driver, r.DB)
+	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
 	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
 		if jsonOut {
@@ -217,7 +215,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	txAdapter := newEntityTxAdapter(r.Driver, tx, r.DB)
+	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
 
 	result, err := app.SyncEntitiesAction{
 		DB:       txAdapter,
@@ -381,18 +379,4 @@ func planJSON(plan *app.SyncPlan) map[string]any {
 	}
 
 	return map[string]any{"inserts": inserts, "updates": updates}
-}
-
-func newEntityAdapter(driver jokadb.Driver, conn *sql.DB) app.DBAdapter {
-	if driver == jokadb.Postgres {
-		return infra.NewPostgresDBAdapter(conn)
-	}
-	return infra.NewMySQLDBAdapter(conn)
-}
-
-func newEntityTxAdapter(driver jokadb.Driver, tx *sql.Tx, conn *sql.DB) app.DBAdapter {
-	if driver == jokadb.Postgres {
-		return infra.NewPostgresTxDBAdapter(tx, conn)
-	}
-	return infra.NewMySQLTxDBAdapter(tx, conn)
 }

@@ -11,21 +11,20 @@ import (
 )
 
 type PostgresDBAdapter struct {
-	db     DBTX
-	conn   *sql.DB
-	driver jokadb.Driver
+	db   DBTX
+	conn *sql.DB
 }
 
 func NewPostgresDBAdapter(conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: conn, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: conn, conn: conn}
 }
 
 func NewPostgresTxDBAdapter(tx *sql.Tx, conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: tx, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: tx, conn: conn}
 }
 
 func (p *PostgresDBAdapter) TruncateTable(ctx context.Context, tableName string) error {
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, tableName)
+	exists, err := jokadb.TableExists(ctx, p.conn, tableName)
 	if err != nil {
 		return err
 	}
@@ -42,7 +41,7 @@ func (p *PostgresDBAdapter) InsertRows(ctx context.Context, tableName string, ro
 		return 0, nil
 	}
 
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, tableName)
+	exists, err := jokadb.TableExists(ctx, p.conn, tableName)
 	if err != nil {
 		return 0, err
 	}

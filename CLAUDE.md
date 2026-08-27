@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Joka is a database migration and data management tool written in Go. It supports **MySQL** and **PostgreSQL**. It tracks and applies SQL migrations using a `joka_migrations` table, captures schema snapshots after each migration, and syncs seed data from files to database tables.
+Joka is a database migration and data management tool written in Go. It supports **PostgreSQL**. It tracks and applies SQL migrations using a `joka_migrations` table, captures schema snapshots after each migration, and syncs seed data from files to database tables.
+
+MySQL was supported until v0.14.0. It was removed because no project using joka ran MySQL, the two drivers had diverged (consolidation was PostgreSQL-only, snapshots were reconstructed differently per driver), and keeping both honest cost more than it returned. `db.Open` rejects a non-PostgreSQL DSN with `db.ErrUnsupportedDriver` so an old config gets a sentence rather than a driver error.
 
 Module path: `github.com/apsdsm/joka`
 
@@ -19,6 +21,8 @@ go run . [command] [options]
 
 # Examples
 go run . init
+go run . status
+go run . status --compact
 go run . make "add_users_table"
 go run . migrate up
 go run . migrate status
@@ -28,7 +32,9 @@ go run . migrate consolidate --up-to 250116140000
 go run . data sync
 go run . entity sync
 go run . entity status
+go run . entity diff admin_user.yaml
 go run . entity reimport admin_user.yaml
+go run . entity forget admin_user.yaml
 go run . entity update admin_user.yaml
 go run . drop
 go run . reset
@@ -51,6 +57,8 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 - **`db/`** — Database utilities (`Open`, `TableExists`).
 - **`cmd/`** — Command handlers. Each receives dependencies and calls into domain actions.
 - **`internal/domains/`** — Domain logic, organized by bounded context.
+- **`internal/status/`** — Cross-domain read model behind `joka status`. Sits above the domains (they never import each other) and reads from all of them.
+- **`internal/textui/`** — Rune-aware terminal table used by `joka status` and `joka entity diff`. Widths are counted in runes, never bytes: `✓` is three bytes and `·` is two, so byte padding misaligns them by different amounts.
 
 ### Domains
 
@@ -63,7 +71,7 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 
 - **`domain/`** — Pure types, constants, and error sentinels. No infrastructure dependencies.
 - **`app/`** — Use-case actions and interfaces (e.g. `DBAdapter`). Depends on domain types, not on specific databases.
-- **`infra/`** — MySQL, PostgreSQL, and filesystem implementations. Implements the interfaces defined in `app/`. Each database has its own adapter file (`mysql.go`, `postgres.go`).
+- **`infra/`** — PostgreSQL and filesystem implementations. Implements the interfaces defined in `app/`. The database adapter lives in `postgres.go`; helpers shared within the package (the `DBTX` interface, small conversions) live in `shared.go`.
 - **`infra/models/`** — Flat structs for DB rows and file representations.
 
 ## Versioning
@@ -75,24 +83,23 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 
 ## Key Technical Details
 
-- **Go 1.25+** with `github.com/go-sql-driver/mysql` and `github.com/lib/pq`
+- **Go 1.25+** with `github.com/lib/pq`
 - **External binaries**: `migrate consolidate` requires `pg_dump` on `PATH` (PostgreSQL only). No other command shells out. Tests that need it skip when absent (`exec.LookPath`).
-- **Driver auto-detection**: The database driver is detected from the `DATABASE_URL` format. PostgreSQL DSNs start with `postgres://` or `postgresql://`; everything else is assumed MySQL.
-- **Multi-statement SQL**: MySQL DSN is configured with `multiStatements=true`; PostgreSQL handles multiple statements natively.
+- **PostgreSQL only**: `db.IsPostgresDSN` requires the URL to start with `postgres://` or `postgresql://`; `db.Open` refuses anything else with `db.ErrUnsupportedDriver`. `connection.assembleDSN` refuses a `driver:` other than `postgres`/`postgresql`/empty the same way, so a stale `.jokarc.yaml` fails with an explanation instead of a timeout.
+- **Multi-statement SQL**: PostgreSQL handles multiple statements natively. `db.SplitSQLStatements` still splits migration files so each statement can be applied and reported individually.
 - **Connection**: by default the DSN comes from `DATABASE_URL` (`.env` or environment). The
   `.jokarc.yaml` may instead declare a `connection:` block (`internal/connection`) whose `source`
   is `env`, `literal` (inline `url:`/`password:`), or `aws_secrets_manager` (assemble from parts +
   a secret key, or a whole-URL key). See README for the schema. A top-level (or per-profile)
   `secrets:` map declares named Secrets Manager sources for entity template `asm.` references;
   profile entries override same-named base sources.
-  - MySQL: `user:pass@tcp(host:port)/dbname`
   - PostgreSQL: `postgresql://user:pass@host:port/dbname?sslmode=disable`
 - **Profiles**: `.jokarc.yaml` may define a `profiles:` map; `--profile <name>` overlays a profile
   (migrations/entities/connection) onto the base config. No `--profile` uses the base.
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
 - **CLI flags**: `--env` for .env path, `--profile`/`-p` for the config profile, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
 - **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
-- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, `entity reimport`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
+- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, `entity reimport`, `entity forget`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
 
@@ -144,22 +151,70 @@ CREATE TABLE joka_entity_rows (
 )
 ```
 
-`joka_lock`, `joka_snapshots`, `joka_entities`, and `joka_entity_rows` are auto-created on first use. Only `joka_migrations` requires `joka init`.
+`joka_lock`, `joka_snapshots`, `joka_entities`, `joka_entity_rows`, and `joka_meta` are auto-created on first use. Only `joka_migrations` requires `joka init`. The one exception is `joka status`, which never creates them — a missing tracking table is something it reports.
+
+## Status report
+
+`joka status` (`internal/status`, `cmd/status`) builds one read-only report of the three
+states joka works between: **declared** (the devops folder), **tracked** (the `joka_*` tables) and
+**live** (the database). Every mismatch joka can hit is a disagreement between two of those.
+
+Coverage per edge, and which command reported it before:
+
+| Edge | Previously | In the report |
+|---|---|---|
+| migration files vs `joka_migrations` | `migrate status` | MIGRATIONS section |
+| snapshot vs live schema | `migrate verify` | drift subsection |
+| entity file hash vs `joka_entities` | `entity status` | ENTITIES section |
+| `joka_entity_rows` vs live rows | nothing | ENTITIES `live` / `missing_rows` |
+| template records vs table row counts | nothing | TEMPLATES section |
+| held advisory lock | error text on the next mutating command | LOCK section |
+
+### Design notes
+
+- **Read-only, including tracking tables.** Every other command auto-creates the `joka_*` table it
+  needs. Status must not: a missing tracking table is a finding. Reads that would create one
+  (`GetLatestSnapshotIndex` calls `EnsureSnapshotsTable`; the lock adapter's `GetLock` calls
+  `EnsureTable`) are gated behind a `Probe.TableExists` check. `TestStatusIsReadOnly` asserts a bare
+  database still has no `joka_*` tables after a full report.
+- **Alignment is by index, not by position.** `GetMigrationChainAction` (behind `migrate status` and
+  `migrate up`) walks files and rows positionally and returns an error the moment they disagree, so
+  on exactly the databases worth diagnosing it reports nothing. `buildMigrations` takes the union of
+  indexes from both sides, which is what makes `file_missing` and `out_of_order` reportable.
+- **The structural verdict comes from sync's own check.** `entity sync` refuses to update a modified
+  file in place when its shape no longer matches the tracked rows. Status calls the same
+  `app.AlignTrackedRows` (exported for this) rather than reimplementing it, so the report can never
+  disagree with what a real sync would do.
+- **Not every finding has a command.** `Action.Command` is empty when joka has nothing that fixes
+  the finding; the text report prints `(nothing joka can run)`. Do not invent a command in the
+  actions list that does not exist — add the command first (`entity forget` was added exactly this
+  way, for the orphan and deleted-row findings that previously had no answer).
+- **`--compact` is one line, positionally stable.** Every section appears whether or not it has a
+  problem, so the line reads the same way each time (`internal/status/compact.go`). `+N` is entity
+  files new or modified, `!N` is real problems, `n/a` is a section that could not be read. It is
+  rejected alongside `--output json`, which is already the whole report.
+- **`--output json` is the same struct.** Text and JSON render one `status.Report`; empty slices are
+  normalized to `[]` (`Report.normalize`) so consumers do not need null checks. Exit code is 0
+  whenever the report could be built — `migrate verify` remains the drift gate for CI.
+- **Column widths are counted in runes.** `✓` is three bytes and `·` is two, so
+  `internal/textui` pads by rune count and colours whole lines rather than cells (an escape
+  sequence inside a padded cell breaks the alignment it was padded for).
+  `TestRenderTextAlignsMultiByteGlyphs` and `TestTableAlignsMultiByteGlyphs` guard this — both assert
+  on **rune** offsets, since two aligned columns sit at different byte offsets when the glyphs differ.
 
 ## Schema drift detection
 
 `joka migrate verify` compares the live database schema against the schema snapshot stored for the most recent applied migration. It reports tables that were added in live but missing from the snapshot, tables present in the snapshot but missing from live, and tables whose CREATE statements differ.
 
 - Useful for catching out-of-band DDL (manual `ALTER TABLE`, columns added without a migration, etc.).
-- MySQL `AUTO_INCREMENT=<n>` is stripped before comparison so row-insertion noise doesn't false-positive.
+- Statements are compared verbatim. (Until v0.14.0 a MySQL `AUTO_INCREMENT=<n>` counter was stripped first; there is no PostgreSQL equivalent, so the normalisation went with the driver.)
 - Exit code is non-zero when drift is detected — suitable for CI gating.
 
 ## Schema snapshots
 
-Snapshots cover **base tables only**, and are reconstructed per driver:
+Snapshots cover **base tables only**, and are reconstructed rather than dumped:
 
-- **MySQL** — `SHOW CREATE TABLE`, used verbatim (no trailing `;`).
-- **PostgreSQL** — rebuilt from `pg_catalog` in `reconstructCreateTable`. Column types come from `format_type()`; identity, generated and serial columns are read from `pg_attribute`. `information_schema.columns` is deliberately **not** used: it reports `ARRAY` / `USER-DEFINED` instead of real types and has no way to express identity. Each statement it emits is terminated with `;`, including the index statements appended after the table body. Sequences owned by a `serial` column are recreated by rendering the column as `serial`/`bigserial`.
+- Rebuilt from `pg_catalog` in `reconstructCreateTable`. Column types come from `format_type()`; identity, generated and serial columns are read from `pg_attribute`. `information_schema.columns` is deliberately **not** used: it reports `ARRAY` / `USER-DEFINED` instead of real types and has no way to express identity. Each statement it emits is terminated with `;`, including the index statements appended after the table body. Sequences owned by a `serial` column are recreated by rendering the column as `serial`/`bigserial`.
 
 Views, functions, types, triggers and standalone sequences are **not** captured. Snapshots feed `migrate snapshot` and `migrate verify` only — **not** consolidation, which dumps the schema with pg_dump precisely because a table snapshot cannot describe a whole schema.
 
@@ -168,8 +223,6 @@ Note: the PostgreSQL reconstruction format changed in v0.13.0. Snapshots capture
 ## Consolidation
 
 `joka migrate consolidate --up-to <index>` squashes the applied history into one `<index>_consolidated.sql`, produced by shelling out to **pg_dump** (`internal/domains/migration/infra/schema_dump.go`, the `SchemaDumper` interface). Joka generates no schema DDL of its own here — the dump tool is the reference implementation, and hand-rolled reconstruction silently drops whatever it does not model.
-
-**PostgreSQL only.** `NewSchemaDumper` returns `ErrDumpDriverUnsupported` for any other driver, and the command refuses before touching anything. MySQL is deliberately deferred: `mysqldump` writes views, routines and triggers with `DELIMITER` (a mysql-client directive) and multi-line `/*!NNNNN … */` conditional blocks, and `db.SplitSQLStatements` can run neither. Adding MySQL means teaching the splitter both — do it after this flow has proven itself, and note that the splitter is shared with every migration file, so changes there carry risk.
 
 - **`--up-to` must be the last applied migration** (`ErrNotLastApplied`). A dump reflects the schema now, so an earlier index would carry a baseline that does not match it. Pending files after the target are untouched. Partial squash is therefore not supported.
 - Consolidation does not read `joka_snapshots`, so it works on databases migrated before snapshots existed.
@@ -180,7 +233,7 @@ Note: the PostgreSQL reconstruction format changed in v0.13.0. Snapshots capture
 
 ## Wipe and reseed
 
-- **`joka drop`** — drops every table in the current database/schema, including all `joka_*` tracking tables. Confirms unless `--auto`. MySQL disables FK checks for the drop; Postgres uses `DROP TABLE ... CASCADE`.
+- **`joka drop`** — drops every table in the current database/schema, including all `joka_*` tracking tables. Confirms unless `--auto`. Uses `DROP TABLE ... CASCADE`.
 - **`joka reset`** — wipe-and-reseed pipeline: runs `drop`, then `init`, `migrate up`, `data sync`, `entity sync` in sequence. Acquires one outer advisory lock for the whole flow and confirms once.
 
 ## Templates
@@ -242,7 +295,7 @@ entities:
 **Reserved keys** (underscore-prefixed, not inserted as columns):
 - `_is` (required) — Target table name
 - `_id` (optional) — Reference handle for this entity's auto-generated PK
-- `_pk` (optional) — Primary key column name, defaults to `"id"`. Used by PostgreSQL adapter for `RETURNING` clause; MySQL ignores it (uses `LastInsertId`)
+- `_pk` (optional) — Primary key column name, defaults to `"id"`. Used for the `RETURNING` clause when inserting
 - `_has` (optional) — List of child entities, inserted after the parent
 
 **Template expressions** (resolved at insert time):
@@ -296,3 +349,99 @@ entities:
 - All entities must have `_id` (required to determine skip vs insert)
 - Requires prior sync; use `entity sync` first for new files
 - New rows are tracked with `insertion_order` continuing from existing maximum
+
+**Entity forget** (`joka entity forget <file>` / `--orphans`):
+- Removes the `joka_entities` record and every `joka_entity_rows` entry for a file. **Never touches
+  the rows they point at, and never touches the file on disk.** The inverse of `reimport`, which
+  replaces the rows and keeps the tracking.
+- Answers the two states nothing else resolves: tracking whose rows were deleted by hand elsewhere,
+  and an orphan (file and rows both gone, tracking left behind). `joka status` names it for both.
+- **Refuses when a tracked row is still in the database** (`ErrRowsStillLive`), because dropping the
+  tracking for a live row leaves a row joka does not own and the next sync inserts a second copy.
+  `--force` overrides; the plan still reports the live rows either way.
+- `--orphans` resolves its targets through `EntityStatusAction`, the same comparison `entity status`
+  reports, so the two can never disagree about which files are orphaned.
+- `ForgetEntityAction` splits `Plan` (read-only, used for the preview and the refusal) from
+  `Execute`. `Execute` returns the plan it acted on, and returns it alongside `ErrRowsStillLive` too,
+  so the caller shows the offending rows rather than packing them into the error string.
+- Deliberately does not delete or rename files. Retiring a seed is forget + `rm`, or forget +
+  `mv seed.yaml seed.yaml.off` (`DiscoverEntityFiles` only picks up `.yaml` / `.yml`).
+
+**Entity diff** (`joka entity diff <file>`):
+- Lines the declared graph up against `joka_entity_rows` and against the live rows, and prints one
+  row per alignment line with a `= ≠ + - ~ !` gutter. Read-only; takes no lock and creates no
+  tracking tables.
+- Exists because sync's structural refusal names the symptom ("48 entities but 38 are tracked")
+  without saying which entities are new, and recommends a destructive reimport. The diff shows the
+  shape of the change and whether an identity match would be exact — which is the input to the
+  `_id`-keyed matching decision in `proposal_entity_identity_20260826.md`.
+- **Matching**: `_id` when both sides are fully keyed, otherwise positional (what sync does), with
+  the unkeyed entities and rows named. `PositionalBreak` is the 1-based declared position where
+  walking both sides in step stops describing the same row — where sync's matching would start
+  writing to the wrong one. It is only computed when both sides are non-empty.
+- `DiffLine.Moved` is deliberately **orthogonal** to `Status`: an insert earlier in the file shifts
+  every row after it, and those rows may or may not also have been edited. The gutter shows `≠` over
+  `~` because the two position columns already make a move visible, while a column change is only
+  visible in the notes.
+- **Values are compared semantically, not as strings.** `valuesEqual` canonicalises both sides when
+  both parse as JSON objects/arrays (keys sorted, whitespace dropped) — PostgreSQL renders `jsonb`
+  in its own key order with a space after each colon, so a raw string compare marked every JSON
+  column on every row as changed. `alignForDisplay` then renders the two sides in that same
+  canonical form so the reader sees what differs rather than a key-order disagreement. Only
+  both-sides-JSON is canonicalised; a scalar or a value that is JSON on one side only is compared
+  raw. Shared with `entity sync --dry-run`.
+- **Regenerated columns are a file property, not a row difference.** A column from a
+  non-deterministic template (`{{ now }}`, `{{ argon2id|… }}`, `asm.*`) is rewritten on every sync
+  whatever the row holds, so it does not count as a change or promote a row to `≠`. It is collected
+  once into `EntityDiff.RegeneratedColumns` and reported in the summary. Without this, one
+  `created_at: "{{ now }}"` marks every row in the file changed, forever.
+- Column values are compared by default (one `GetRow` per matched live row) via
+  `app.ResolveRowChanges`, which `entity sync --dry-run` also uses — so the two can never disagree
+  about what a column change is. `--no-values` skips it. A row that is not in the database is never
+  compared; `ChangesSkipped` says why rather than leaving an empty list to be misread as "no change".
+- The `sync would refuse` line comes from `AlignTrackedRows`, sync's own check.
+- **The `_has:` nesting is redrawn as a tree.** Rows are listed in the flat depth-first order they
+  are inserted and tracked in, but `DiffLine.Depth` carries each entity's nesting level so the
+  renderer can put a child under its parent. `flattenDepths` must walk the graph exactly as
+  `flattenEntities` does or every depth attaches to the wrong row —
+  `TestDiffEntityDepth/its_depths_line_up_with_the_flattened_order_sync_uses` guards that.
+  `cmd/entity.treePrefixes` derives the `├─ │ └─` connectors from the depth sequence alone (the next
+  line at the same depth before any shallower line is a following sibling), so the domain carries no
+  presentation. A line with no declared side — a delete — has no nesting to report and sits at depth 0.
+
+## Tracking version
+
+`internal/meta` records what wrote a database's bookkeeping, in a `joka_meta` key/value table:
+
+```sql
+CREATE TABLE joka_meta (
+    key VARCHAR(64) PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+| Key | Meaning |
+|---|---|
+| `tracking_version` | `meta.TrackingVersion` as a decimal string — the shape and meaning of the `joka_*` tables |
+| `joka_version` | The joka release that last wrote. Informational; nothing branches on it |
+
+**Why it exists.** The tracking tables changed shape three times with no marker: `content_hash` on
+`joka_entities`, `ref_id`/`pk_column` on `joka_entity_rows`, and the v0.13.0 snapshot format. Each
+was absorbed by sniffing — checking for a column, tolerating an empty value — which works only when
+joka is the *newer* of the two. The case sniffing cannot cover is an older joka reading a database a
+newer joka already wrote: it has no way to know the format moved. `Check` makes that refusable.
+
+- **Bump `TrackingVersion`** when the meaning or shape of the tracking tables changes in a way an
+  older joka would read wrongly — not for additive changes it ignores harmlessly. Every bump needs a
+  line in the constant's doc comment saying what moved.
+- **An absent marker reads as the current version.** A database with tracking tables but no
+  `joka_meta` predates the marker; it is not from the future. It gets stamped on the next mutating
+  command.
+- **Check runs on connect; Stamp runs only for commands that write.** `main.go` tags mutating
+  commands with the `joka:mutates` annotation and the root `PersistentPreRunE` stamps on that. A
+  read-only command must leave a bare database bare, which is what makes a missing tracking table
+  reportable — `TestStatusIsReadOnly` and `TestReadCreatesNothing` both guard it.
+- **An unparseable version is treated as too new.** joka writes a decimal string, so anything else
+  came from something this build does not understand.
+- `joka status` reports the marker in its header (`written by joka 0.14.0`) and in JSON under `meta`.

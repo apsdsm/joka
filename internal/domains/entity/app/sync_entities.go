@@ -104,7 +104,7 @@ func (a SyncEntitiesAction) updateFile(ctx context.Context, file *domain.EntityF
 		return err
 	}
 
-	seq, ordered, err := alignTrackedRows(file.Path, file.Entities, tracked)
+	seq, ordered, err := AlignTrackedRows(file.Path, file.Entities, tracked)
 	if err != nil {
 		return err
 	}
@@ -134,14 +134,18 @@ func (a SyncEntitiesAction) updateFile(ctx context.Context, file *domain.EntityF
 	return a.DB.UpdateEntitySynced(ctx, file.Path, file.ContentHash)
 }
 
-// alignTrackedRows validates that a modified file still matches its tracked
+// AlignTrackedRows validates that a modified file still matches its tracked
 // rows and returns the file's entities flattened depth-first alongside the
 // tracked rows sorted into the same (insertion) order, so element i of each
 // slice describes the same row. It returns ErrStructuralChange when the file
 // gained or lost an entity, an entity's table no longer matches the tracked
 // row at its position, or an _id disagrees with the tracked row at its
 // position.
-func alignTrackedRows(filePath string, entities []domain.Entity, tracked []domain.TrackedRow) ([]domain.Entity, []domain.TrackedRow, error) {
+//
+// It is exported so `joka status` can predict whether sync would refuse a file
+// without applying anything. Status must report the same verdict sync would, so
+// both call this rather than reimplementing the check.
+func AlignTrackedRows(filePath string, entities []domain.Entity, tracked []domain.TrackedRow) ([]domain.Entity, []domain.TrackedRow, error) {
 	if err := ValidateRefIDs(entities); err != nil {
 		return nil, nil, err
 	}

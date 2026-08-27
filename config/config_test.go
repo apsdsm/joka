@@ -88,15 +88,15 @@ profiles:
     entities: db/entities-dev
     connection:
       source: aws_secrets_manager
-      driver: mysql
+      driver: postgres
       host: 127.0.0.1
-      port: 3307
+      port: 5432
       user: root
       database: lgc
       secret:
         secret_id: lgc
         region: ap-northeast-1
-        password_key: mysql_root_password
+        password_key: pg_root_password
 `
 
 	writeCfg := func(t *testing.T) {
@@ -144,7 +144,7 @@ profiles:
 		if cfg.Connection == nil || cfg.Connection.Source != "aws_secrets_manager" {
 			t.Fatalf("expected aws connection, got %+v", cfg.Connection)
 		}
-		if cfg.Connection.Secret == nil || cfg.Connection.Secret.PasswordKey != "mysql_root_password" {
+		if cfg.Connection.Secret == nil || cfg.Connection.Secret.PasswordKey != "pg_root_password" {
 			t.Errorf("unexpected secret config: %+v", cfg.Connection.Secret)
 		}
 		if cfg.Profiles != nil {

@@ -7,12 +7,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
+	"github.com/apsdsm/joka/internal/domains/entity/infra"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
+	"github.com/fatih/color"
 )
 
 // RunEntityUpdateCommand handles the "entity update" command.
@@ -21,7 +21,6 @@ type RunEntityUpdateCommand struct {
 	// Secrets resolves {{ asm.<source>.<key> }} template references against the
 	// `secrets:` sources in .jokarc.yaml.
 	Secrets      app.SecretResolver
-	Driver       jokadb.Driver
 	EntitiesDir  string
 	FilePath     string // relative path argument
 	AutoConfirm  bool
@@ -31,7 +30,7 @@ type RunEntityUpdateCommand struct {
 func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+	lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 
 	if err := lockAdapter.Acquire(ctx, "entity update"); err != nil {
 		if jsonOut {
@@ -41,7 +40,7 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 	}
 	defer lockAdapter.Release(ctx) //nolint:errcheck
 
-	dbAdapter := newEntityAdapter(r.Driver, r.DB)
+	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
 	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
 		if jsonOut {
@@ -230,7 +229,7 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	txAdapter := newEntityTxAdapter(r.Driver, tx, r.DB)
+	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
 
 	result, err := app.UpdateEntityAction{
 		DB:          txAdapter,

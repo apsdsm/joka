@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
 )
 
@@ -20,12 +19,6 @@ import (
 // dump tool. Joka deliberately does not reconstruct DDL itself — pg_dump is the
 // reference implementation, and hand-rolled reconstruction silently loses
 // whatever it does not know about.
-//
-// PostgreSQL only for now. MySQL is a separate problem: mysqldump writes views,
-// routines and triggers using `DELIMITER` (a mysql-client directive, not SQL) and
-// multi-line `/*!NNNNN ... */` conditional blocks, none of which
-// db.SplitSQLStatements can run. That needs work in the splitter, and is worth
-// doing only once this flow has proven itself on Postgres.
 type SchemaDumper interface {
 	// Tool is the external binary this dumper shells out to.
 	Tool() string
@@ -34,13 +27,9 @@ type SchemaDumper interface {
 	Dump(ctx context.Context) (string, error)
 }
 
-// NewSchemaDumper returns the dumper for the given driver, or
-// domain.ErrDumpDriverUnsupported if joka cannot build a baseline for it yet.
-func NewSchemaDumper(driver jokadb.Driver, conn *sql.DB, dsn string) (SchemaDumper, error) {
-	if driver != jokadb.Postgres {
-		return nil, fmt.Errorf("%w: %s", domain.ErrDumpDriverUnsupported, driver)
-	}
-	return PgSchemaDumper{conn: conn, dsn: dsn}, nil
+// NewSchemaDumper returns the schema dumper for a connection.
+func NewSchemaDumper(conn *sql.DB, dsn string) SchemaDumper {
+	return PgSchemaDumper{conn: conn, dsn: dsn}
 }
 
 // PgSchemaDumper dumps a PostgreSQL schema with pg_dump.

@@ -21,6 +21,7 @@ type mockDBAdapter struct {
 	deletedTracking []string
 	updatedRows     []mockUpdateCall
 	currentRows     map[string]map[string]any // key: "table|pkValue" -> column values
+	missingTables   map[string]bool           // tables the mock reports as dropped
 }
 
 // mockInsertCall records the arguments passed to InsertRow.
@@ -123,6 +124,19 @@ func (m *mockDBAdapter) DeleteTrackedRows(_ context.Context, entityFile string) 
 func (m *mockDBAdapter) DeleteRow(_ context.Context, table, pkColumn string, pkValue int64) error {
 	m.deletedRows = append(m.deletedRows, mockDeleteCall{Table: table, PKColumn: pkColumn, PKValue: pkValue})
 	return nil
+}
+
+// TableExists reports every table as present unless the test marks it missing.
+func (m *mockDBAdapter) TableExists(_ context.Context, table string) (bool, error) {
+	return !m.missingTables[table], nil
+}
+
+// RowExists reports a row live when currentRows holds it. Tests that care
+// about liveness seed currentRows; everything else reads as "already gone",
+// which is the state entity forget is normally used on.
+func (m *mockDBAdapter) RowExists(_ context.Context, table, _ string, pkValue int64) (bool, error) {
+	_, ok := m.currentRows[fmt.Sprintf("%s|%d", table, pkValue)]
+	return ok, nil
 }
 
 func (m *mockDBAdapter) DeleteEntityRecord(_ context.Context, filePath string) error {

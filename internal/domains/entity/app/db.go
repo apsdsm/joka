@@ -65,6 +65,17 @@ type DBAdapter interface {
 	// blocks the deletion.
 	DeleteRow(ctx context.Context, table, pkColumn string, pkValue int64) error
 
+	// TableExists reports whether the named table is present in the current
+	// database/schema. Used by entity forget to distinguish a tracked row
+	// whose table a later migration dropped from one that is still there —
+	// querying the dropped table for the row would just error.
+	TableExists(ctx context.Context, table string) (bool, error)
+
+	// RowExists reports whether a single row is still present, matched by
+	// pkColumn = pkValue. Used by entity forget to refuse to drop the
+	// tracking for rows that are still in the database.
+	RowExists(ctx context.Context, table, pkColumn string, pkValue int64) (bool, error)
+
 	// DeleteEntityRecord removes the joka_entities row for a given file path.
 	DeleteEntityRecord(ctx context.Context, filePath string) error
 

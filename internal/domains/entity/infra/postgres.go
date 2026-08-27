@@ -15,25 +15,24 @@ import (
 
 // PostgresDBAdapter implements entity app.DBAdapter for PostgreSQL.
 type PostgresDBAdapter struct {
-	db     DBTX
-	conn   *sql.DB
-	driver jokadb.Driver
+	db   DBTX
+	conn *sql.DB
 }
 
 // NewPostgresDBAdapter creates an adapter that runs all queries on the raw connection.
 func NewPostgresDBAdapter(conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: conn, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: conn, conn: conn}
 }
 
 // NewPostgresTxDBAdapter creates an adapter that runs InsertRow inside the
 // given transaction, while tracking-table DDL uses the raw connection.
 func NewPostgresTxDBAdapter(tx *sql.Tx, conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: tx, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: tx, conn: conn}
 }
 
 // EnsureTrackingTable creates the joka_entities table if it does not already exist.
 func (p *PostgresDBAdapter) EnsureTrackingTable(ctx context.Context) error {
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, "joka_entities")
+	exists, err := jokadb.TableExists(ctx, p.conn, "joka_entities")
 	if err != nil {
 		return err
 	}
@@ -231,7 +230,7 @@ func (p *PostgresDBAdapter) LookupValue(ctx context.Context, table, returnCol, w
 // EnsureRowTrackingTable creates the joka_entity_rows table if it does not
 // already exist.
 func (p *PostgresDBAdapter) EnsureRowTrackingTable(ctx context.Context) error {
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, "joka_entity_rows")
+	exists, err := jokadb.TableExists(ctx, p.conn, "joka_entity_rows")
 	if err != nil {
 		return err
 	}
@@ -403,4 +402,26 @@ func (p *PostgresDBAdapter) DeleteEntityRecord(ctx context.Context, filePath str
 		filePath,
 	)
 	return err
+}
+
+// TableExists reports whether the named table is present in the current schema.
+func (p *PostgresDBAdapter) TableExists(ctx context.Context, table string) (bool, error) {
+	return jokadb.TableExists(ctx, p.conn, table)
+}
+
+// RowExists reports whether a single row is still present, matched by
+// pkColumn = pkValue.
+func (p *PostgresDBAdapter) RowExists(ctx context.Context, table, pkColumn string, pkValue int64) (bool, error) {
+	var one int
+	err := p.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT 1 FROM "%s" WHERE "%s" = $1 LIMIT 1`, table, pkColumn),
+		pkValue,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking for %s.%s = %d: %w", table, pkColumn, pkValue, err)
+	}
+	return true, nil
 }

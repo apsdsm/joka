@@ -1,6 +1,6 @@
 # Joka
 
-Joka is a database migration and data management tool for MySQL and PostgreSQL. It tracks and applies SQL migrations, captures schema snapshots, syncs seed data from files to database tables, and seeds entity graphs with parent-child relationships.
+Joka is a database migration and data management tool for PostgreSQL. It tracks and applies SQL migrations, captures schema snapshots, syncs seed data from files to database tables, and seeds entity graphs with parent-child relationships.
 
 <p align="center">
   <img src="joka.jpg" alt="joka" width="400">
@@ -14,7 +14,9 @@ Build from source (requires Go 1.25+):
 go install github.com/apsdsm/joka@latest
 ```
 
-`joka migrate consolidate` additionally needs `pg_dump` on `PATH`. It is PostgreSQL-only for now, and no other command requires an external binary.
+`joka migrate consolidate` additionally needs `pg_dump` on `PATH`. No other command requires an external binary.
+
+> **MySQL support was removed in v0.14.0.** joka is PostgreSQL only. A non-PostgreSQL `DATABASE_URL`, or a `connection.driver` other than `postgres`, is refused with an error naming the removal rather than failing as a connection problem. To stay on MySQL, pin v0.13.0.
 
 ## Setup
 
@@ -22,17 +24,11 @@ go install github.com/apsdsm/joka@latest
 
 Joka needs a database connection string. Either add a `.env` file in the directory you run from, or set `DATABASE_URL` as an environment variable. You can point to a specific env file with `--env`.
 
-**MySQL:**
-```
-DATABASE_URL=user:pass@tcp(localhost:3306)/my_db
-```
-
-**PostgreSQL:**
 ```
 DATABASE_URL=postgresql://user:pass@localhost:5432/my_db?sslmode=disable
 ```
 
-The driver is auto-detected from the URL format. PostgreSQL URLs start with `postgres://` or `postgresql://`; everything else is treated as MySQL.
+The URL must start with `postgres://` or `postgresql://`.
 
 Instead of an env var you can declare the connection in `.jokarc.yaml` (see **Connection** below) — useful for pulling the password from a secret store without writing it to disk.
 
@@ -67,12 +63,12 @@ By default joka reads `DATABASE_URL` from the environment (the behaviour above).
 
 ```yaml
 connection:
-  url: root:root@tcp(localhost:3306)/my_db   # full DSN, used verbatim
+  url: postgresql://root:root@localhost:5432/my_db   # full DSN, used verbatim
 # --- or ---
 connection:
-  driver: mysql
+  driver: postgres
   host: localhost
-  port: 3306
+  port: 5432
   user: root
   database: my_db
   password: root                              # inline password; joka builds a URL-safe DSN
@@ -83,9 +79,9 @@ connection:
 ```yaml
 connection:
   source: aws_secrets_manager   # "env" (default) | "aws_secrets_manager"
-  driver: mysql                 # mysql (default) | postgres
+  driver: postgres              # optional; postgres is the only value
   host: 127.0.0.1
-  port: 3306
+  port: 5432
   user: root
   database: my_db
   secret:
@@ -128,9 +124,9 @@ profiles:
   dev-remote:
     connection:
       source: aws_secrets_manager
-      driver: mysql
+      driver: postgres
       host: 127.0.0.1
-      port: 3307
+      port: 5432
       user: root
       database: my_db
       secret: { secret_id: my-app/db, region: ap-northeast-1, password_key: db_password }
@@ -251,6 +247,144 @@ Entity files are tracked in a `joka_entities` table. Individual inserted rows ar
 
 Creates the `joka_migrations` tracking table. Run this once before your first migration.
 
+### `joka status`
+
+One read-only report of the three states joka works between:
+
+| Plane | What it is |
+|---|---|
+| declared | the devops folder — migration files, entity YAML, template records |
+| tracked | joka's own tables — `joka_migrations`, `joka_snapshots`, `joka_entities`, `joka_entity_rows`, `joka_meta` |
+| live | the database — tables, columns, rows |
+
+Every mismatch joka can hit is a disagreement between two of those. The other
+commands each cover one edge (`migrate status`: declared vs tracked;
+`migrate verify`: tracked vs live; `entity status`: declared vs tracked) in
+their own format; `joka status` covers all of them on one screen, and covers two
+edges no other command reports: whether the rows joka tracks for an entity file
+are still in the database, and whether template files and their tables agree.
+
+```
+joka status   postgres · profile dev-remote
+declared = the devops folder · tracked = joka_* tables · live = the database
+
+MIGRATIONS  devops/migrations
+  migration                    declared  tracked  status
+  250116140000_add_users              ✓        ✓  applied
+  250826094500_add_ceo_field          ✓        ·  pending
+  1 applied · 1 pending
+
+  schema drift vs snapshot 250116140000 — 2 tables differ
+    + audit_log
+      in live, not in the snapshot — DDL applied outside a migration
+    ~ fields
+      live only:     "label_ja" character varying(255)
+
+ENTITIES  devops/entities
+  file                              declared  tracked  live  status
+  01_clients/jjc2_admin.yaml               4        4     4  synced
+  04_fields/system_fields.yaml            48       38    38  modified
+      sync would refuse: 04_fields/system_fields.yaml now defines 48 entities
+      but 38 are tracked (an entity was added or removed)
+      every declared entity and tracked row carries an _id
+  08_slots/system_assignments.yaml         ·       12     0  orphaned
+      12 rows tracked for this file are not in the database
+      table entity_slot_assignments no longer exists
+  1 synced · 1 modified · 1 orphaned
+
+TEMPLATES  devops/templates
+  table            strategy  files  declared  live
+  email_templates  truncate      3         3     3
+  settings         truncate      2        12     9  differs
+
+LOCK
+  not held
+
+ACTIONS
+  migrations  joka migrate up
+      1 pending migration
+  entities    joka entity reimport 04_fields/system_fields.yaml
+      04_fields/system_fields.yaml now defines 48 entities but 38 are tracked
+  entities    joka entity forget 08_slots/system_assignments.yaml
+      tracked with 12 rows but the file is gone; forget drops the tracking and
+      leaves any surviving rows alone
+```
+
+
+`--compact` prints the same report as a single line, for CI logs, shell prompts
+and the head of a startup chain:
+
+```
+$ joka status --compact
+joka  migrations 3/4  drift 2  entities 19/20 +1 !1  templates 2/3  → 5 actions
+```
+
+The segments are positionally stable — every section appears whether or not it
+has a problem — so the line reads the same way every time. `+N` counts entity
+files that are new or modified; `!N` counts real problems (orphans, missing
+rows, structural refusals, parse failures). `n/a` means the section could not be
+read, usually a tracking table that does not exist yet. A held lock adds `lock
+held`. Exit code is 0 either way; `--compact` and `--output json` are mutually
+exclusive, since the JSON is already the whole report.
+
+Notes on reading it:
+
+- **`·` means "does not apply"**, not zero. A declared count of `·` is a file
+  that is not on disk; a real zero prints as `0`.
+- **`sync would refuse`** comes from the same check `entity sync` runs, so the
+  verdict always matches what a real sync would do.
+- **The template comparison is only exact for the `truncate` strategy.** An
+  `update` table can legitimately hold rows no file declares, so its counts are
+  reported without being flagged.
+- **Actions with `(nothing joka can run)`** are findings joka has no command
+  for. There is currently no such finding for entities — `entity forget` covers
+  the orphan and the deleted-row cases — but the report will print it rather
+  than name a command that does not exist.
+- **`status` writes nothing.** Unlike the other commands it does not
+  auto-create the `joka_*` tracking tables, because a missing tracking table is
+  one of the things worth reporting. It also does not acquire the advisory lock.
+- **Exit code is 0** whenever the report could be built, including when it finds
+  problems. Use `--output json` and read `actions` for CI gating; `migrate
+  verify` remains the command that exits non-zero on schema drift.
+
+`--output json` emits the whole report as one object, with `actions` as a list
+of `{scope, subject, reason, command}`. Empty lists are `[]` rather than `null`.
+
+```bash
+# anything to do?
+joka status -o json | jq '.actions | length'
+
+# which entity files have tracked rows missing from the database?
+joka status -o json | jq '.entities.files[] | select(.missing_rows > 0) | .path'
+```
+
+### Tracking version
+
+joka records what wrote a database's bookkeeping in a `joka_meta` table:
+
+| Key | Meaning |
+|---|---|
+| `tracking_version` | The shape and meaning of the `joka_*` tables. A single integer, bumped only when a change would make an older joka misread them |
+| `joka_version` | The joka release that last wrote here |
+
+Any command that writes stamps both. Read-only commands (`status`, `entity
+diff`, `migrate status`, `migrate verify`, `entity status`) never create the
+table.
+
+The point is the case that cannot be detected any other way: **an older joka
+pointed at a database a newer joka has already written.** It has no way to know
+the format moved, so it would read the new shape as the old one. joka refuses
+instead:
+
+```
+Error: database bookkeeping is newer than this joka: the database is at tracking
+version 2 (written by joka 0.15.0), this joka understands 1 — upgrade joka
+```
+
+A database with tracking tables but no `joka_meta` predates the marker — it is
+read as the current version and stamped on the next command that writes.
+`joka status` shows the marker in its header.
+
 ### `joka make <name>`
 
 Creates a new timestamped migration file in the migrations directory.
@@ -275,8 +409,6 @@ Displays the schema snapshot captured after a migration was applied. Shows `CREA
 ### `joka migrate consolidate --up-to <migration_index>`
 
 Squashes the applied migration history into a single baseline file, dumped by `pg_dump`.
-
-**PostgreSQL only.** On MySQL the command refuses. `mysqldump` writes views, routines and triggers using `DELIMITER` (a mysql-client directive rather than SQL) and multi-line `/*!NNNNN ... */` conditional blocks, none of which joka's SQL splitter can run — that needs splitter work, and it is worth doing once this flow has proven itself on Postgres.
 
 Joka does not write the schema itself. It shells out to `pg_dump` — the reference implementation — because anything joka reconstructed by hand would silently lose whatever it did not know about. Joka's job here is bookkeeping: write the baseline, remove the tracking rows it replaces, delete the files it supersedes.
 
@@ -322,6 +454,103 @@ joka entity sync --dry-run
 
 Shows the sync status of each entity file: `synced` (hash matches), `modified` (file changed since last sync), `new` (not yet synced), or `orphaned` (tracked but file deleted). Uses SHA-256 content hashing.
 
+### `joka entity diff <file>`
+
+Lines an entity file's declared graph up against the rows joka tracks for it and
+the rows that are actually in the database. Read-only: no lock, and it creates
+none of the `joka_*` tables.
+
+It exists because sync's refusal names the symptom and not the change:
+
+```
+Error: entity file changed structurally; use 'entity reimport':
+system_fields.yaml now defines 6 entities but 4 are tracked
+```
+
+That says nothing about which entities are new, and the remedy it names deletes
+every row the file owns. `entity diff` shows the shape of the change instead:
+
+```
+entity diff  system_fields.yaml
+matched by _id — every declared entity and tracked row carries one
+
+      #  table              _id                    tracked  row
+  =   1  fields             field_company_name           1  id 1
+  =   2  └─ field_versions  field_company_name_v1        2  id 1
+  +   3  fields             field_company_ceo            ·  ·
+  +   4  └─ field_versions  field_company_ceo_v1         ·  ·
+  ≠   5  fields             field_company_addr           3  id 2
+      label  Address → Registered address
+  ~   6  └─ field_versions  field_company_addr_v1        4  id 2
+
+  6 declared · 4 tracked · 2 insert · 0 delete · 1 changed · 2 moved
+  positional alignment breaks at declared #3
+
+  entity sync would refuse this file:
+      entity file changed structurally; use 'entity reimport': …
+  every entity and tracked row carries an _id, so an identity match would be exact
+  → joka entity reimport system_fields.yaml   (deletes and re-inserts every row)
+  → joka entity update system_fields.yaml    (inserts the 2 new rows, leaves
+    existing rows untouched — the 1 column that changed would NOT be applied)
+```
+
+The `_has:` nesting is drawn as a tree: a child entity sits under its parent,
+with `├─` and `└─` marking siblings. The rows are still listed in the flat,
+depth-first order they are inserted and tracked in — the tree only shows which
+entity each row belongs to, which is otherwise invisible once the graph is
+flattened.
+
+Markers:
+
+| | Meaning |
+|---|---|
+| `=` | declared and tracked agree |
+| `≠` | matched, but some columns differ — the columns are listed underneath |
+| `+` | declared, not tracked — sync would insert it |
+| `-` | tracked, not declared — the file no longer defines this row |
+| `~` | matched at a different position, values unchanged |
+| `!` | positional matching paired two rows in different tables |
+
+**Matching.** When every declared entity and every tracked row carries an `_id`,
+the two sides are matched on it and the header says so. Otherwise it falls back
+to position — the same thing sync does — and names the entities and rows with no
+`_id`, which is what is stopping an identity match. `positional alignment breaks
+at declared #N` is the point where walking both sides in step stops describing
+the same row: the position sync's own matching would start writing to the wrong
+one.
+
+**Column values** are compared by default, one query per matched row. A row that
+is not in the database is not compared (there is nothing to compare against) and
+says so. `--no-values` skips the comparison entirely.
+
+Two things are deliberately **not** reported as differences:
+
+- **JSON columns whose keys are merely in a different order.** PostgreSQL renders
+  `jsonb` in its own key order with a space after each colon, while the YAML
+  carries whatever the author typed. Both sides are canonicalised before
+  comparing (and before display), so an untouched `jsonb` column stays quiet and
+  a real change shows with both sides in the same key order. `entity sync
+  --dry-run` gets the same treatment.
+- **Columns rewritten on every sync** — `{{ now }}`, `{{ argon2id|… }}`, an
+  `asm.*` secret. These are a property of the file, not a difference from the
+  database, so they are listed once in the summary rather than marking every row
+  changed. A single `created_at: "{{ now }}"` would otherwise light up every row
+  in the file, forever.
+
+`--output json` returns the whole alignment, including `matched_by`,
+`keyed_by_id`, `positional_break`, `sync_verdict`, and per line
+`{status, moved, declared_pos, tracked_pos, table, ref_id, pk_value, live,
+table_missing, changes}`.
+
+```bash
+# which entities would a sync insert?
+joka entity diff system_fields.yaml -o json | jq '.lines[] | select(.status=="insert") | .ref_id'
+
+# would an _id-keyed match be exact on every file?
+joka status -o json | jq -r '.entities.files[].path' |
+  xargs -I{} sh -c 'joka entity diff {} -o json | jq -r "\"{} \" + (.keyed_by_id|tostring)"'
+```
+
 ### `joka entity reimport <file>`
 
 Deletes previously inserted rows in reverse insertion order (children first, then parents) and re-inserts the entity graph from the YAML file. Aborts on FK constraint violations from external references. Requires prior sync — use `entity sync` first for new files.
@@ -341,6 +570,56 @@ joka entity sync
 joka entity update admin_user.yaml
 ```
 
+### `joka entity forget <file>` / `joka entity forget --orphans`
+
+Removes joka's tracking for an entity file — its `joka_entities` record and its
+`joka_entity_rows` entries — **without touching the rows that tracking points
+at, or the file on disk.** The opposite of `reimport`, which replaces the rows
+and keeps the tracking.
+
+It is for the two states no other command resolves:
+
+| State | What happened | What forget does |
+|---|---|---|
+| tracked, rows gone | the rows were deleted by hand elsewhere, so tracking points at nothing | drops the tracking; `entity sync` then treats the file as new |
+| orphaned | the file and its rows were both deleted, but the tracking outlived them | drops the tracking; nothing else is left to clean up |
+
+```bash
+joka entity forget 01_operators/sysadmin_grants.yaml
+joka entity forget --orphans     # every tracked file that is no longer on disk
+```
+
+It shows what it will remove and the state of each row before asking to confirm:
+
+```
+Entity forget:
+
+  08_slots/system_assignments.yaml
+    entity_slot_assignments  id 5  (_id slot_a)  — table no longer exists
+    slots                    id 12               — already gone from the database
+
+  Database rows are not touched. Files on disk are not touched.
+
+Forget this tracking? Database rows are not touched (only 'yes' will confirm):
+```
+
+**It refuses when the rows are still in the database.** Dropping the tracking
+for a live row leaves a row joka does not own, and the next `entity sync` treats
+the file as new and inserts a second copy. `--force` overrides:
+
+```
+Error: tracked rows are still in the database: 1 of 1; use --force to forget
+them anyway, or 'entity reimport' to replace them
+```
+
+Retiring a seed file that should stop being applied is two steps, because forget
+deliberately does not touch files: forget the tracking, then delete the file or
+rename it so discovery skips it (any extension other than `.yaml` / `.yml`
+works, e.g. `mv seed.yaml seed.yaml.off`).
+
+`--output json` returns `{"status": "ok", "forgotten": [{file, rows: [{table,
+pk_column, pk_value, ref_id, live, table_missing}], live}]}`.
+
 ### `joka unlock`
 
 Force-releases an advisory lock left behind by a crashed process. Shows who held the lock before releasing it.
@@ -357,7 +636,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`; must be the last applied migration) |
-| `--ignore-foreign-keys` | | `false` | Disable FK checks during data sync truncate (MySQL) |
+| `--ignore-foreign-keys` | | `false` | Defer FK constraint checks during data sync truncate |
 | `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`) |
 | `--force` | | `false` | Re-apply tracked files even when unchanged (`entity sync`) |
 

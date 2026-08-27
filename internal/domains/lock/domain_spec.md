@@ -62,7 +62,7 @@ The lock is **not** held inside the transaction — it wraps the entire command 
 - `AcquireLockAction` / `ReleaseLockAction` — Thin action wrappers around the adapter.
 
 ### `infra/`
-- `MySQLLockAdapter` — MySQL implementation using INSERT/DELETE on `joka_lock`.
+- `PostgresLockAdapter` — Implementation using INSERT/DELETE on `joka_lock`.
 - `lockerIdentity()` — Returns `hostname:pid` string for the current process.
 
 ## Commands

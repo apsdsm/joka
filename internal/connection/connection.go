@@ -18,7 +18,7 @@ import (
 	"strconv"
 
 	"github.com/apsdsm/joka/config"
-	"github.com/go-sql-driver/mysql"
+	jokadb "github.com/apsdsm/joka/db"
 )
 
 // SecretFetcher fetches a secret by id and returns its values. A secret stored
@@ -33,6 +33,13 @@ type SecretFetcher interface {
 // secret-backed source needs a fetcher and none is supplied, the default AWS
 // Secrets Manager fetcher is used.
 func Resolve(ctx context.Context, conn *config.Connection, fetcher SecretFetcher) (string, error) {
+	// Check the driver before anything reaches the network: a config still
+	// asking for MySQL should say so, not fail as a Secrets Manager error on
+	// the way to a DSN that would be refused anyway.
+	if err := checkDriver(conn); err != nil {
+		return "", err
+	}
+
 	switch source(conn) {
 	case "env":
 		dsn := os.Getenv("DATABASE_URL")
@@ -86,19 +93,15 @@ func source(conn *config.Connection) string {
 }
 
 // assembleDSN builds a URL-safe DSN from the connection parts and a password.
+//
+// `driver:` is accepted for the sake of configs written when joka also spoke
+// MySQL: an empty value means postgres, and anything but postgres is refused
+// with a message naming the removal rather than a confusing connection error.
 func assembleDSN(conn *config.Connection, password string) (string, error) {
-	driver := conn.Driver
-	if driver == "" {
-		driver = "mysql"
+	if err := checkDriver(conn); err != nil {
+		return "", err
 	}
-	switch driver {
-	case "mysql":
-		return buildMySQLDSN(conn, password), nil
-	case "postgres", "postgresql":
-		return buildPostgresDSN(conn, password), nil
-	default:
-		return "", fmt.Errorf("unsupported driver %q for assembled connection", driver)
-	}
+	return buildPostgresDSN(conn, password), nil
 }
 
 // dsnFromSecret builds the DSN from fetched secret values. Assembly mode is used
@@ -130,32 +133,6 @@ func dsnFromSecret(conn *config.Connection, values map[string]string) (string, e
 		return "", fmt.Errorf("secret key %q (url_key) not found in secret", key)
 	}
 	return v, nil
-}
-
-func buildMySQLDSN(conn *config.Connection, password string) string {
-	host := conn.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	port := conn.Port
-	if port == 0 {
-		port = 3306
-	}
-
-	c := mysql.NewConfig()
-	c.User = conn.User
-	c.Passwd = password
-	c.Net = "tcp"
-	c.Addr = net.JoinHostPort(host, strconv.Itoa(port))
-	c.DBName = conn.Database
-	if len(conn.Params) > 0 {
-		c.Params = make(map[string]string, len(conn.Params))
-		for k, v := range conn.Params {
-			c.Params[k] = v
-		}
-	}
-	// FormatDSN/ParseDSN round-trip the password safely, so db.Open's re-parse is fine.
-	return c.FormatDSN()
 }
 
 func buildPostgresDSN(conn *config.Connection, password string) string {
@@ -196,4 +173,19 @@ func parseSecretString(s string) map[string]string {
 		return m
 	}
 	return map[string]string{"": s}
+}
+
+// checkDriver refuses a connection block that names a driver joka no longer
+// supports. `driver:` is accepted at all only for configs written when joka
+// also spoke MySQL; empty means postgres.
+func checkDriver(conn *config.Connection) error {
+	if conn == nil {
+		return nil
+	}
+	switch conn.Driver {
+	case "", "postgres", "postgresql":
+		return nil
+	default:
+		return fmt.Errorf("%w: connection.driver is %q", jokadb.ErrUnsupportedDriver, conn.Driver)
+	}
 }

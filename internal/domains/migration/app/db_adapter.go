@@ -7,7 +7,7 @@ import (
 )
 
 // DBAdapter defines the database contract for migration operations. It is
-// implemented by infra.MySQLDBAdapter and can be backed by either a raw
+// implemented by infra.PostgresDBAdapter and can be backed by either a raw
 // connection or a transaction.
 type DBAdapter interface {
 	// HasMigrationsTable returns true if the joka_migrations table exists.

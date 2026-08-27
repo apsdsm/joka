@@ -37,7 +37,11 @@ func (l *lookupMock) GetTrackedRows(context.Context, string) ([]domain.TrackedRo
 }
 func (l *lookupMock) DeleteTrackedRows(context.Context, string) error        { panic("unused") }
 func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error { panic("unused") }
-func (l *lookupMock) DeleteEntityRecord(context.Context, string) error       { panic("unused") }
+func (l *lookupMock) TableExists(context.Context, string) (bool, error)      { panic("unused") }
+func (l *lookupMock) RowExists(context.Context, string, string, int64) (bool, error) {
+	panic("unused")
+}
+func (l *lookupMock) DeleteEntityRecord(context.Context, string) error { panic("unused") }
 func (l *lookupMock) InsertRow(context.Context, string, map[string]any, string) (int64, error) {
 	panic("unused")
 }
