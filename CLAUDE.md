@@ -476,22 +476,28 @@ miserable. `EntitySetError` renders them into one error wrapping `domain.ErrEnti
   uniqueness is a property of the whole set, so an unchanged file still has to be read to know what
   it claims. The hash decides whether a file is *written*, not whether it is *read*.
 
-### `_key`
+### Reserved keys
 
-`_key: <column>` names a column whose value identifies the row in the database independently of its
-primary key (`domain.Entity.KeyColumn`). Parsed and reserved — it is not inserted as a column — but
-**not yet used for matching**. It is the input to adoption: finding a row joka did not insert, and
-re-binding after a rebuild where primary keys changed. Every entity in jjc2 already carries an
-`xid`, which is a ready-made `_key`.
+`_is` (table), `_id` (identity), `_pk` (primary key column, defaults to `id`), `_has` (children).
+
+`_key` was added and removed in the same session. It named a column that identifies a row in the
+database independently of its primary key, for adopting a row joka did not insert. It was never
+wired to anything, and shipping an inert reserved key invites someone to write it and expect a
+behaviour that is not there. If adoption is wanted later, build it on the unique constraints already
+in the schema — 17 of the 18 tables jjc2 seeds declare `UNIQUE (xid)` — rather than on a new key.
+
+`_pk` is a candidate for the same treatment: it is used 0 times across jjc2's 294 entities, every
+seeded table has `PRIMARY KEY (id)`, and joka could read the column from `pg_index` instead of being
+told. Not done.
 
 ### Still open
 
-1. ~~Validation: `_id` mandatory and unique, `_key` parsed.~~ Done.
+1. ~~Validation: `_id` mandatory and unique.~~ Done.
 2. ~~Re-key `joka_entity_rows` on `ref_id`.~~ Done — see **Tracking upgrades** below.
 3. ~~Identity matching in sync.~~ Done — see **Identity matching** below.
-4. `_key` adoption: find a row joka did not insert, and re-bind after a rebuild where primary keys
-   changed. Undeclared reporting is done (step 3); what remains is `entity diff --undeclared` and
-   `entity forget --undeclared` to act on it in bulk.
+4. `entity diff --undeclared` and `entity forget --undeclared`, to act in bulk on the entities sync
+   already reports as declared nowhere.
+5. Infer the primary key column and retire `_pk`.
 
 ## Tracking upgrades
 

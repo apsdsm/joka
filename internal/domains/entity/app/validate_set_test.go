@@ -170,37 +170,3 @@ func TestEntitySetError(t *testing.T) {
 		}
 	})
 }
-
-func TestParseKeyColumn(t *testing.T) {
-	t.Run("it reads _key and keeps it out of the columns", func(t *testing.T) {
-		e, err := parseEntity(map[string]any{
-			"_is":  "fields",
-			"_id":  "alpha",
-			"_key": "xid",
-			"xid":  "fld_1",
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if e.KeyColumn != "xid" {
-			t.Errorf("expected _key read as xid, got %q", e.KeyColumn)
-		}
-		if _, ok := e.Columns["_key"]; ok {
-			t.Error("expected _key reserved, not inserted as a column")
-		}
-		if e.Columns["xid"] != "fld_1" {
-			t.Errorf("expected the keyed column still inserted, got %v", e.Columns["xid"])
-		}
-	})
-
-	t.Run("it leaves KeyColumn empty when _key is absent", func(t *testing.T) {
-		e, err := parseEntity(map[string]any{"_is": "fields", "_id": "alpha"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if e.KeyColumn != "" {
-			t.Errorf("expected no key column, got %q", e.KeyColumn)
-		}
-	})
-}

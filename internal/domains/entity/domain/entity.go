@@ -9,12 +9,8 @@ type Entity struct {
 	Table    string
 	RefID    string
 	PKColumn string
-	// KeyColumn names a column whose value identifies this row in the
-	// database independently of its primary key (from _key). Empty when
-	// the entity declares none.
-	KeyColumn string
-	Columns   map[string]any
-	Children  []Entity
+	Columns  map[string]any
+	Children []Entity
 }
 
 // EntityFile groups the entities parsed from a single YAML file. Path is the

@@ -516,7 +516,6 @@ Every entity must declare an `_id`, and no `_id` may be claimed twice:
 entities:
   - _is: fields
     _id: field_company_ceo     # required — identifies this row
-    _key: xid                  # optional — the column that identifies it in the DB
     xid: fld_0000000000000001
 ```
 
@@ -540,10 +539,6 @@ per-environment trees (`devops/entities/local`, `devops/entities/dev1`) share
 `_id`s on purpose: they are the same logical entity for different environments,
 and only one set is ever loaded. An `_id` is therefore unique per database, not
 universally.
-
-`_key` names a column whose value identifies the row in the database
-independently of its primary key. It is parsed and reserved (never inserted as a
-column) but not yet used for matching.
 
 ### `joka entity status`
 
