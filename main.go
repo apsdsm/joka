@@ -18,6 +18,7 @@ import (
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/apsdsm/joka/internal/meta"
 	"github.com/apsdsm/joka/internal/secrets"
+	"github.com/apsdsm/joka/internal/upgrade"
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -104,12 +105,19 @@ func main() {
 				return err
 			}
 
-			// Record what wrote here, but only for commands that write. A
+			// Bring the bookkeeping up to date and record what wrote here, but
+			// only for commands that write. A
 			// read-only command must leave a bare database bare — that is what
 			// makes a missing tracking table reportable.
 			if c.Annotations[annotationMutates] == "true" {
-				if err := meta.Stamp(c.Context(), dbConn, version); err != nil {
+				applied, err := upgrade.Run(c.Context(), dbConn, version)
+				if err != nil {
 					return err
+				}
+				for _, step := range applied {
+					if outputFormat != shared.OutputJSON {
+						color.Cyan("Upgraded tracking to version %d: %s", step.To, step.Describe)
+					}
 				}
 			}
 

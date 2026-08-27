@@ -573,8 +573,8 @@ func TestPostgresGetTrackedRows(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("it returns rows in reverse insertion order", func(t *testing.T) {
-		adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "multi.yaml", TableName: "users", RowPK: 1, PKColumn: "id", InsertionOrder: 0})
-		adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "multi.yaml", TableName: "profiles", RowPK: 2, PKColumn: "id", InsertionOrder: 1})
+		mustRecord(t, adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "multi.yaml", TableName: "users", RowPK: 1, PKColumn: "id", RefID: "multi_users", InsertionOrder: 0}))
+		mustRecord(t, adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "multi.yaml", TableName: "profiles", RowPK: 2, PKColumn: "id", RefID: "multi_profiles", InsertionOrder: 1}))
 
 		rows, err := adapter.GetTrackedRows(ctx, "multi.yaml")
 		if err != nil {
@@ -622,8 +622,8 @@ func TestPostgresDeleteTrackedRows(t *testing.T) {
 		adapter := infra.NewPostgresDBAdapter(db)
 		ctx := context.Background()
 
-		adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "del.yaml", TableName: "users", RowPK: 1, PKColumn: "id", InsertionOrder: 0})
-		adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "del.yaml", TableName: "profiles", RowPK: 2, PKColumn: "id", InsertionOrder: 1})
+		mustRecord(t, adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "del.yaml", TableName: "users", RowPK: 1, PKColumn: "id", RefID: "del_users", InsertionOrder: 0}))
+		mustRecord(t, adapter.RecordEntityRow(ctx, domain.TrackedRow{EntityFile: "del.yaml", TableName: "profiles", RowPK: 2, PKColumn: "id", RefID: "del_profiles", InsertionOrder: 1}))
 
 		if err := adapter.DeleteTrackedRows(ctx, "del.yaml"); err != nil {
 			t.Fatalf("DeleteTrackedRows: %v", err)
@@ -913,4 +913,13 @@ func TestPostgresRowAndTableExists(t *testing.T) {
 			t.Error("expected a table that was never created to be absent")
 		}
 	})
+}
+
+// mustRecord fails the test when tracking a row fails. These calls used to
+// ignore the error, which hid an insert the ref_id constraint was rejecting.
+func mustRecord(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("RecordEntityRow: %v", err)
+	}
 }

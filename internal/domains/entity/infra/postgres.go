@@ -227,8 +227,17 @@ func (p *PostgresDBAdapter) LookupValue(ctx context.Context, table, returnCol, w
 	return result, nil
 }
 
+// RefIDIndex is the unique index that makes _id the identity of a tracked row.
+// Named so the upgrade step and the fresh-table path agree on it.
+const RefIDIndex = "joka_entity_rows_ref_id_key"
+
 // EnsureRowTrackingTable creates the joka_entity_rows table if it does not
 // already exist.
+//
+// A table created now gets the unique index on ref_id with it. A table that
+// already exists is left alone: adding the constraint to one whose rows predate
+// it can fail, so that path belongs to the upgrade (internal/upgrade), which
+// checks the data first and reports what stands in the way.
 func (p *PostgresDBAdapter) EnsureRowTrackingTable(ctx context.Context) error {
 	exists, err := jokadb.TableExists(ctx, p.conn, "joka_entity_rows")
 	if err != nil {
@@ -238,18 +247,33 @@ func (p *PostgresDBAdapter) EnsureRowTrackingTable(ctx context.Context) error {
 		return nil
 	}
 
-	_, err = p.conn.ExecContext(ctx, `
+	if _, err := p.conn.ExecContext(ctx, `
 		CREATE TABLE joka_entity_rows (
 			id BIGSERIAL PRIMARY KEY,
 			entity_file VARCHAR(512) NOT NULL,
 			table_name VARCHAR(255) NOT NULL,
 			row_pk BIGINT NOT NULL,
 			pk_column VARCHAR(255) NOT NULL DEFAULT 'id',
-			ref_id VARCHAR(255),
+			ref_id VARCHAR(255) NOT NULL,
 			insertion_order INT NOT NULL
 		)
-	`)
-	return err
+	`); err != nil {
+		return err
+	}
+
+	return p.EnsureRefIDIndex(ctx)
+}
+
+// EnsureRefIDIndex adds the unique index on ref_id if it is not already there.
+// It fails on data that breaks the constraint, so callers working on an
+// existing table check first.
+func (p *PostgresDBAdapter) EnsureRefIDIndex(ctx context.Context) error {
+	_, err := p.conn.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS `+RefIDIndex+` ON joka_entity_rows (ref_id)`)
+	if err != nil {
+		return fmt.Errorf("adding the unique index on ref_id: %w", err)
+	}
+	return nil
 }
 
 // EnsureContentHashColumn adds the content_hash column to joka_entities if
@@ -334,11 +358,20 @@ func (p *PostgresDBAdapter) GetAllSyncedEntities(ctx context.Context) (map[strin
 
 // RecordEntityRow inserts a row into joka_entity_rows to track an individual
 // inserted entity row.
+//
+// The _id is required: it is what identifies the row from here on, and a
+// constraint violation from the unique index is a worse way to learn that than
+// being told.
 func (p *PostgresDBAdapter) RecordEntityRow(ctx context.Context, row domain.TrackedRow) error {
+	if row.RefID == "" {
+		return fmt.Errorf("%w: cannot track %s row %d from %s",
+			domain.ErrEntitySetInvalid, row.TableName, row.RowPK, row.EntityFile)
+	}
+
 	_, err := p.db.ExecContext(ctx,
 		`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		row.EntityFile, row.TableName, row.RowPK, row.PKColumn, nullString(row.RefID), row.InsertionOrder,
+		row.EntityFile, row.TableName, row.RowPK, row.PKColumn, row.RefID, row.InsertionOrder,
 	)
 	return err
 }
@@ -424,4 +457,63 @@ func (p *PostgresDBAdapter) RowExists(ctx context.Context, table, pkColumn strin
 		return false, fmt.Errorf("checking for %s.%s = %d: %w", table, pkColumn, pkValue, err)
 	}
 	return true, nil
+}
+
+// GetAllTrackedRows returns every row in joka_entity_rows, ordered by file and
+// insertion order.
+//
+// Identity-keyed matching is a property of the whole set — an entity can move
+// between files, so the row it corresponds to may be tracked against a file
+// other than the one now declaring it. Reading per file cannot see that.
+func (p *PostgresDBAdapter) GetAllTrackedRows(ctx context.Context) ([]domain.TrackedRow, error) {
+	rows, err := p.conn.QueryContext(ctx,
+		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
+		 FROM joka_entity_rows ORDER BY entity_file, insertion_order`)
+	if err != nil {
+		return nil, fmt.Errorf("querying tracked rows: %w", err)
+	}
+	defer rows.Close()
+
+	return scanTrackedRows(rows)
+}
+
+// GetTrackedRowByRefID finds the row tracked under an _id, wherever it was
+// declared. Returns false when nothing claims it.
+func (p *PostgresDBAdapter) GetTrackedRowByRefID(ctx context.Context, refID string) (domain.TrackedRow, bool, error) {
+	var row domain.TrackedRow
+	var ref sql.NullString
+
+	err := p.conn.QueryRowContext(ctx,
+		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
+		 FROM joka_entity_rows WHERE ref_id = $1`, refID,
+	).Scan(&row.EntityFile, &row.TableName, &row.RowPK, &row.PKColumn, &ref, &row.InsertionOrder)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TrackedRow{}, false, nil
+	}
+	if err != nil {
+		return domain.TrackedRow{}, false, fmt.Errorf("querying the row tracked as %q: %w", refID, err)
+	}
+
+	row.RefID = ref.String
+	return row, true, nil
+}
+
+// scanTrackedRows reads a result set of the standard tracked-row columns.
+func scanTrackedRows(rows *sql.Rows) ([]domain.TrackedRow, error) {
+	var out []domain.TrackedRow
+
+	for rows.Next() {
+		var row domain.TrackedRow
+		var ref sql.NullString
+
+		if err := rows.Scan(&row.EntityFile, &row.TableName, &row.RowPK, &row.PKColumn, &ref, &row.InsertionOrder); err != nil {
+			return nil, fmt.Errorf("scanning tracked row: %w", err)
+		}
+
+		row.RefID = ref.String
+		out = append(out, row)
+	}
+
+	return out, rows.Err()
 }

@@ -35,7 +35,17 @@ import (
 //	    joka_entity_rows (with ref_id and pk_column), joka_lock. The state as of
 //	    v0.14.0, and the assumed version of any database with tracking tables
 //	    but no joka_meta.
-const TrackingVersion = 1
+//	2 — joka_entity_rows.ref_id is unique and required. _id, not (file,
+//	    position), identifies a tracked row; entity_file is metadata recording
+//	    where the entity was last declared. internal/upgrade adds the index
+//	    after checking the rows allow it.
+const TrackingVersion = 2
+
+// PreMarkerVersion is the version of a database that has tracking tables but no
+// joka_meta. Such a database was written before the marker existed, so it is at
+// the version that existed then — not at whatever is current. Defaulting to the
+// current version instead would make every un-upgraded database look upgraded.
+const PreMarkerVersion = 1
 
 // Table is the key/value table this package owns.
 const Table = "joka_meta"
@@ -58,9 +68,7 @@ var ErrTrackingVersionTooNew = errors.New("database bookkeeping is newer than th
 // joka_meta does not exist, which is every database written before v0.14.0.
 type State struct {
 	Present bool `json:"present"`
-	// TrackingVersion is the recorded version, or TrackingVersion when absent —
-	// a database with tracking tables but no marker predates the marker rather
-	// than being from the future.
+	// TrackingVersion is the recorded version, or PreMarkerVersion when absent.
 	TrackingVersion int    `json:"tracking_version"`
 	JokaVersion     string `json:"joka_version,omitempty"`
 	UpdatedAt       string `json:"updated_at,omitempty"`
@@ -69,7 +77,7 @@ type State struct {
 // Read returns what the database records. It creates nothing, so it is safe for
 // read-only commands.
 func Read(ctx context.Context, db *sql.DB) (State, error) {
-	state := State{TrackingVersion: TrackingVersion}
+	state := State{TrackingVersion: PreMarkerVersion}
 
 	exists, err := jokadb.TableExists(ctx, db, Table)
 	if err != nil {

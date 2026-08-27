@@ -487,9 +487,52 @@ re-binding after a rebuild where primary keys changed. Every entity in jjc2 alre
 ### Still open
 
 1. ~~Validation: `_id` mandatory and unique, `_key` parsed.~~ Done.
-2. Re-key `joka_entity_rows` on `ref_id` (unique index; `entity_file` demoted to metadata). A
-   tracking format change, so `meta.TrackingVersion` goes to 2 and existing rows need an upgrade path.
+2. ~~Re-key `joka_entity_rows` on `ref_id`.~~ Done — see **Tracking upgrades** below.
 3. Identity matching in sync: reorder becomes a no-op, mid-file insert works, moving an entity
    between files works, a file rename stops orphaning.
 4. `_key` adoption, and reporting entities that are tracked but no longer declared anywhere
    (reported, never deleted — see `proposal_entity_identity_20260826.md`).
+
+## Tracking upgrades
+
+`internal/upgrade` moves a database's `joka_*` bookkeeping to `meta.TrackingVersion`. One place
+records what each bump does, because the alternative — format changes absorbed by sniffing,
+scattered across whichever adapter noticed — is how joka got three undocumented format changes with
+no way to tell them apart.
+
+```go
+var Steps = []Step{
+    {To: 2, Describe: "...", Blockers: ..., Apply: ...},
+}
+```
+
+- **Upgrades run automatically, but only when safe.** Each step's `Blockers` inspects the data first
+  and returns what stands in the way; `Run` refuses with that list rather than applying. The common
+  case is invisible, the case needing a human is loud. This avoids the boot-blocking stop a
+  mandatory `joka upgrade` command would put in every `&&` chain.
+- **Only mutating commands upgrade.** Read-only commands work fine against a database that is behind
+  or blocked — you can always run `joka status` to see what is wrong.
+- **A blocked upgrade changes nothing**, including the version stamp, so a retry starts from a state
+  that was described. `Apply` must be idempotent.
+- **Steps add constraints, never rewrite data.** An upgrade may add an index or a column; it must not
+  change what a row means.
+- **`meta.PreMarkerVersion`** is what a database with tracking tables but no `joka_meta` reads as.
+  It must not default to the current version — that was a real bug in the first draft: every
+  un-upgraded database looked upgraded, so no upgrade ever ran.
+  `TestPreMarkerDatabaseIsNotMistakenForCurrent` guards it.
+
+### Version 2: _id is the identity of a tracked row
+
+A unique index on `joka_entity_rows.ref_id`, and `ref_id` required. `entity_file` stays on the row
+as metadata — where the entity was last declared — and is no longer what identifies it.
+
+Blocked by two things, both real rather than theoretical:
+
+- **Rows with no `ref_id`**, synced before joka recorded one. Fix with `entity reimport` or
+  `entity forget`.
+- **An `_id` claimed by more than one tracked row.** Version 1 allowed this because it keyed on the
+  file, so two entity sets seeded into one database (a `dev1/` and a `local/` tree of the same
+  seeds) both claim the same `_id`s. One claim has to go.
+
+`RecordEntityRow` rejects an empty `ref_id` with `ErrEntitySetInvalid` rather than letting the
+constraint fire — a constraint violation is a worse way to learn that than being told.

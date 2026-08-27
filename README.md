@@ -381,6 +381,34 @@ Error: database bookkeeping is newer than this joka: the database is at tracking
 version 2 (written by joka 0.15.0), this joka understands 1 — upgrade joka
 ```
 
+Upgrades to the tracking format run automatically the first time a command
+writes, and only when they are safe:
+
+```
+$ joka entity sync
+Upgraded tracking to version 2: make _id the identity of a tracked row
+```
+
+When something in the data stands in the way, joka refuses and says what,
+changing nothing:
+
+```
+Error: tracking upgrade is blocked: cannot make _id the identity of a tracked row
+  these _ids are claimed by more than one tracked row: role_owner (2 rows, in
+  local/a.yaml and dev1/a.yaml). An _id identifies one row, so one claim has to
+  go — 'joka entity forget <file>' drops a file's tracking without touching its rows
+```
+
+Read-only commands (`status`, `entity diff`, `entity status`, `migrate status`,
+`migrate verify`) work normally against a database that is behind or blocked, so
+you can always look before deciding.
+
+| Version | What changed |
+|---|---|
+| 1 | The tracking tables as of v0.13.0. The assumed version of any database with no `joka_meta` |
+| 2 | `joka_entity_rows.ref_id` is unique and required — `_id`, not file and position, identifies a tracked row. `entity_file` becomes metadata recording where the entity was last declared |
+
+
 A database with tracking tables but no `joka_meta` predates the marker — it is
 read as the current version and stamped on the next command that writes.
 `joka status` shows the marker in its header.

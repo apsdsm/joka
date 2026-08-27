@@ -42,9 +42,11 @@ func TestReadOnBareDatabase(t *testing.T) {
 	if state.Present {
 		t.Error("expected no marker on a bare database")
 	}
-	// A database with no marker predates the marker; it is not from the future.
-	if state.TrackingVersion != meta.TrackingVersion {
-		t.Errorf("expected an absent marker to read as the current version, got %d", state.TrackingVersion)
+	// A database with no marker predates the marker, so it reads as the version
+	// that existed then — not as whatever is current, which would make every
+	// un-upgraded database look upgraded.
+	if state.TrackingVersion != meta.PreMarkerVersion {
+		t.Errorf("expected an absent marker to read as version %d, got %d", meta.PreMarkerVersion, state.TrackingVersion)
 	}
 }
 
