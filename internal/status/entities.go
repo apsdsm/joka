@@ -80,17 +80,18 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 		}
 
 		dbHash, tracked := synced[rel]
-		switch {
-		case !tracked:
-			file.Status = string(entitydomain.StatusNew)
+
+		// The comparison is sync's own, so the report cannot disagree with what
+		// a sync would consider modified.
+		status := entityapp.FileStatusFor(tracked, dbHash, hash)
+		file.Status = string(status)
+
+		switch status {
+		case entitydomain.StatusNew:
 			out.Counts.New++
-		case dbHash == "" || dbHash != hash:
-			// An empty stored hash predates content hashing; sync treats it as
-			// modified, so status does too.
-			file.Status = string(entitydomain.StatusModified)
+		case entitydomain.StatusModified:
 			out.Counts.Modified++
 		default:
-			file.Status = string(entitydomain.StatusSynced)
 			out.Counts.Synced++
 		}
 

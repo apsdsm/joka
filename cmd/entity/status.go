@@ -22,28 +22,22 @@ type RunEntityStatusCommand struct {
 func (r RunEntityStatusCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
-
-	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring tracking table: %w", err))
-		}
-		return fmt.Errorf("ensuring tracking table: %w", err)
-	}
-
-	if err := dbAdapter.EnsureContentHashColumn(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring content hash column: %w", err))
-		}
-		return fmt.Errorf("ensuring content hash column: %w", err)
-	}
-
-	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
-	if err != nil {
+	fail := func(err error) error {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
 		}
 		return err
+	}
+
+	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
+
+	if err := dbAdapter.EnsureTables(ctx); err != nil {
+		return fail(err)
+	}
+
+	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
+	if err != nil {
+		return fail(err)
 	}
 
 	results, err := app.EntityStatusAction{
@@ -52,10 +46,7 @@ func (r RunEntityStatusCommand) Execute(ctx context.Context) error {
 		Files:       relPaths,
 	}.Execute(ctx)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
+		return fail(err)
 	}
 
 	if jsonOut {

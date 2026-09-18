@@ -30,6 +30,25 @@ func NewPostgresTxDBAdapter(tx *sql.Tx, conn *sql.DB) *PostgresDBAdapter {
 	return &PostgresDBAdapter{db: tx, conn: conn}
 }
 
+// EnsureTables creates every table the entity commands read or write, and
+// backfills the content_hash column on a joka_entities that predates it.
+//
+// Every mutating entity command needs the same three, and calling them
+// separately meant five copies of the same preamble with five copies of the
+// JSON-versus-text error handling around each one.
+func (p *PostgresDBAdapter) EnsureTables(ctx context.Context) error {
+	if err := p.EnsureTrackingTable(ctx); err != nil {
+		return fmt.Errorf("ensuring the entity tracking table: %w", err)
+	}
+	if err := p.EnsureRowTrackingTable(ctx); err != nil {
+		return fmt.Errorf("ensuring the entity row tracking table: %w", err)
+	}
+	if err := p.EnsureContentHashColumn(ctx); err != nil {
+		return fmt.Errorf("ensuring the content_hash column: %w", err)
+	}
+	return nil
+}
+
 // EnsureTrackingTable creates the joka_entities table if it does not already exist.
 func (p *PostgresDBAdapter) EnsureTrackingTable(ctx context.Context) error {
 	exists, err := jokadb.TableExists(ctx, p.conn, "joka_entities")
@@ -66,7 +85,12 @@ func (p *PostgresDBAdapter) IsEntitySynced(ctx context.Context, filePath string)
 	return true, nil
 }
 
-// RecordEntitySynced inserts a row into joka_entities to mark the file as synced.
+// RecordEntitySynced inserts a row into joka_entities with no content hash.
+//
+// Not part of app.DBAdapter: every caller records a hash. It is kept because it
+// is the only way to construct a pre-hash tracking row, which is the legacy
+// state the "an empty stored hash reads as modified" rule exists for, and the
+// tests for that rule need to be able to build it.
 func (p *PostgresDBAdapter) RecordEntitySynced(ctx context.Context, filePath string) error {
 	_, err := p.db.ExecContext(ctx,
 		`INSERT INTO joka_entities (entity_file) VALUES ($1)`,
@@ -319,6 +343,10 @@ func (p *PostgresDBAdapter) UpdateEntitySynced(ctx context.Context, filePath, co
 }
 
 // GetEntityHash returns the content_hash stored for a synced entity file.
+//
+// Not part of app.DBAdapter: a caller that wants one file's hash wants the
+// whole set's, because identity is a property of the set. GetAllSyncedEntities
+// answers that in one query. This is a single-row read for tests.
 func (p *PostgresDBAdapter) GetEntityHash(ctx context.Context, filePath string) (string, error) {
 	var hash sql.NullString
 	err := p.db.QueryRowContext(ctx,
@@ -479,28 +507,6 @@ func (p *PostgresDBAdapter) GetAllTrackedRows(ctx context.Context) ([]domain.Tra
 	defer rows.Close()
 
 	return scanTrackedRows(rows)
-}
-
-// GetTrackedRowByRefID finds the row tracked under an _id, wherever it was
-// declared. Returns false when nothing claims it.
-func (p *PostgresDBAdapter) GetTrackedRowByRefID(ctx context.Context, refID string) (domain.TrackedRow, bool, error) {
-	var row domain.TrackedRow
-	var ref sql.NullString
-
-	err := p.db.QueryRowContext(ctx,
-		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
-		 FROM joka_entity_rows WHERE ref_id = $1`, refID,
-	).Scan(&row.EntityFile, &row.TableName, &row.RowPK, &row.PKColumn, &ref, &row.InsertionOrder)
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.TrackedRow{}, false, nil
-	}
-	if err != nil {
-		return domain.TrackedRow{}, false, fmt.Errorf("querying the row tracked as %q: %w", refID, err)
-	}
-
-	row.RefID = ref.String
-	return row, true, nil
 }
 
 // scanTrackedRows reads a result set of the standard tracked-row columns.

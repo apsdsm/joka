@@ -39,6 +39,13 @@ type RunEntitySyncCommand struct {
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
+	fail := func(err error) error {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
+	}
+
 	if r.Force && !jsonOut {
 		color.Yellow("Forced re-sync: every tracked file will be re-applied regardless of its stored hash.")
 	}
@@ -47,10 +54,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 
 		if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
+			return fail(err)
 		}
 
 		defer lockAdapter.Release(ctx) //nolint:errcheck
@@ -58,33 +62,13 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring tracking table: %w", err))
-		}
-		return fmt.Errorf("ensuring tracking table: %w", err)
-	}
-
-	if err := dbAdapter.EnsureRowTrackingTable(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring row tracking table: %w", err))
-		}
-		return fmt.Errorf("ensuring row tracking table: %w", err)
-	}
-
-	if err := dbAdapter.EnsureContentHashColumn(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring content hash column: %w", err))
-		}
-		return fmt.Errorf("ensuring content hash column: %w", err)
+	if err := dbAdapter.EnsureTables(ctx); err != nil {
+		return fail(err)
 	}
 
 	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
+		return fail(err)
 	}
 
 	if len(relPaths) == 0 {
@@ -96,6 +80,14 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
+	// One read of the tracking table rather than two queries per file. The
+	// status of any one file depends on the whole set anyway, because an _id
+	// can be claimed elsewhere.
+	synced, err := dbAdapter.GetAllSyncedEntities(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
 	var pending []*domain.EntityFile  // new files to insert
 	var modified []*domain.EntityFile // tracked files whose content changed
 	var all []*domain.EntityFile      // every file, for set-level validation
@@ -105,10 +97,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 		hash, err := app.HashFileContent(fullPath)
 		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
+			return fail(err)
 		}
 
 		// Every file is parsed, including ones the hash says are unchanged.
@@ -117,55 +106,33 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		// whether a file is written, not whether it is read.
 		file, err := app.ParseEntityAction{Path: fullPath}.Execute()
 		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
+			return fail(err)
 		}
 		file.Path = rel
 		file.ContentHash = hash
 		all = append(all, file)
 
-		already, err := dbAdapter.IsEntitySynced(ctx, rel)
-		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
-		}
+		dbHash, tracked := synced[rel]
 
-		if !already {
+		// --force re-applies a tracked file whatever its stored hash says. It
+		// does not make an untracked file anything other than new.
+		switch app.FileStatusFor(tracked, dbHash, hash) {
+		case domain.StatusNew:
 			pending = append(pending, file)
-			continue
-		}
-
-		dbHash, err := dbAdapter.GetEntityHash(ctx, rel)
-		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
+		case domain.StatusModified:
+			modified = append(modified, file)
+		default:
+			if r.Force {
+				modified = append(modified, file)
 			}
-			return err
 		}
-
-		// A stored hash that matches means the file is unchanged. An empty
-		// stored hash (synced before hashing existed) is treated as modified,
-		// matching `entity status`; the update path then backfills the hash.
-		// --force overrides this so an unchanged file is re-applied anyway.
-		if !r.Force && dbHash != "" && dbHash == hash {
-			continue
-		}
-
-		modified = append(modified, file)
 	}
 
 	// Validate the whole set before anything is written: an _id claimed twice
 	// is only visible across files, and a set that cannot be identified is not
 	// one joka should start writing from.
 	if err := app.EntitySetError(app.ValidateEntitySet(all)); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
+		return fail(err)
 	}
 
 	dirty := make(map[string]bool, len(pending)+len(modified))
@@ -185,10 +152,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Dirty:    dirty,
 	}.Execute(ctx)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
+		return fail(err)
 	}
 
 	if !plan.HasChanges() {
@@ -243,10 +207,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("starting transaction: %w", err))
-		}
-		return fmt.Errorf("starting transaction: %w", err)
+		return fail(fmt.Errorf("starting transaction: %w", err))
 	}
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
@@ -259,17 +220,11 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
+		return fail(err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("committing transaction: %w", err))
-		}
-		return fmt.Errorf("committing transaction: %w", err)
+		return fail(fmt.Errorf("committing transaction: %w", err))
 	}
 
 	if jsonOut {

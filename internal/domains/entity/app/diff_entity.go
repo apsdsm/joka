@@ -15,9 +15,14 @@ const (
 	// MatchByID aligned the two sides on _id / ref_id. Available only when
 	// every entity and every tracked row carries one.
 	MatchByID = "id"
-	// MatchByPosition paired entity #N with tracked row #N, which is what sync
-	// itself does. It is the only option when any _id is missing, and it is
-	// what makes an inserted entity look like a rename of everything after it.
+	// MatchByPosition paired entity #N with tracked row #N. It is the fallback
+	// for a set sync would refuse — one where an _id is missing on either side
+	// — and it is what makes an inserted entity look like a rename of
+	// everything after it.
+	//
+	// Sync itself no longer matches this way. It did until `0c4e64d`, which is
+	// why the fallback exists at all: a database synced before that, or a file
+	// that has not yet been given _ids, still has to be describable.
 	MatchByPosition = "position"
 )
 
@@ -75,18 +80,14 @@ type EntityDiff struct {
 
 	// PositionalBreak is the 1-based declared position where positional
 	// alignment first stops describing the same row, or 0 when it holds all
-	// the way through. This is the position sync's own matching would start
-	// writing to the wrong row.
+	// the way through.
+	//
+	// It is diagnostic only: it says how far the file has drifted from the
+	// order its rows were inserted in. When sync matched positionally it was
+	// also the position sync would start writing to the wrong row; it has not
+	// meant that since `0c4e64d`.
 	PositionalBreak int `json:"positional_break"`
 
-	// TableChanged names an entity whose _id is tracked as a row in a different
-	// table. An _id names one row, so sync refuses rather than guess which of
-	// the two the author meant.
-	TableChanged []string `json:"table_changed"`
-
-	// SyncVerdict is the error entity sync would return for this file, or
-	// empty when sync would proceed. It comes from sync's own check.
-	SyncVerdict string `json:"sync_verdict,omitempty"`
 }
 
 // DiffLine is one row of the alignment: a declared entity, a tracked row, or

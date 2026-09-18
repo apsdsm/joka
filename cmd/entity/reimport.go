@@ -41,23 +41,11 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 
 	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
+	if err := dbAdapter.EnsureTables(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring tracking table: %w", err))
+			return shared.PrintErrorJSON(err)
 		}
-		return fmt.Errorf("ensuring tracking table: %w", err)
-	}
-	if err := dbAdapter.EnsureRowTrackingTable(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring row tracking table: %w", err))
-		}
-		return fmt.Errorf("ensuring row tracking table: %w", err)
-	}
-	if err := dbAdapter.EnsureContentHashColumn(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring content hash column: %w", err))
-		}
-		return fmt.Errorf("ensuring content hash column: %w", err)
+		return err
 	}
 
 	fullPath := filepath.Join(r.EntitiesDir, r.FilePath)

@@ -37,16 +37,11 @@ func (a EntityStatusAction) Execute(ctx context.Context) ([]domain.EntityFileInf
 		}
 
 		dbHash, tracked := synced[rel]
-		if !tracked {
-			result = append(result, domain.EntityFileInfo{Path: rel, Status: domain.StatusNew})
-			continue
-		}
 
-		if dbHash == "" || dbHash != hash {
-			result = append(result, domain.EntityFileInfo{Path: rel, Status: domain.StatusModified})
-		} else {
-			result = append(result, domain.EntityFileInfo{Path: rel, Status: domain.StatusSynced})
-		}
+		result = append(result, domain.EntityFileInfo{
+			Path:   rel,
+			Status: FileStatusFor(tracked, dbHash, hash),
+		})
 	}
 
 	for file := range synced {

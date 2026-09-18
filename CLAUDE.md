@@ -181,10 +181,10 @@ Coverage per edge, and which command reported it before:
   `migrate up`) walks files and rows positionally and returns an error the moment they disagree, so
   on exactly the databases worth diagnosing it reports nothing. `buildMigrations` takes the union of
   indexes from both sides, which is what makes `file_missing` and `out_of_order` reportable.
-- **The structural verdict comes from sync's own check.** `entity sync` refuses to update a modified
-  file in place when its shape no longer matches the tracked rows. Status calls the same
-  `app.AlignTrackedRows` (exported for this) rather than reimplementing it, so the report can never
-  disagree with what a real sync would do.
+- **The file verdict comes from sync's own check.** Whether a file counts as new, modified or synced
+  is `app.FileStatusFor`, the one function `entity status` and `entity sync` also call, so the three
+  cannot disagree about what a sync would rewrite. The rule they share is that an empty stored hash
+  (a row synced before content hashing existed) reads as modified.
 - **Not every finding has a command.** `Action.Command` is empty when joka has nothing that fixes
   the finding; the text report prints `(nothing joka can run)`. Do not invent a command in the
   actions list that does not exist — add the command first (`entity forget` was added exactly this
@@ -371,14 +371,18 @@ entities:
 - Lines the declared graph up against `joka_entity_rows` and against the live rows, and prints one
   row per alignment line with a `= ≠ + - ~ !` gutter. Read-only; takes no lock and creates no
   tracking tables.
-- Exists because sync's structural refusal names the symptom ("48 entities but 38 are tracked")
-  without saying which entities are new, and recommends a destructive reimport. The diff shows the
-  shape of the change and whether an identity match would be exact — which is the input to the
-  `_id`-keyed matching decision in `proposal_entity_identity_20260826.md`.
-- **Matching**: `_id` when both sides are fully keyed, otherwise positional (what sync does), with
-  the unkeyed entities and rows named. `PositionalBreak` is the 1-based declared position where
-  walking both sides in step stops describing the same row — where sync's matching would start
-  writing to the wrong one. It is only computed when both sides are non-empty.
+- Was built because sync's structural refusal named the symptom ("48 entities but 38 are tracked")
+  without saying which entities were new, and recommended a destructive reimport. The diff showed the
+  shape of the change and whether an identity match would be exact, which was the input to the
+  `_id`-keyed matching decision in `proposal_entity_identity_20260826.md`. That refusal is gone; the
+  diff remains the only command that shows declared, tracked and live side by side.
+- **Matching**: `_id` when both sides are fully keyed, otherwise positional, with the unkeyed
+  entities and rows named. Sync itself matches on `_id` only and refuses a set with a missing one, so
+  the positional fallback describes a set sync would not accept — a database synced before `0c4e64d`,
+  or a file not yet given `_id`s. `PositionalBreak` is the 1-based declared position where walking
+  both sides in step stops describing the same row. It is diagnostic only (it was where sync would
+  have written to the wrong row, back when sync matched positionally) and is computed only when both
+  sides are non-empty.
 - `DiffLine.Moved` is deliberately **orthogonal** to `Status`: an insert earlier in the file shifts
   every row after it, and those rows may or may not also have been edited. The gutter shows `≠` over
   `~` because the two position columns already make a move visible, while a column change is only
@@ -399,7 +403,11 @@ entities:
   `app.ResolveRowChanges`, which `entity sync --dry-run` also uses — so the two can never disagree
   about what a column change is. `--no-values` skips it. A row that is not in the database is never
   compared; `ChangesSkipped` says why rather than leaving an empty list to be misread as "no change".
-- The `sync would refuse` line comes from `AlignTrackedRows`, sync's own check.
+- **The diff does not report sync's one remaining refusal.** `ErrEntityTableChanged` — an `_id`
+  tracked against one table and now declared on another — has no line in the diff. The
+  `SyncVerdict` and `TableChanged` fields that were meant to carry it were never assigned and have
+  been removed rather than left as a JSON key that could not appear. Adding it back belongs with the
+  refusal semantics in `proposal_entity_convergence_20260918.md`.
 - **The `_has:` nesting is redrawn as a tree.** Rows are listed in the flat depth-first order they
   are inserted and tracked in, but `DiffLine.Depth` carries each entity's nesting level so the
   renderer can put a child under its parent. `flattenDepths` must walk the graph exactly as

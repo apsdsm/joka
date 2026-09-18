@@ -18,16 +18,11 @@ type lookupMock struct {
 	data map[string]any
 }
 
-func (l *lookupMock) EnsureTrackingTable(context.Context) error            { panic("unused") }
-func (l *lookupMock) EnsureRowTrackingTable(context.Context) error         { panic("unused") }
-func (l *lookupMock) EnsureContentHashColumn(context.Context) error        { panic("unused") }
 func (l *lookupMock) IsEntitySynced(context.Context, string) (bool, error) { panic("unused") }
-func (l *lookupMock) RecordEntitySynced(context.Context, string) error     { panic("unused") }
 func (l *lookupMock) RecordEntitySyncedWithHash(context.Context, string, string) error {
 	panic("unused")
 }
 func (l *lookupMock) UpdateEntitySynced(context.Context, string, string) error { panic("unused") }
-func (l *lookupMock) GetEntityHash(context.Context, string) (string, error)    { panic("unused") }
 func (l *lookupMock) GetAllSyncedEntities(context.Context) (map[string]string, error) {
 	panic("unused")
 }

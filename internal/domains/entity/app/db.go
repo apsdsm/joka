@@ -7,30 +7,18 @@ import (
 )
 
 // DBAdapter abstracts the database operations needed by entity sync. The
-// tracking methods (EnsureTrackingTable, IsEntitySynced, RecordEntitySynced)
-// manage the joka_entities table. InsertRow performs a single INSERT and
-// returns the auto-increment id for use in child entity references.
+// tracking methods manage the joka_entities and joka_entity_rows tables.
+// InsertRow performs a single INSERT and returns the auto-increment id for use
+// in child entity references.
+//
+// Table creation is deliberately absent: it is the command layer's business,
+// which calls EnsureTables on the concrete adapter once before handing it over.
+// An action that could create the table it reads cannot be used by a read-only
+// caller, which is what `joka status` needs.
 type DBAdapter interface {
-	// EnsureTrackingTable creates the joka_entities table if it does not
-	// already exist.
-	EnsureTrackingTable(ctx context.Context) error
-
-	// EnsureRowTrackingTable creates the joka_entity_rows table if it does
-	// not already exist. This table tracks individual rows inserted per
-	// entity file for reimport support.
-	EnsureRowTrackingTable(ctx context.Context) error
-
-	// EnsureContentHashColumn adds the content_hash column to joka_entities
-	// if it is not already present.
-	EnsureContentHashColumn(ctx context.Context) error
-
 	// IsEntitySynced returns true if filePath has already been recorded in
 	// the joka_entities table.
 	IsEntitySynced(ctx context.Context, filePath string) (bool, error)
-
-	// RecordEntitySynced inserts a row into joka_entities to mark filePath
-	// as synced.
-	RecordEntitySynced(ctx context.Context, filePath string) error
 
 	// RecordEntitySyncedWithHash inserts a row into joka_entities with a
 	// content hash for change detection.
@@ -39,10 +27,6 @@ type DBAdapter interface {
 	// UpdateEntitySynced updates an existing joka_entities row with a new
 	// content hash and synced_at timestamp.
 	UpdateEntitySynced(ctx context.Context, filePath, contentHash string) error
-
-	// GetEntityHash returns the content_hash stored for a synced entity file.
-	// Returns empty string if no hash is stored or the file is not found.
-	GetEntityHash(ctx context.Context, filePath string) (string, error)
 
 	// GetAllSyncedEntities returns all entity_file paths from joka_entities
 	// mapped to their content hashes. NULL hashes are returned as empty strings.

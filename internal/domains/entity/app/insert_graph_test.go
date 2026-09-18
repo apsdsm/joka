@@ -54,20 +54,8 @@ func newMockDBAdapter() *mockDBAdapter {
 	}
 }
 
-func (m *mockDBAdapter) EnsureTrackingTable(_ context.Context) error    { return nil }
-func (m *mockDBAdapter) EnsureRowTrackingTable(_ context.Context) error { return nil }
-func (m *mockDBAdapter) EnsureContentHashColumn(_ context.Context) error {
-	return nil
-}
-
 func (m *mockDBAdapter) IsEntitySynced(_ context.Context, filePath string) (bool, error) {
 	return m.synced[filePath], nil
-}
-
-func (m *mockDBAdapter) RecordEntitySynced(_ context.Context, filePath string) error {
-	m.trackingRows = append(m.trackingRows, filePath)
-	m.synced[filePath] = true
-	return nil
 }
 
 func (m *mockDBAdapter) RecordEntitySyncedWithHash(_ context.Context, filePath, contentHash string) error {
@@ -80,10 +68,6 @@ func (m *mockDBAdapter) RecordEntitySyncedWithHash(_ context.Context, filePath, 
 func (m *mockDBAdapter) UpdateEntitySynced(_ context.Context, filePath, contentHash string) error {
 	m.entityHashes[filePath] = contentHash
 	return nil
-}
-
-func (m *mockDBAdapter) GetEntityHash(_ context.Context, filePath string) (string, error) {
-	return m.entityHashes[filePath], nil
 }
 
 func (m *mockDBAdapter) GetAllSyncedEntities(_ context.Context) (map[string]string, error) {

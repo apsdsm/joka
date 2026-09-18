@@ -260,9 +260,6 @@ func TestDiffEntityAction(t *testing.T) {
 		if d.Deletes != 1 {
 			t.Errorf("expected 1 delete, got %d", d.Deletes)
 		}
-		if d.SyncVerdict != "" {
-			t.Error("expected no sync verdict for a file sync would never look at")
-		}
 	})
 
 	t.Run("it reports the columns that changed on a matched row", func(t *testing.T) {

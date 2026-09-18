@@ -201,19 +201,6 @@ func renderDiffSummary(w io.Writer, d *app.EntityDiff) {
 	fmt.Fprintln(w)
 
 	switch {
-	case d.SyncVerdict != "":
-		color.New(color.FgRed).Fprintf(w, "  entity sync would refuse this file:\n      %s\n", d.SyncVerdict)
-		if d.KeyedByID {
-			color.New(color.FgGreen).Fprintln(w, "  every entity and tracked row carries an _id, so an identity match would be exact")
-		}
-		color.New(color.FgYellow).Fprintf(w, "  → joka entity reimport %s   (deletes and re-inserts every row)\n", d.Path)
-		if d.Deletes == 0 && d.KeyedByID {
-			updateNote := fmt.Sprintf("  → joka entity update %s    (inserts the %s, leaves existing rows untouched", d.Path, plural(d.Inserts, "new row", "new rows"))
-			if d.Changes > 0 {
-				updateNote += fmt.Sprintf(" — the %s that changed would NOT be applied", plural(d.Changes, "column", "columns"))
-			}
-			color.New(color.FgYellow).Fprintln(w, updateNote+")")
-		}
 	case !d.Tracked:
 		color.New(color.FgCyan).Fprintf(w, "  → joka entity sync   (inserts all %d)\n", d.DeclaredCount)
 	case !d.OnDisk:
@@ -359,14 +346,6 @@ func isAreRowsNoun(n int) string {
 		return "row"
 	}
 	return "rows"
-}
-
-// plural renders a count with the singular or plural form of a noun phrase.
-func plural(n int, singular, pluralForm string) string {
-	if n == 1 {
-		return "1 " + singular
-	}
-	return fmt.Sprintf("%d %s", n, pluralForm)
 }
 
 // treePrefixes renders the `_has:` nesting as box-drawing connectors, one

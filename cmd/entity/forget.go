@@ -48,14 +48,8 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 
 	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
-		return fail(fmt.Errorf("ensuring tracking table: %w", err))
-	}
-	if err := dbAdapter.EnsureRowTrackingTable(ctx); err != nil {
-		return fail(fmt.Errorf("ensuring row tracking table: %w", err))
-	}
-	if err := dbAdapter.EnsureContentHashColumn(ctx); err != nil {
-		return fail(fmt.Errorf("ensuring content hash column: %w", err))
+	if err := dbAdapter.EnsureTables(ctx); err != nil {
+		return fail(err)
 	}
 
 	targets, err := r.resolveTargets(ctx, dbAdapter)
