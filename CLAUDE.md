@@ -551,6 +551,48 @@ Blocked by two things, both real rather than theoretical:
 `RecordEntityRow` rejects an empty `ref_id` with `ErrEntitySetInvalid` rather than letting the
 constraint fire — a constraint violation is a worse way to learn that than being told.
 
+## Entity state (`domain.State`, `app.StateBackend`)
+
+What joka last applied to one database, as one value rather than a set of queries.
+`proposal_entity_convergence_20260918.md` is the plan this belongs to; it exists because the tracking
+tables were never one artifact — their shape and meaning lived across six commands, each reading the
+columns it happened to need, which is how three undocumented format changes got in.
+
+```go
+type State struct {
+    Version  int                    // domain.StateVersion
+    Files    map[string]FileState   // path → content hash
+    Entities map[string]EntityState // _id → table, pk, file, position
+    Unkeyed  []TrackedRow           // rows with no _id
+}
+```
+
+- **Nothing is keyed on the file.** An entity moves between files, so `EntityState.File` records where
+  it was last declared and nothing matches on it. `RowsInFile` exists for the places a file is still
+  the unit of work — reimport's deletion order, forget's plan, the diff's alignment.
+- **`Order` survives for one reason.** Reimport deletes a file's rows in reverse so children go before
+  parents, and a foreign key makes that ordering load-bearing. It is not an identity.
+- **Row ordering is total.** `RowsInFile`/`AllRows` sort by file, then position, then `_id`. Position
+  is not unique within a file — only a dirty file's rows are re-numbered — so without the last key the
+  output moves between runs on the same data.
+- **`Unkeyed` carries what cannot be represented.** A row written before joka recorded a `ref_id` has
+  no key, and dropping it would lose the row it points at. It is carried so a reader can report it;
+  resolving it is the tracking version 2 upgrade's job.
+- **A duplicate `_id` is refused** (`ErrStateAmbiguous`). Two rows under one `_id` cannot be one map
+  entry, and picking one would be worse than saying so. Unreachable after the version 2 unique index;
+  reachable on a database whose upgrade is blocked on exactly this.
+
+`StateBackend` is `Load`/`Save` of the whole document, because that is the access pattern every caller
+already has. `infra.PostgresStateBackend` stores it decomposed across `joka_entities` and
+`joka_entity_rows` — version 1 of the state shape names what those tables already held rather than
+changing it. `Save` writes only what differs: rewriting every row would be simpler, but
+`joka_entities.synced_at` is a column a human reads and resetting it on untouched files would make it
+lie. Dropping tracking happens by removing a map entry, never by failing to mention one, because a
+caller saves the document it loaded.
+
+Only the database backend can write the document in the same transaction as the rows it describes,
+which is why it is the default and the only one implemented.
+
 ## Identity matching (`ApplySetAction`)
 
 `entity sync` matches a declared entity to its tracked row on `_id`, across the whole set. This

@@ -53,4 +53,11 @@ var (
 	// now declared in another. An _id names one row; the new declaration is a
 	// different thing wearing the same name.
 	ErrEntityTableChanged = errors.New("_id now declares a different table")
+
+	// ErrStateAmbiguous means the tracking in the database cannot be read as a
+	// state document because one _id is claimed by more than one tracked row.
+	// Tracking version 2's unique index makes this unreachable going forward;
+	// it is reachable on a database whose upgrade to version 2 is still blocked
+	// on exactly this, which is where it gets resolved.
+	ErrStateAmbiguous = errors.New("tracking cannot be read: an _id is claimed by more than one row")
 )
