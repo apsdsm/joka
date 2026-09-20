@@ -40,11 +40,16 @@ func (r RunEntityStatusCommand) Execute(ctx context.Context) error {
 		return fail(err)
 	}
 
+	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
 	results, err := app.EntityStatusAction{
-		DB:          dbAdapter,
+		State:       state,
 		EntitiesDir: r.EntitiesDir,
 		Files:       relPaths,
-	}.Execute(ctx)
+	}.Execute()
 	if err != nil {
 		return fail(err)
 	}

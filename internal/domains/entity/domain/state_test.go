@@ -110,20 +110,44 @@ func TestState(t *testing.T) {
 		}
 	})
 
-	t.Run("AllRows spans every file and leaves unkeyed rows out", func(t *testing.T) {
+	t.Run("AllRows spans every file, ordered by file", func(t *testing.T) {
 		s := domain.NewState()
 		s.Track("b", row("b.yaml", "users", 9, 0))
 		s.Track("a", row("a.yaml", "users", 1, 0))
-		s.Unkeyed = []domain.TrackedRow{{EntityFile: "a.yaml", TableName: "users", RowPK: 99}}
 
 		got := s.AllRows()
 
 		if len(got) != 2 {
 			t.Fatalf("expected 2 rows, got %d", len(got))
 		}
-		// Ordered by file, so a.yaml's row comes first.
 		if got[0].RefID != "a" || got[1].RefID != "b" {
 			t.Errorf("expected a then b, got %q then %q", got[0].RefID, got[1].RefID)
+		}
+	})
+
+	t.Run("a file's rows include the ones with no _id", func(t *testing.T) {
+		// An unkeyed row is still that file's row: forget has to drop it, the
+		// diff has to show it, and a count of what the file tracks that left it
+		// out would be wrong. Only identity matching skips it, and that reads
+		// Entities directly.
+		s := domain.NewState()
+		s.Track("keyed", row("a.yaml", "users", 1, 0))
+		s.Unkeyed = []domain.TrackedRow{
+			{EntityFile: "a.yaml", TableName: "users", RowPK: 99, PKColumn: "id", InsertionOrder: 1},
+			{EntityFile: "b.yaml", TableName: "users", RowPK: 98, PKColumn: "id"},
+		}
+
+		got := s.RowsInFile("a.yaml")
+
+		if len(got) != 2 {
+			t.Fatalf("expected 2 rows from a.yaml, got %d", len(got))
+		}
+		if got[0].RefID != "keyed" || got[1].RefID != "" {
+			t.Errorf("expected the keyed row then the unkeyed one, got %q then %q", got[0].RefID, got[1].RefID)
+		}
+
+		if len(s.AllRows()) != 3 {
+			t.Errorf("expected AllRows to span both files and both kinds, got %d", len(s.AllRows()))
 		}
 	})
 }

@@ -77,17 +77,42 @@ func (f fakeMigrations) ComputeSchema(context.Context) (map[string]string, error
 	return f.live, nil
 }
 
+// fakeEntities describes tracking the way the tests find it easiest to write —
+// file to hash, file to its rows — and builds the state document from it.
 type fakeEntities struct {
 	synced map[string]string
 	rows   map[string][]entitydomain.TrackedRow
 }
 
-func (f fakeEntities) GetAllSyncedEntities(context.Context) (map[string]string, error) {
-	return f.synced, nil
-}
+func (f fakeEntities) state() *entitydomain.State {
+	s := entitydomain.NewState()
 
-func (f fakeEntities) GetTrackedRows(_ context.Context, file string) ([]entitydomain.TrackedRow, error) {
-	return f.rows[file], nil
+	for path, hash := range f.synced {
+		s.TrackFile(path, hash)
+	}
+
+	for path, rows := range f.rows {
+		for _, r := range rows {
+			r.EntityFile = path
+
+			// A row with no _id cannot be keyed; it is carried the way the
+			// backend carries one read from a pre-version-2 database.
+			if r.RefID == "" {
+				s.Unkeyed = append(s.Unkeyed, r)
+				continue
+			}
+
+			s.Track(r.RefID, entitydomain.EntityState{
+				Table:    r.TableName,
+				PKColumn: r.PKColumn,
+				PKValue:  r.RowPK,
+				File:     path,
+				Order:    r.InsertionOrder,
+			})
+		}
+	}
+
+	return s
 }
 
 type fakeLock struct{ held *lockdomain.Lock }
@@ -322,7 +347,7 @@ const threeEntityFile = twoEntityFile + `  - _is: users
 `
 
 func entityInputs(dir string, e fakeEntities, p fakeProbe) Inputs {
-	return Inputs{EntitiesDir: dir, Entity: e, Probe: p}
+	return Inputs{EntitiesDir: dir, EntityState: e.state(), Probe: p}
 }
 
 func TestBuildEntities(t *testing.T) {

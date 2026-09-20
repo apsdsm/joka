@@ -52,7 +52,14 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 		return fail(err)
 	}
 
-	targets, err := r.resolveTargets(ctx, dbAdapter)
+	// One read of the state for the whole run, so the targets, every plan and
+	// the refusal all describe the same document.
+	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
+	targets, err := r.resolveTargets(state)
 	if err != nil {
 		return fail(err)
 	}
@@ -72,7 +79,7 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 	live := 0
 
 	for _, target := range targets {
-		plan, err := app.ForgetEntityAction{DB: dbAdapter, FilePath: target}.Plan(ctx)
+		plan, err := app.ForgetEntityAction{DB: dbAdapter, State: state, FilePath: target}.Plan(ctx)
 		if err != nil {
 			return fail(err)
 		}
@@ -104,6 +111,7 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 	for _, plan := range plans {
 		applied, err := app.ForgetEntityAction{
 			DB:       dbAdapter,
+			State:    state,
 			FilePath: plan.FilePath,
 			Force:    r.Force,
 		}.Execute(ctx)
@@ -137,7 +145,7 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 
 // resolveTargets returns the file paths to forget: the single argument, or
 // every orphan when --orphans is set.
-func (r RunEntityForgetCommand) resolveTargets(ctx context.Context, dbAdapter app.DBAdapter) ([]string, error) {
+func (r RunEntityForgetCommand) resolveTargets(state *domain.State) ([]string, error) {
 	if !r.Orphans {
 		return []string{r.FilePath}, nil
 	}
@@ -150,10 +158,10 @@ func (r RunEntityForgetCommand) resolveTargets(ctx context.Context, dbAdapter ap
 	}
 
 	results, err := app.EntityStatusAction{
-		DB:          dbAdapter,
+		State:       state,
 		EntitiesDir: r.EntitiesDir,
 		Files:       relPaths,
-	}.Execute(ctx)
+	}.Execute()
 	if err != nil {
 		return nil, err
 	}

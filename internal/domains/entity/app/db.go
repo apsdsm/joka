@@ -28,10 +28,6 @@ type DBAdapter interface {
 	// content hash and synced_at timestamp.
 	UpdateEntitySynced(ctx context.Context, filePath, contentHash string) error
 
-	// GetAllSyncedEntities returns all entity_file paths from joka_entities
-	// mapped to their content hashes. NULL hashes are returned as empty strings.
-	GetAllSyncedEntities(ctx context.Context) (map[string]string, error)
-
 	// RecordEntityRow inserts a row into joka_entity_rows to track an
 	// individual inserted entity row.
 	RecordEntityRow(ctx context.Context, row domain.TrackedRow) error

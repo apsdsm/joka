@@ -10,12 +10,7 @@ import (
 
 // trackedFile seeds the mock with a synced file and the rows it tracks.
 func trackedFile(db *mockDBAdapter, path string, rows ...domain.TrackedRow) {
-	db.synced[path] = true
-	db.entityHashes[path] = "hash"
-	for _, row := range rows {
-		row.EntityFile = path
-		db.entityRows = append(db.entityRows, row)
-	}
+	db.track(path, rows...)
 }
 
 func TestForgetEntityAction(t *testing.T) {
@@ -29,7 +24,7 @@ func TestForgetEntityAction(t *testing.T) {
 		)
 		db.currentRows["users|1"] = map[string]any{"id": 1}
 
-		plan, err := ForgetEntityAction{DB: db, FilePath: "a.yaml"}.Plan(ctx)
+		plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}.Plan(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -55,13 +50,13 @@ func TestForgetEntityAction(t *testing.T) {
 			domain.TrackedRow{TableName: "children", RowPK: 2, PKColumn: "id", InsertionOrder: 1},
 		)
 
-		plan, err := ForgetEntityAction{DB: db, FilePath: "a.yaml"}.Plan(ctx)
+		plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}.Plan(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// GetTrackedRows hands back reverse insertion order for deletion; the
-		// plan is for reading, so it goes the other way.
+		// The plan is for reading, so it runs parent-first even though deletion
+		// has to run the other way.
 		if plan.Rows[0].Table != "parents" || plan.Rows[1].Table != "children" {
 			t.Errorf("expected parents before children, got %s then %s", plan.Rows[0].Table, plan.Rows[1].Table)
 		}
@@ -74,7 +69,7 @@ func TestForgetEntityAction(t *testing.T) {
 			domain.TrackedRow{TableName: "slot_assignments", RowPK: 5, PKColumn: "id", InsertionOrder: 0},
 		)
 
-		plan, err := ForgetEntityAction{DB: db, FilePath: "gone.yaml"}.Plan(ctx)
+		plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "gone.yaml"}.Plan(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -93,7 +88,7 @@ func TestForgetEntityAction(t *testing.T) {
 			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", InsertionOrder: 0},
 		)
 
-		plan, err := ForgetEntityAction{DB: db, FilePath: "a.yaml"}.Execute(ctx)
+		plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}.Execute(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -115,7 +110,7 @@ func TestForgetEntityAction(t *testing.T) {
 			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", InsertionOrder: 0},
 		)
 
-		if _, err := (ForgetEntityAction{DB: db, FilePath: "a.yaml"}).Execute(ctx); err != nil {
+		if _, err := (ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}).Execute(ctx); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
@@ -131,7 +126,7 @@ func TestForgetEntityAction(t *testing.T) {
 		)
 		db.currentRows["users|1"] = map[string]any{"id": 1}
 
-		plan, err := ForgetEntityAction{DB: db, FilePath: "a.yaml"}.Execute(ctx)
+		plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}.Execute(ctx)
 		if !errors.Is(err, domain.ErrRowsStillLive) {
 			t.Fatalf("expected ErrRowsStillLive, got %v", err)
 		}
@@ -150,7 +145,7 @@ func TestForgetEntityAction(t *testing.T) {
 		)
 		db.currentRows["users|1"] = map[string]any{"id": 1}
 
-		plan, err := ForgetEntityAction{DB: db, FilePath: "a.yaml", Force: true}.Execute(ctx)
+		plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml", Force: true}.Execute(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -168,7 +163,7 @@ func TestForgetEntityAction(t *testing.T) {
 	t.Run("it refuses a file that was never synced", func(t *testing.T) {
 		db := newMockDBAdapter()
 
-		_, err := ForgetEntityAction{DB: db, FilePath: "unknown.yaml"}.Execute(ctx)
+		_, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "unknown.yaml"}.Execute(ctx)
 		if !errors.Is(err, domain.ErrEntityNotSynced) {
 			t.Fatalf("expected ErrEntityNotSynced, got %v", err)
 		}
@@ -180,7 +175,7 @@ func TestForgetEntityAction(t *testing.T) {
 		db := newMockDBAdapter()
 		trackedFile(db, "a.yaml")
 
-		plan, err := ForgetEntityAction{DB: db, FilePath: "a.yaml"}.Execute(ctx)
+		plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}.Execute(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -200,7 +195,7 @@ func TestForgetEntityAction(t *testing.T) {
 			domain.TrackedRow{TableName: "users", RowPK: 3, PKColumn: "id", InsertionOrder: 2},
 		)
 
-		if _, err := (ForgetEntityAction{DB: db, FilePath: "a.yaml"}).Plan(ctx); err != nil {
+		if _, err := (ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}).Plan(ctx); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
@@ -228,7 +223,7 @@ func TestForgetEntityActionDefaultsPKColumn(t *testing.T) {
 		domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "", InsertionOrder: 0},
 	)
 
-	plan, err := ForgetEntityAction{DB: db, FilePath: "a.yaml"}.Plan(context.Background())
+	plan, err := ForgetEntityAction{DB: db, State: db.state, FilePath: "a.yaml"}.Plan(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

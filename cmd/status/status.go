@@ -34,6 +34,16 @@ type RunStatusCommand struct {
 func (r RunStatusCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
+	// Load creates nothing: a database with no tracking tables reads as an
+	// empty state, and the missing tables are reported from the probe.
+	entityState, err := entityinfra.NewPostgresStateBackend(r.DB).Load(ctx)
+	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
+	}
+
 	report, err := jokastatus.Build(ctx, jokastatus.Inputs{
 		Conn:          r.DB,
 		Profile:       r.Profile,
@@ -43,7 +53,7 @@ func (r RunStatusCommand) Execute(ctx context.Context) error {
 		TemplatesDir:  r.TemplatesDir,
 		Tables:        r.Tables,
 		Migration:     migrationinfra.NewPostgresDBAdapter(r.DB),
-		Entity:        entityinfra.NewPostgresDBAdapter(r.DB),
+		EntityState:   entityState,
 		Lock:          lockinfra.NewPostgresLockAdapter(r.DB),
 		Probe:         jokastatus.NewProbe(r.DB),
 	})

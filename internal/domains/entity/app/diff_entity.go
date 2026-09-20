@@ -136,6 +136,10 @@ type DiffLine struct {
 // DiffEntityAction builds the alignment for one entity file.
 type DiffEntityAction struct {
 	DB DBAdapter
+	// State is what joka last applied. The tracked side of the alignment comes
+	// from it; DB is only used for the live side (does the row still exist,
+	// what does it hold).
+	State *domain.State
 	// Path is the relative path used as the tracking key.
 	Path string
 	// Entities is the parsed file's graph. Nil for an orphan.
@@ -157,19 +161,14 @@ func (a DiffEntityAction) Execute(ctx context.Context) (*EntityDiff, error) {
 	depths := flattenDepths(a.Entities, 0, nil)
 	diff.DeclaredCount = len(declared)
 
-	synced, err := a.DB.IsEntitySynced(ctx, a.Path)
-	if err != nil {
-		return nil, err
-	}
+	_, synced := a.State.FileHash(a.Path)
 	diff.Tracked = synced
 
 	var tracked []domain.TrackedRow
 	if synced {
-		rows, err := a.DB.GetTrackedRows(ctx, a.Path)
-		if err != nil {
-			return nil, err
-		}
-		tracked = sortByInsertionOrder(rows)
+		// Already in the order the rows were written, which is the order the
+		// alignment walks.
+		tracked = a.State.RowsInFile(a.Path)
 	}
 	diff.TrackedCount = len(tracked)
 
@@ -468,16 +467,6 @@ func positionLabel(pos int, table string) string {
 	return "#" + strconv.Itoa(pos) + " " + table
 }
 
-// sortByInsertionOrder copies rows into ascending insertion order.
-// GetTrackedRows returns them descending, for deletion.
-func sortByInsertionOrder(rows []domain.TrackedRow) []domain.TrackedRow {
-	ordered := make([]domain.TrackedRow, len(rows))
-	copy(ordered, rows)
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].InsertionOrder < ordered[j].InsertionOrder
-	})
-	return ordered
-}
 
 // CountEntities returns the number of entities in a graph, children included.
 // The count is order-independent, so callers that only need a size do not have

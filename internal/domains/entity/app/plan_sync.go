@@ -91,6 +91,10 @@ func (p *SyncPlan) HasChanges() bool {
 // nothing.
 type PlanSyncAction struct {
 	DB DBAdapter
+	// State is what joka last applied, loaded once by the caller and shared
+	// with the apply, so the plan cannot describe a database the apply does not
+	// then act on.
+	State *domain.State
 	// Declared is every file in the set, in load order.
 	Declared []*domain.EntityFile
 	// Dirty names the files that would be written.
@@ -102,16 +106,9 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	plan := &SyncPlan{}
 
-	tracked, err := a.DB.GetAllTrackedRows(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	byRef := make(map[string]domain.TrackedRow, len(tracked))
-	refMap := make(map[string]int64, len(tracked))
-	for _, row := range tracked {
-		byRef[row.RefID] = row
-		refMap[row.RefID] = row.RowPK
+	refMap := make(map[string]int64, len(a.State.Entities))
+	for refID, tracked := range a.State.Entities {
+		refMap[refID] = tracked.PKValue
 	}
 
 	declared := make(map[string]bool)
@@ -130,7 +127,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 		fup := FileUpdatePlan{Path: file.Path}
 
 		for _, e := range entities {
-			row, isTracked := byRef[e.RefID]
+			row, isTracked := a.State.Row(e.RefID)
 
 			if !isTracked {
 				rip, err := a.planInsert(ctx, e, now)
@@ -143,25 +140,25 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 
 			// A table change is refused at apply time; the plan says so rather
 			// than reading a row that does not describe this entity.
-			if row.TableName != e.Table {
+			if row.Table != e.Table {
 				fup.Rows = append(fup.Rows, RowUpdatePlan{
-					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.RowPK,
+					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.PKValue,
 					Changes: []ColumnChange{{
 						Column: "_is",
-						Before: row.TableName,
+						Before: row.Table,
 						After:  e.Table,
 					}},
 				})
 				continue
 			}
 
-			changes, err := ResolveRowChanges(ctx, a.DB, e, row.PKColumn, row.RowPK, refMap, now)
+			changes, err := ResolveRowChanges(ctx, a.DB, e, row.PKColumn, row.PKValue, refMap, now)
 			if err != nil {
 				return nil, fmt.Errorf("%s: previewing %s (_id %s): %w", file.Path, e.Table, e.RefID, err)
 			}
 			if len(changes) > 0 {
 				fup.Rows = append(fup.Rows, RowUpdatePlan{
-					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.RowPK, Changes: changes,
+					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.PKValue, Changes: changes,
 				})
 			}
 		}
@@ -174,7 +171,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 		}
 	}
 
-	for _, row := range tracked {
+	for _, row := range a.State.AllRows() {
 		if !declared[row.RefID] {
 			plan.Undeclared = append(plan.Undeclared, row)
 		}

@@ -22,6 +22,10 @@ type mockDBAdapter struct {
 	updatedRows     []mockUpdateCall
 	currentRows     map[string]map[string]any // key: "table|pkValue" -> column values
 	missingTables   map[string]bool           // tables the mock reports as dropped
+
+	// state is what the actions that have moved off the adapter read. The mock
+	// keeps it alongside the rest so one fixture can set up both sides.
+	state *domain.State
 }
 
 // mockInsertCall records the arguments passed to InsertRow.
@@ -51,6 +55,35 @@ func newMockDBAdapter() *mockDBAdapter {
 		lookupData:   make(map[string]any),
 		entityHashes: make(map[string]string),
 		currentRows:  make(map[string]map[string]any),
+		state:        domain.NewState(),
+	}
+}
+
+// track records a synced file and the rows tracked against it, in both the
+// state the actions read and the row list the adapter answers from, so a
+// fixture cannot set up one and forget the other. It says nothing about whether
+// those rows are still in the database.
+func (m *mockDBAdapter) track(path string, rows ...domain.TrackedRow) {
+	m.synced[path] = true
+	m.entityHashes[path] = "hash"
+	m.state.TrackFile(path, "hash")
+
+	for _, r := range rows {
+		r.EntityFile = path
+		m.entityRows = append(m.entityRows, r)
+
+		if r.RefID == "" {
+			m.state.Unkeyed = append(m.state.Unkeyed, r)
+			continue
+		}
+
+		m.state.Track(r.RefID, domain.EntityState{
+			Table:    r.TableName,
+			PKColumn: r.PKColumn,
+			PKValue:  r.RowPK,
+			File:     path,
+			Order:    r.InsertionOrder,
+		})
 	}
 }
 

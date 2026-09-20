@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 )
@@ -19,7 +18,10 @@ import (
 // with either — it deletes and re-inserts, which needs a file, and on the first
 // case would re-create rows that were removed deliberately.
 type ForgetEntityAction struct {
-	DB       DBAdapter
+	DB DBAdapter
+	// State is what joka last applied. Plan reads it rather than the database,
+	// so what the preview shows and what Execute removes come from one value.
+	State    *domain.State
 	FilePath string
 	// Force allows forgetting rows that are still in the database. Without it
 	// Execute refuses, because dropping the tracking for a live row leaves a
@@ -53,26 +55,13 @@ type ForgetRow struct {
 // Plan reads what forgetting the file would remove. It writes nothing, so a
 // caller can show it before asking for confirmation.
 func (a ForgetEntityAction) Plan(ctx context.Context) (*ForgetPlan, error) {
-	synced, err := a.DB.IsEntitySynced(ctx, a.FilePath)
-	if err != nil {
-		return nil, err
-	}
-	if !synced {
+	if _, synced := a.State.FileHash(a.FilePath); !synced {
 		return nil, fmt.Errorf("%w: %s", domain.ErrEntityNotSynced, a.FilePath)
 	}
 
-	tracked, err := a.DB.GetTrackedRows(ctx, a.FilePath)
-	if err != nil {
-		return nil, err
-	}
-
-	// GetTrackedRows returns reverse insertion order (for deletion); sort
-	// ascending so the plan reads in the order the rows were created.
-	ordered := make([]domain.TrackedRow, len(tracked))
-	copy(ordered, tracked)
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].InsertionOrder < ordered[j].InsertionOrder
-	})
+	// RowsInFile is in the order the rows were created, which is how the plan
+	// reads even though deletion runs the other way.
+	ordered := a.State.RowsInFile(a.FilePath)
 
 	plan := &ForgetPlan{FilePath: a.FilePath, Rows: make([]ForgetRow, 0, len(ordered))}
 
@@ -94,6 +83,7 @@ func (a ForgetEntityAction) Plan(ctx context.Context) (*ForgetPlan, error) {
 
 		exists, cached := tableExists[row.TableName]
 		if !cached {
+			var err error
 			exists, err = a.DB.TableExists(ctx, row.TableName)
 			if err != nil {
 				return nil, err

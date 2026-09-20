@@ -19,13 +19,22 @@ import (
 func buildAgainst(t *testing.T, db *sql.DB, in status.Inputs) status.Report {
 	t.Helper()
 
+	ctx := context.Background()
+
 	in.Driver = "postgres"
 	in.Migration = migrationinfra.NewPostgresDBAdapter(db)
-	in.Entity = entityinfra.NewPostgresDBAdapter(db)
 	in.Lock = lockinfra.NewPostgresLockAdapter(db)
 	in.Probe = status.NewProbe(db)
 
-	report, err := status.Build(context.Background(), in)
+	// Loading the state is part of what has to stay read-only, so it runs here
+	// rather than being faked — TestStatusIsReadOnly covers this path too.
+	entityState, err := entityinfra.NewPostgresStateBackend(db).Load(ctx)
+	if err != nil {
+		t.Fatalf("loading entity state: %v", err)
+	}
+	in.EntityState = entityState
+
+	report, err := status.Build(ctx, in)
 	if err != nil {
 		t.Fatalf("building the report: %v", err)
 	}

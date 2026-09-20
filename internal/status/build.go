@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	entitydomain "github.com/apsdsm/joka/internal/domains/entity/domain"
 	lockdomain "github.com/apsdsm/joka/internal/domains/lock/domain"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/apsdsm/joka/internal/meta"
@@ -30,9 +31,13 @@ type Inputs struct {
 	Tables        []templateinfra.TableConfig
 
 	Migration MigrationReader
-	Entity    EntityReader
 	Lock      LockReader
 	Probe     Probe
+
+	// EntityState is what joka last applied, loaded by the caller. A database
+	// with no tracking tables loads as an empty state, which is why the
+	// missing-table findings still come from Probe rather than from here.
+	EntityState *entitydomain.State
 
 	// Conn is used for the reads that are not behind a domain adapter — the
 	// joka_meta marker. Optional: a nil connection reports no marker.

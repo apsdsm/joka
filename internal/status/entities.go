@@ -2,7 +2,6 @@ package status
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"sort"
 
@@ -10,13 +9,6 @@ import (
 	entitydomain "github.com/apsdsm/joka/internal/domains/entity/domain"
 	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 )
-
-// EntityReader is the subset of the entity domain's DBAdapter that the report
-// needs. It is satisfied by that adapter as-is.
-type EntityReader interface {
-	GetAllSyncedEntities(ctx context.Context) (map[string]string, error)
-	GetTrackedRows(ctx context.Context, entityFile string) ([]entitydomain.TrackedRow, error)
-}
 
 // buildEntities reports every entity file across all three planes.
 //
@@ -28,6 +20,8 @@ type EntityReader interface {
 func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 	out := Entities{Dir: in.EntitiesDir}
 
+	// The state loads as empty whether the tracking tables are absent or merely
+	// empty, so the missing-table finding still comes from a direct probe.
 	hasTracking, err := in.Probe.TableExists(ctx, "joka_entities")
 	if err != nil {
 		return out, err
@@ -36,17 +30,9 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 		out.Skipped = "joka_entities does not exist — no entity file has been synced yet"
 	}
 
-	var synced map[string]string
-	if hasTracking {
-		synced, err = in.Entity.GetAllSyncedEntities(ctx)
-		if err != nil {
-			return out, fmt.Errorf("reading tracked entity files: %w", err)
-		}
-	}
-
-	hasRowTracking, err := in.Probe.TableExists(ctx, "joka_entity_rows")
-	if err != nil {
-		return out, err
+	state := in.EntityState
+	if state == nil {
+		state = entitydomain.NewState()
 	}
 
 	paths, err := entityinfra.DiscoverEntityFiles(in.EntitiesDir)
@@ -79,11 +65,11 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 			file.ParseError = err.Error()
 		}
 
-		dbHash, tracked := synced[rel]
+		stored, tracked := state.FileHash(rel)
 
 		// The comparison is sync's own, so the report cannot disagree with what
 		// a sync would consider modified.
-		status := entityapp.FileStatusFor(tracked, dbHash, hash)
+		status := entityapp.FileStatusFor(tracked, stored, hash)
 		file.Status = string(status)
 
 		switch status {
@@ -106,13 +92,7 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 			parsedFiles[rel] = parsed
 		}
 
-		var trackedRows []entitydomain.TrackedRow
-		if tracked && hasRowTracking {
-			trackedRows, err = in.Entity.GetTrackedRows(ctx, rel)
-			if err != nil {
-				return out, fmt.Errorf("reading tracked rows for %s: %w", rel, err)
-			}
-		}
+		trackedRows := state.RowsInFile(rel)
 		file.Tracked = len(trackedRows)
 
 		if err := countLiveRows(ctx, in, tableExists, trackedRows, &file); err != nil {
@@ -127,9 +107,9 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 		out.Files = append(out.Files, file)
 	}
 
-	// Tracked files with nothing on disk. Nothing but `entity status` reports
-	// these today and no command clears them.
-	for path := range synced {
+	// Tracked files with nothing on disk. `entity forget --orphans` is what
+	// clears them.
+	for path := range state.Files {
 		if seen[path] {
 			continue
 		}
@@ -141,13 +121,7 @@ func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 		}
 		out.Counts.Orphaned++
 
-		var trackedRows []entitydomain.TrackedRow
-		if hasRowTracking {
-			trackedRows, err = in.Entity.GetTrackedRows(ctx, path)
-			if err != nil {
-				return out, fmt.Errorf("reading tracked rows for %s: %w", path, err)
-			}
-		}
+		trackedRows := state.RowsInFile(path)
 		file.Tracked = len(trackedRows)
 
 		if err := countLiveRows(ctx, in, tableExists, trackedRows, &file); err != nil {

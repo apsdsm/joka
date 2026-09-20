@@ -21,13 +21,12 @@ func row(table, refID string, pk int64, order int) domain.TrackedRow {
 }
 
 // diffFixture seeds the mock with a synced file and its tracked rows, and
-// marks every row live.
+// marks every row live. Use mockDBAdapter.track directly for a row that should
+// read as tracked but gone.
 func diffFixture(db *mockDBAdapter, path string, rows ...domain.TrackedRow) {
-	db.synced[path] = true
-	db.entityHashes[path] = "hash"
+	db.track(path, rows...)
+
 	for _, r := range rows {
-		r.EntityFile = path
-		db.entityRows = append(db.entityRows, r)
 		db.currentRows[r.TableName+"|"+itoa(r.RowPK)] = map[string]any{}
 	}
 }
@@ -62,7 +61,7 @@ func TestDiffEntityAction(t *testing.T) {
 			row("profiles", "admin_profile", 2, 1),
 		)
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("users", "admin", nil, entity("profiles", "admin_profile", nil)),
 		}}.Execute(ctx)
 		if err != nil {
@@ -89,7 +88,7 @@ func TestDiffEntityAction(t *testing.T) {
 			row("fields", "third", 2, 1),
 		)
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("fields", "first", nil),
 			entity("fields", "second", nil),
 			entity("fields", "third", nil),
@@ -123,7 +122,7 @@ func TestDiffEntityAction(t *testing.T) {
 			row("fields", "second", 2, 1),
 		)
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("fields", "first", nil),
 		}}.Execute(ctx)
 		if err != nil {
@@ -142,7 +141,7 @@ func TestDiffEntityAction(t *testing.T) {
 		db := newMockDBAdapter()
 		diffFixture(db, "a.yaml", row("fields", "", 1, 0))
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("fields", "", nil),
 		}}.Execute(ctx)
 		if err != nil {
@@ -164,7 +163,7 @@ func TestDiffEntityAction(t *testing.T) {
 		db := newMockDBAdapter()
 		diffFixture(db, "a.yaml", row("profiles", "", 1, 0))
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("users", "", nil),
 		}}.Execute(ctx)
 		if err != nil {
@@ -182,13 +181,13 @@ func TestDiffEntityAction(t *testing.T) {
 
 	t.Run("it reports a tracked row that is no longer in the database", func(t *testing.T) {
 		db := newMockDBAdapter()
-		db.synced["a.yaml"] = true
-		db.entityRows = append(db.entityRows, domain.TrackedRow{
-			EntityFile: "a.yaml", TableName: "users", RefID: "admin", RowPK: 1, PKColumn: "id",
+		// Tracked but never marked live: currentRows is left empty, so the row
+		// reads as gone.
+		db.track("a.yaml", domain.TrackedRow{
+			TableName: "users", RefID: "admin", RowPK: 1, PKColumn: "id",
 		})
-		// currentRows is left empty, so the row reads as gone.
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("users", "admin", nil),
 		}}.Execute(ctx)
 		if err != nil {
@@ -206,12 +205,11 @@ func TestDiffEntityAction(t *testing.T) {
 	t.Run("it marks a row whose table was dropped", func(t *testing.T) {
 		db := newMockDBAdapter()
 		db.missingTables = map[string]bool{"slots": true}
-		db.synced["a.yaml"] = true
-		db.entityRows = append(db.entityRows, domain.TrackedRow{
-			EntityFile: "a.yaml", TableName: "slots", RowPK: 5, PKColumn: "id",
+		db.track("a.yaml", domain.TrackedRow{
+			TableName: "slots", RowPK: 5, PKColumn: "id",
 		})
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: false, SkipValues: true}.Execute(ctx)
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: false, SkipValues: true}.Execute(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -224,7 +222,7 @@ func TestDiffEntityAction(t *testing.T) {
 	t.Run("it treats an untracked file as all inserts", func(t *testing.T) {
 		db := newMockDBAdapter()
 
-		d, err := DiffEntityAction{DB: db, Path: "new.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "new.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("users", "admin", nil),
 			entity("users", "other", nil),
 		}}.Execute(ctx)
@@ -249,7 +247,7 @@ func TestDiffEntityAction(t *testing.T) {
 		db := newMockDBAdapter()
 		diffFixture(db, "gone.yaml", row("users", "admin", 1, 0))
 
-		d, err := DiffEntityAction{DB: db, Path: "gone.yaml", OnDisk: false, SkipValues: true}.Execute(ctx)
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "gone.yaml", OnDisk: false, SkipValues: true}.Execute(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -267,7 +265,7 @@ func TestDiffEntityAction(t *testing.T) {
 		diffFixture(db, "a.yaml", row("fields", "first", 1, 0))
 		db.currentRows["fields|1"] = map[string]any{"label": "old"}
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
 			entity("fields", "first", map[string]any{"label": "new"}),
 		}}.Execute(ctx)
 		if err != nil {
@@ -294,7 +292,7 @@ func TestDiffEntityAction(t *testing.T) {
 		diffFixture(db, "a.yaml", row("fields", "first", 1, 0))
 		db.currentRows["fields|1"] = map[string]any{"label": "old"}
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("fields", "first", map[string]any{"label": "new"}),
 		}}.Execute(ctx)
 		if err != nil {
@@ -311,12 +309,11 @@ func TestDiffEntityAction(t *testing.T) {
 
 	t.Run("it does not compare values on a row that is not in the database", func(t *testing.T) {
 		db := newMockDBAdapter()
-		db.synced["a.yaml"] = true
-		db.entityRows = append(db.entityRows, domain.TrackedRow{
-			EntityFile: "a.yaml", TableName: "fields", RefID: "first", RowPK: 1, PKColumn: "id",
+		db.track("a.yaml", domain.TrackedRow{
+			TableName: "fields", RefID: "first", RowPK: 1, PKColumn: "id",
 		})
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
 			entity("fields", "first", map[string]any{"label": "new"}),
 		}}.Execute(ctx)
 		if err != nil {
@@ -355,7 +352,7 @@ func TestDiffEntityRegeneratedColumns(t *testing.T) {
 		db.currentRows["fields|1"] = map[string]any{"created_at": "2020-01-01 00:00:00", "label": "A"}
 		db.currentRows["fields|2"] = map[string]any{"created_at": "2020-01-01 00:00:00", "label": "B"}
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
 			entity("fields", "first", map[string]any{"created_at": "{{ now }}", "label": "A"}),
 			entity("fields", "second", map[string]any{"created_at": "{{ now }}", "label": "B"}),
 		}}.Execute(ctx)
@@ -382,7 +379,7 @@ func TestDiffEntityRegeneratedColumns(t *testing.T) {
 		db.currentRows["fields|1"] = map[string]any{"created_at": "x", "secret": "y"}
 		db.currentRows["fields|2"] = map[string]any{"created_at": "x", "secret": "y"}
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
 			entity("fields", "first", map[string]any{"created_at": "{{ now }}", "secret": "{{ argon2id|pw }}"}),
 			entity("fields", "second", map[string]any{"created_at": "{{ now }}", "secret": "{{ argon2id|pw }}"}),
 		}}.Execute(ctx)
@@ -403,7 +400,7 @@ func TestDiffEntityRegeneratedColumns(t *testing.T) {
 		diffFixture(db, "a.yaml", row("fields", "first", 1, 0))
 		db.currentRows["fields|1"] = map[string]any{"created_at": "x", "label": "old"}
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
 			entity("fields", "first", map[string]any{"created_at": "{{ now }}", "label": "new"}),
 		}}.Execute(ctx)
 		if err != nil {
@@ -424,7 +421,7 @@ func TestDiffEntityRegeneratedColumns(t *testing.T) {
 		diffFixture(db, "a.yaml", row("fields", "first", 1, 0))
 		db.currentRows["fields|1"] = map[string]any{"label": `{"en": "Capital", "ja": "資本金"}`}
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, Entities: []domain.Entity{
 			entity("fields", "first", map[string]any{"label": `{"ja":"資本金","en":"Capital"}`}),
 		}}.Execute(ctx)
 		if err != nil {
@@ -449,7 +446,7 @@ func TestDiffEntityDepth(t *testing.T) {
 			row("fields", "g", 4, 3),
 		)
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true, Entities: []domain.Entity{
 			entity("fields", "f", nil,
 				entity("field_versions", "f_v1", nil,
 					entity("notes", "f_note", nil),
@@ -474,7 +471,7 @@ func TestDiffEntityDepth(t *testing.T) {
 		db := newMockDBAdapter()
 		diffFixture(db, "a.yaml", row("fields", "gone", 1, 0))
 
-		d, err := DiffEntityAction{DB: db, Path: "a.yaml", OnDisk: true, SkipValues: true}.Execute(ctx)
+		d, err := DiffEntityAction{DB: db, State: db.state, Path: "a.yaml", OnDisk: true, SkipValues: true}.Execute(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

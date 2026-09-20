@@ -59,8 +59,14 @@ func (r RunEntityDiffCommand) Execute(ctx context.Context) error {
 		onDisk = false
 	}
 
+	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
 	action := app.DiffEntityAction{
 		DB:         dbAdapter,
+		State:      state,
 		Path:       r.FilePath,
 		OnDisk:     onDisk,
 		SkipValues: r.SkipValues,

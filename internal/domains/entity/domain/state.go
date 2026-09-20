@@ -117,6 +117,11 @@ func (s *State) FileHash(path string) (hash string, tracked bool) {
 // RowsInFile returns the rows last declared in one file, in the order they were
 // written. Used where a file is still the unit of work — reimport's deletion
 // order, forget's plan, the diff's alignment.
+//
+// Unkeyed rows for the file are included. They are still that file's rows: a
+// forget has to drop them, a diff has to show them as tracked with no `_id`,
+// and a count of what a file tracks that left them out would be wrong. Only
+// matching on identity skips them, and matching reads Entities directly.
 func (s *State) RowsInFile(path string) []TrackedRow {
 	var out []TrackedRow
 
@@ -124,39 +129,43 @@ func (s *State) RowsInFile(path string) []TrackedRow {
 		if e.File != path {
 			continue
 		}
-		out = append(out, TrackedRow{
-			EntityFile:     e.File,
-			TableName:      e.Table,
-			RowPK:          e.PKValue,
-			PKColumn:       e.PKColumn,
-			RefID:          refID,
-			InsertionOrder: e.Order,
-		})
+		out = append(out, e.row(refID))
+	}
+
+	for _, row := range s.Unkeyed {
+		if row.EntityFile == path {
+			out = append(out, row)
+		}
 	}
 
 	sortTrackedRows(out)
 	return out
 }
 
-// AllRows returns every tracked row, ordered by file and then by position, so
-// two reads of the same state produce the same slice. Unkeyed rows are not
-// included: they have no _id, so nothing that matches on identity can use them.
+// AllRows returns every tracked row, unkeyed ones included, ordered by file and
+// then by position so two reads of the same state produce the same slice.
 func (s *State) AllRows() []TrackedRow {
-	out := make([]TrackedRow, 0, len(s.Entities))
+	out := make([]TrackedRow, 0, len(s.Entities)+len(s.Unkeyed))
 
 	for refID, e := range s.Entities {
-		out = append(out, TrackedRow{
-			EntityFile:     e.File,
-			TableName:      e.Table,
-			RowPK:          e.PKValue,
-			PKColumn:       e.PKColumn,
-			RefID:          refID,
-			InsertionOrder: e.Order,
-		})
+		out = append(out, e.row(refID))
 	}
+	out = append(out, s.Unkeyed...)
 
 	sortTrackedRows(out)
 	return out
+}
+
+// row renders an entry as the flat row shape the file-scoped callers still use.
+func (e EntityState) row(refID string) TrackedRow {
+	return TrackedRow{
+		EntityFile:     e.File,
+		TableName:      e.Table,
+		RowPK:          e.PKValue,
+		PKColumn:       e.PKColumn,
+		RefID:          refID,
+		InsertionOrder: e.Order,
+	}
 }
 
 // sortTrackedRows orders by file, then position, then _id. The last key is

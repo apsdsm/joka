@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,11 +16,10 @@ func TestEntityStatusAction(t *testing.T) {
 
 		hash, _ := HashFileContent(filepath.Join(dir, "a.yaml"))
 
-		db := newMockDBAdapter()
-		db.entityHashes["a.yaml"] = hash
-		db.synced["a.yaml"] = true
+		state := domain.NewState()
+		state.TrackFile("a.yaml", hash)
 
-		result, err := (EntityStatusAction{DB: db, EntitiesDir: dir, Files: []string{"a.yaml"}}).Execute(context.Background())
+		result, err := (EntityStatusAction{State: state, EntitiesDir: dir, Files: []string{"a.yaml"}}).Execute()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -39,11 +37,10 @@ func TestEntityStatusAction(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "a.yaml"), []byte("modified content"), 0644)
 
-		db := newMockDBAdapter()
-		db.entityHashes["a.yaml"] = "old_hash_that_wont_match"
-		db.synced["a.yaml"] = true
+		state := domain.NewState()
+		state.TrackFile("a.yaml", "old_hash_that_wont_match")
 
-		result, err := (EntityStatusAction{DB: db, EntitiesDir: dir, Files: []string{"a.yaml"}}).Execute(context.Background())
+		result, err := (EntityStatusAction{State: state, EntitiesDir: dir, Files: []string{"a.yaml"}}).Execute()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -61,9 +58,9 @@ func TestEntityStatusAction(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "new.yaml"), []byte("new content"), 0644)
 
-		db := newMockDBAdapter()
+		state := domain.NewState()
 
-		result, err := (EntityStatusAction{DB: db, EntitiesDir: dir, Files: []string{"new.yaml"}}).Execute(context.Background())
+		result, err := (EntityStatusAction{State: state, EntitiesDir: dir, Files: []string{"new.yaml"}}).Execute()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -80,11 +77,10 @@ func TestEntityStatusAction(t *testing.T) {
 	t.Run("it reports orphaned for tracked files missing from disk", func(t *testing.T) {
 		dir := t.TempDir()
 
-		db := newMockDBAdapter()
-		db.entityHashes["deleted.yaml"] = "somehash"
-		db.synced["deleted.yaml"] = true
+		state := domain.NewState()
+		state.TrackFile("deleted.yaml", "somehash")
 
-		result, err := (EntityStatusAction{DB: db, EntitiesDir: dir, Files: []string{}}).Execute(context.Background())
+		result, err := (EntityStatusAction{State: state, EntitiesDir: dir, Files: []string{}}).Execute()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -102,11 +98,10 @@ func TestEntityStatusAction(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "legacy.yaml"), []byte("content"), 0644)
 
-		db := newMockDBAdapter()
-		db.entityHashes["legacy.yaml"] = ""
-		db.synced["legacy.yaml"] = true
+		state := domain.NewState()
+		state.TrackFile("legacy.yaml", "")
 
-		result, err := (EntityStatusAction{DB: db, EntitiesDir: dir, Files: []string{"legacy.yaml"}}).Execute(context.Background())
+		result, err := (EntityStatusAction{State: state, EntitiesDir: dir, Files: []string{"legacy.yaml"}}).Execute()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -130,19 +125,16 @@ func TestEntityStatusAction(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "modified.yaml"), []byte("changed"), 0644)
 		os.WriteFile(filepath.Join(dir, "new.yaml"), []byte("brand new"), 0644)
 
-		db := newMockDBAdapter()
-		db.entityHashes["synced.yaml"] = syncedHash
-		db.synced["synced.yaml"] = true
-		db.entityHashes["modified.yaml"] = "stale_hash"
-		db.synced["modified.yaml"] = true
-		db.entityHashes["orphaned.yaml"] = "dead_hash"
-		db.synced["orphaned.yaml"] = true
+		state := domain.NewState()
+		state.TrackFile("synced.yaml", syncedHash)
+		state.TrackFile("modified.yaml", "stale_hash")
+		state.TrackFile("orphaned.yaml", "dead_hash")
 
 		result, err := (EntityStatusAction{
-			DB:          db,
+			State:       state,
 			EntitiesDir: dir,
 			Files:       []string{"synced.yaml", "modified.yaml", "new.yaml"},
-		}).Execute(context.Background())
+		}).Execute()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

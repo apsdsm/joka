@@ -56,11 +56,16 @@ func classify(t *testing.T, db *sql.DB, entitiesDir, rel string) domain.FileStat
 	t.Helper()
 	ctx := context.Background()
 
+	state, err := infra.NewPostgresStateBackend(db).Load(ctx)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+
 	results, err := (app.EntityStatusAction{
-		DB:          infra.NewPostgresDBAdapter(db),
+		State:       state,
 		EntitiesDir: entitiesDir,
 		Files:       []string{rel},
-	}).Execute(ctx)
+	}).Execute()
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}

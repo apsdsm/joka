@@ -80,10 +80,9 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	// One read of the tracking table rather than two queries per file. The
-	// status of any one file depends on the whole set anyway, because an _id
-	// can be claimed elsewhere.
-	synced, err := dbAdapter.GetAllSyncedEntities(ctx)
+	// One read of the state for the whole run. The status of any one file
+	// depends on the whole set anyway, because an _id can be claimed elsewhere.
+	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
 	if err != nil {
 		return fail(err)
 	}
@@ -112,11 +111,11 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		file.ContentHash = hash
 		all = append(all, file)
 
-		dbHash, tracked := synced[rel]
+		stored, tracked := state.FileHash(rel)
 
 		// --force re-applies a tracked file whatever its stored hash says. It
 		// does not make an untracked file anything other than new.
-		switch app.FileStatusFor(tracked, dbHash, hash) {
+		switch app.FileStatusFor(tracked, stored, hash) {
 		case domain.StatusNew:
 			pending = append(pending, file)
 		case domain.StatusModified:
@@ -148,6 +147,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// unchanged, and the entities it declared are now declared nowhere.
 	plan, err := app.PlanSyncAction{
 		DB:       dbAdapter,
+		State:    state,
 		Declared: all,
 		Dirty:    dirty,
 	}.Execute(ctx)
