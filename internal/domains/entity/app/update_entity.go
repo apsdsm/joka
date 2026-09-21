@@ -62,15 +62,6 @@ func (a UpdateEntityAction) Execute(ctx context.Context) (*UpdateEntityResult, e
 		return nil, err
 	}
 
-	if err := ValidateRefIDs(file.Entities); err != nil {
-		return nil, err
-	}
-
-	// Require _id on every entity so we can determine skip/insert.
-	if err := validateAllHaveRefID(file.Entities); err != nil {
-		return nil, err
-	}
-
 	// Insert the graph with skip support.
 	refMap := make(map[string]int64)
 
@@ -145,17 +136,3 @@ func (a UpdateEntityAction) Execute(ctx context.Context) (*UpdateEntityResult, e
 	return result, nil
 }
 
-// validateAllHaveRefID checks that every entity in the tree has a non-empty
-// _id. This is required for entity update so we can determine whether each
-// entity is already tracked or new.
-func validateAllHaveRefID(entities []domain.Entity) error {
-	for _, e := range entities {
-		if e.RefID == "" {
-			return fmt.Errorf("%w: table %q", domain.ErrEntityMissingRefID, e.Table)
-		}
-		if err := validateAllHaveRefID(e.Children); err != nil {
-			return err
-		}
-	}
-	return nil
-}

@@ -109,34 +109,6 @@ func TestUpdateEntityAction(t *testing.T) {
 		}
 	})
 
-	t.Run("it returns ErrEntityMissingRefID when entity has no _id", func(t *testing.T) {
-		dir := t.TempDir()
-		yamlContent := `entities:
-  - _is: users
-    name: Admin
-`
-		fullPath := filepath.Join(dir, "no_id.yaml")
-		os.WriteFile(fullPath, []byte(yamlContent), 0644)
-
-		db := newMockDBAdapter()
-		db.trackHash("no_id.yaml", "hash")
-
-		_, err := (UpdateEntityAction{
-			DB:          db,
-			Backend:     db.backend(),
-			FilePath:    "no_id.yaml",
-			FullPath:    fullPath,
-			ContentHash: "hash",
-		}).Execute(context.Background())
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-
-		if !errors.Is(err, domain.ErrEntityMissingRefID) {
-			t.Errorf("expected ErrEntityMissingRefID, got: %v", err)
-		}
-	})
-
 	t.Run("it tracks new rows with correct insertion order continuing from existing", func(t *testing.T) {
 		dir := t.TempDir()
 		yamlContent := `entities:
@@ -259,38 +231,6 @@ func TestUpdateEntityAction(t *testing.T) {
 		}
 	})
 
-	t.Run("it returns ErrDuplicateRefID when YAML has duplicate _id handles", func(t *testing.T) {
-		dir := t.TempDir()
-		yamlContent := `entities:
-  - _is: users
-    _id: dupe
-    name: Alice
-  - _is: users
-    _id: dupe
-    name: Bob
-`
-		fullPath := filepath.Join(dir, "dup.yaml")
-		os.WriteFile(fullPath, []byte(yamlContent), 0644)
-
-		db := newMockDBAdapter()
-		db.trackHash("dup.yaml", "hash")
-
-		_, err := (UpdateEntityAction{
-			DB:          db,
-			Backend:     db.backend(),
-			FilePath:    "dup.yaml",
-			FullPath:    fullPath,
-			ContentHash: "hash",
-		}).Execute(context.Background())
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-
-		if !errors.Is(err, domain.ErrDuplicateRefID) {
-			t.Errorf("expected ErrDuplicateRefID, got: %v", err)
-		}
-	})
-
 	t.Run("it returns parse error for invalid YAML", func(t *testing.T) {
 		dir := t.TempDir()
 		fullPath := filepath.Join(dir, "bad.yaml")
@@ -312,38 +252,6 @@ func TestUpdateEntityAction(t *testing.T) {
 
 		if !errors.Is(err, domain.ErrEntityParseFailed) {
 			t.Errorf("expected ErrEntityParseFailed, got: %v", err)
-		}
-	})
-
-	t.Run("it returns ErrEntityMissingRefID when nested child has no _id", func(t *testing.T) {
-		dir := t.TempDir()
-		yamlContent := `entities:
-  - _is: users
-    _id: admin
-    name: Admin
-    _has:
-      - _is: api_keys
-        key: "no-ref-id"
-`
-		fullPath := filepath.Join(dir, "child_no_id.yaml")
-		os.WriteFile(fullPath, []byte(yamlContent), 0644)
-
-		db := newMockDBAdapter()
-		db.trackHash("child_no_id.yaml", "hash")
-
-		_, err := (UpdateEntityAction{
-			DB:          db,
-			Backend:     db.backend(),
-			FilePath:    "child_no_id.yaml",
-			FullPath:    fullPath,
-			ContentHash: "hash",
-		}).Execute(context.Background())
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-
-		if !errors.Is(err, domain.ErrEntityMissingRefID) {
-			t.Errorf("expected ErrEntityMissingRefID, got: %v", err)
 		}
 	})
 

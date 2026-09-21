@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/apsdsm/joka/cmd/shared"
@@ -55,8 +54,18 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 
 	fullPath := filepath.Join(r.EntitiesDir, r.FilePath)
 
-	if _, err := os.Stat(fullPath); err != nil {
-		err = fmt.Errorf("entity file not found: %s", fullPath)
+	// The whole set is read and validated, not just the named file. An _id is
+	// unique across the set, and an entity can be tracked against a file other
+	// than the one declaring it — reading one file cannot see either.
+	set, err := loadSet(r.EntitiesDir)
+	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
+	}
+
+	if _, err := declaredIn(set, r.FilePath); err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
 		}

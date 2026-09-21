@@ -19,10 +19,6 @@ var (
 	// matches zero rows in the target table.
 	ErrLookupNotFound = errors.New("lookup returned no rows")
 
-	// ErrDuplicateRefID is returned when two entities in the same file
-	// share the same _id handle.
-	ErrDuplicateRefID = errors.New("duplicate _id in entity file")
-
 	// ErrEntityNotSynced is returned when reimport is requested for a file
 	// that has never been synced.
 	ErrEntityNotSynced = errors.New("entity file has not been synced")
@@ -30,11 +26,6 @@ var (
 	// ErrForeignKeyConflict is returned when a DELETE fails because another
 	// row references it via a foreign key constraint.
 	ErrForeignKeyConflict = errors.New("foreign key constraint prevented deletion")
-
-	// ErrEntityMissingRefID is returned when entity update encounters an
-	// entity without an _id handle, which is required to determine whether
-	// it has already been tracked.
-	ErrEntityMissingRefID = errors.New("all entities must have _id for entity update")
 
 	// ErrRowsStillLive is returned when entity forget is asked to drop the
 	// tracking for a file whose rows are still in the database. Forgetting

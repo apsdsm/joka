@@ -51,10 +51,6 @@ func (a ReimportEntityAction) Execute(ctx context.Context) error {
 		return err
 	}
 
-	if err := ValidateRefIDs(file.Entities); err != nil {
-		return err
-	}
-
 	// Re-insert the entity graph.
 	refMap := make(map[string]int64)
 	action := &InsertGraphAction{

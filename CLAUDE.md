@@ -494,6 +494,13 @@ far and the ones still open are recorded here.
 has never been validated usually has several, and fixing them one error message at a time is
 miserable. `EntitySetError` renders them into one error wrapping `domain.ErrEntitySetInvalid`.
 
+It is the only validator. `ValidateRefIDs` (per file, duplicates) and `validateAllHaveRefID` (per
+file, missing) checked the same two invariants over one file at a time and are gone, along with
+`ErrDuplicateRefID` and `ErrEntityMissingRefID`. Every command that writes loads the whole set
+through `cmd/entity.loadSet` and validates it — `reimport` and `update` read one file each until
+now, which is how they could write a set sync would refuse and, since the state document keys on
+`_id`, quietly take over an `_id` tracked somewhere else.
+
 ### Where it is enforced
 
 - **`entity sync`** validates the whole set before writing anything, and refuses.

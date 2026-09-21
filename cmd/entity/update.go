@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/apsdsm/joka/cmd/shared"
@@ -56,8 +55,18 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 
 	fullPath := filepath.Join(r.EntitiesDir, r.FilePath)
 
-	if _, err := os.Stat(fullPath); err != nil {
-		err = fmt.Errorf("entity file not found: %s", fullPath)
+	// The whole set is read and validated, not just the named file. An _id is
+	// unique across the set, and an entity can be tracked against a file other
+	// than the one declaring it — reading one file cannot see either.
+	set, err := loadSet(r.EntitiesDir)
+	if err != nil {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
+	}
+
+	if _, err := declaredIn(set, r.FilePath); err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
 		}
@@ -102,13 +111,6 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	if err := app.ValidateRefIDs(file.Entities); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
-	}
-
 	// Count new vs skipped for preview.
 	type previewEntry struct {
 		table string
@@ -120,9 +122,6 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 	var walkPreview func(entities []domain.Entity) error
 	walkPreview = func(entities []domain.Entity) error {
 		for _, e := range entities {
-			if e.RefID == "" {
-				return fmt.Errorf("all entities must have _id for entity update: table %q", e.Table)
-			}
 			if pk, ok := trackedRefIDs[e.RefID]; ok {
 				preview = append(preview, previewEntry{
 					table: e.Table,
