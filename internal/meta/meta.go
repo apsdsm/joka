@@ -39,7 +39,11 @@ import (
 //	    position), identifies a tracked row; entity_file is metadata recording
 //	    where the entity was last declared. internal/upgrade adds the index
 //	    after checking the rows allow it.
-const TrackingVersion = 2
+//	3 — entity tracking is one jsonb document in joka_state, keyed 'entities'.
+//	    joka_entities and joka_entity_rows are dropped. An older joka reading
+//	    this database would find no tracking at all and re-insert every seeded
+//	    row, which is what makes the bump mandatory rather than additive.
+const TrackingVersion = 3
 
 // PreMarkerVersion is the version of a database that has tracking tables but no
 // joka_meta. Such a database was written before the marker existed, so it is at

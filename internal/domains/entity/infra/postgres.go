@@ -30,26 +30,12 @@ func NewPostgresTxDBAdapter(tx *sql.Tx, conn *sql.DB) *PostgresDBAdapter {
 	return &PostgresDBAdapter{db: tx, conn: conn}
 }
 
-// EnsureTables creates every table the entity commands read or write, and
-// backfills the content_hash column on a joka_entities that predates it.
+// EnsureTrackingTable creates the joka_entities table if it does not already
+// exist.
 //
-// Every mutating entity command needs the same three, and calling them
-// separately meant five copies of the same preamble with five copies of the
-// JSON-versus-text error handling around each one.
-func (p *PostgresDBAdapter) EnsureTables(ctx context.Context) error {
-	if err := p.EnsureTrackingTable(ctx); err != nil {
-		return fmt.Errorf("ensuring the entity tracking table: %w", err)
-	}
-	if err := p.EnsureRowTrackingTable(ctx); err != nil {
-		return fmt.Errorf("ensuring the entity row tracking table: %w", err)
-	}
-	if err := p.EnsureContentHashColumn(ctx); err != nil {
-		return fmt.Errorf("ensuring the content_hash column: %w", err)
-	}
-	return nil
-}
-
-// EnsureTrackingTable creates the joka_entities table if it does not already exist.
+// Legacy: tracking version 3 moved entity tracking into the joka_state
+// document and dropped this table. Nothing creates it any more — it is kept so
+// the upgrade's tests can build a database at the version the upgrade reads.
 func (p *PostgresDBAdapter) EnsureTrackingTable(ctx context.Context) error {
 	exists, err := jokadb.TableExists(ctx, p.conn, "joka_entities")
 	if err != nil {

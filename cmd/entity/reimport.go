@@ -39,9 +39,8 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 	}
 	defer lockAdapter.Release(ctx) //nolint:errcheck
 
-	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	if err := dbAdapter.EnsureTables(ctx); err != nil {
+	if err := infra.NewPostgresStateBackend(r.DB).EnsureStateTable(ctx); err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
 		}

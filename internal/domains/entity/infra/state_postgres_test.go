@@ -16,9 +16,8 @@ import (
 // interface the app layer declares.
 var _ app.StateBackend = (*infra.PostgresStateBackend)(nil)
 
-// freshStateDB returns a database with the entity tracking tables present and
-// empty, and registers their cleanup.
-func freshStateDB(t *testing.T) *sql.DB {
+// bareDB returns a database with no joka_* tables at all.
+func bareDB(t *testing.T) *sql.DB {
 	t.Helper()
 
 	db, err := testlib.GetTestPostgresDB()
@@ -26,22 +25,52 @@ func freshStateDB(t *testing.T) *sql.DB {
 		t.Fatalf("getting test db: %v", err)
 	}
 
-	ctx := context.Background()
-	if err := infra.NewPostgresDBAdapter(db).EnsureTables(ctx); err != nil {
-		t.Fatalf("EnsureTables: %v", err)
-	}
-
-	if _, err := db.ExecContext(ctx, `DELETE FROM joka_entity_rows`); err != nil {
-		t.Fatalf("clearing joka_entity_rows: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM joka_entities`); err != nil {
-		t.Fatalf("clearing joka_entities: %v", err)
+	for _, table := range []string{"joka_state", "joka_entity_rows", "joka_entities"} {
+		testlib.DropTablePostgres(t, db, table)
 	}
 
 	t.Cleanup(func() {
-		testlib.DropTablePostgres(t, db, "joka_entity_rows")
-		testlib.DropTablePostgres(t, db, "joka_entities")
+		for _, table := range []string{"joka_state", "joka_entity_rows", "joka_entities"} {
+			testlib.DropTablePostgres(t, db, table)
+		}
 	})
+
+	return db
+}
+
+// freshStateDB returns a database with joka_state present and empty.
+func freshStateDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db := bareDB(t)
+
+	if err := infra.NewPostgresStateBackend(db).EnsureStateTable(context.Background()); err != nil {
+		t.Fatalf("EnsureStateTable: %v", err)
+	}
+
+	return db
+}
+
+// legacyStateDB returns a database in the shape tracking versions 1 and 2 used:
+// the two decomposed tables, no joka_state. This is what a database that no
+// mutating command has touched since the version 3 upgrade shipped looks like.
+func legacyStateDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db := bareDB(t)
+
+	ctx := context.Background()
+	adapter := infra.NewPostgresDBAdapter(db)
+
+	if err := adapter.EnsureTrackingTable(ctx); err != nil {
+		t.Fatalf("EnsureTrackingTable: %v", err)
+	}
+	if err := adapter.EnsureContentHashColumn(ctx); err != nil {
+		t.Fatalf("EnsureContentHashColumn: %v", err)
+	}
+	if err := adapter.EnsureRowTrackingTable(ctx); err != nil {
+		t.Fatalf("EnsureRowTrackingTable: %v", err)
+	}
 
 	return db
 }
@@ -53,15 +82,31 @@ func TestPostgresStateBackendLoad(t *testing.T) {
 
 	ctx := context.Background()
 
-	t.Run("a database with no tracking tables loads as empty, not an error", func(t *testing.T) {
-		db, err := testlib.GetTestPostgresDB()
+	t.Run("a database with nothing to read loads as empty, not an error", func(t *testing.T) {
+		db := bareDB(t)
+
+		state, err := infra.NewPostgresStateBackend(db).Load(ctx)
 		if err != nil {
-			t.Fatalf("getting test db: %v", err)
+			t.Fatalf("Load: %v", err)
 		}
-		// Deliberately no EnsureTables: a read must not create what it reads,
-		// which is what makes a missing tracking table reportable.
-		testlib.DropTablePostgres(t, db, "joka_entity_rows")
-		testlib.DropTablePostgres(t, db, "joka_entities")
+		if len(state.Files) != 0 || len(state.Entities) != 0 {
+			t.Errorf("expected an empty state, got %d files and %d entities", len(state.Files), len(state.Entities))
+		}
+
+		// A read must not create what it reads, which is what makes a missing
+		// tracking table reportable.
+		var exists bool
+		if err := db.QueryRowContext(ctx,
+			`SELECT to_regclass('joka_state') IS NOT NULL`).Scan(&exists); err != nil {
+			t.Fatalf("checking for joka_state: %v", err)
+		}
+		if exists {
+			t.Error("expected the read to create nothing")
+		}
+	})
+
+	t.Run("a state table with no document yet loads as empty", func(t *testing.T) {
+		db := freshStateDB(t)
 
 		state, err := infra.NewPostgresStateBackend(db).Load(ctx)
 		if err != nil {
@@ -72,8 +117,68 @@ func TestPostgresStateBackendLoad(t *testing.T) {
 		}
 	})
 
-	t.Run("it carries a row with no _id rather than dropping it", func(t *testing.T) {
-		db := freshStateDB(t)
+	t.Run("it reads the decomposed layout when there is no document", func(t *testing.T) {
+		db := legacyStateDB(t)
+
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO joka_entities (entity_file, content_hash) VALUES ('a.yaml', 'hash-a')`); err != nil {
+			t.Fatalf("seeding joka_entities: %v", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
+			 VALUES ('a.yaml', 'users', 7, 'id', 'admin', 0)`); err != nil {
+			t.Fatalf("seeding joka_entity_rows: %v", err)
+		}
+
+		state, err := infra.NewPostgresStateBackend(db).Load(ctx)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+
+		if hash, tracked := state.FileHash("a.yaml"); !tracked || hash != "hash-a" {
+			t.Errorf("expected a.yaml at hash-a, got tracked=%v hash=%q", tracked, hash)
+		}
+		admin, ok := state.Row("admin")
+		if !ok || admin.PKValue != 7 || admin.Table != "users" {
+			t.Errorf("expected the tracked row read from the old tables, got %+v ok=%v", admin, ok)
+		}
+	})
+
+	t.Run("the document wins when both layouts are present", func(t *testing.T) {
+		// A database mid-upgrade, or one whose old tables a DROP did not reach.
+		// The document is what the current joka wrote, so it is the answer.
+		db := legacyStateDB(t)
+
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO joka_entities (entity_file, content_hash) VALUES ('stale.yaml', 'stale')`); err != nil {
+			t.Fatalf("seeding joka_entities: %v", err)
+		}
+
+		backend := infra.NewPostgresStateBackend(db)
+		if err := backend.EnsureStateTable(ctx); err != nil {
+			t.Fatalf("EnsureStateTable: %v", err)
+		}
+
+		want := domain.NewState()
+		want.TrackFile("current.yaml", "current")
+		if err := backend.Save(ctx, want); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+
+		got, err := backend.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if _, tracked := got.FileHash("stale.yaml"); tracked {
+			t.Error("expected the old tables ignored once a document exists")
+		}
+		if _, tracked := got.FileHash("current.yaml"); !tracked {
+			t.Error("expected the document read")
+		}
+	})
+
+	t.Run("it carries a legacy row with no _id rather than dropping it", func(t *testing.T) {
+		db := legacyStateDB(t)
 
 		if _, err := db.ExecContext(ctx,
 			`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
@@ -94,15 +199,14 @@ func TestPostgresStateBackendLoad(t *testing.T) {
 		}
 	})
 
-	t.Run("it refuses a database where one _id is claimed twice", func(t *testing.T) {
-		db := freshStateDB(t)
+	t.Run("it refuses a legacy database where one _id is claimed twice", func(t *testing.T) {
+		db := legacyStateDB(t)
 
 		// Reachable only on a database whose tracking version 2 upgrade is
 		// blocked on exactly this, so the table has to be put back in its
 		// pre-upgrade shape to reach it. The document cannot represent two rows
 		// under one _id, so saying so beats picking one of them.
-		if _, err := db.ExecContext(ctx,
-			`DROP INDEX `+infra.RefIDIndex); err != nil {
+		if _, err := db.ExecContext(ctx, `DROP INDEX `+infra.RefIDIndex); err != nil {
 			t.Fatalf("removing the unique index: %v", err)
 		}
 
@@ -150,6 +254,9 @@ func TestPostgresStateBackendSave(t *testing.T) {
 			t.Fatalf("Load: %v", err)
 		}
 
+		if got.Version != domain.StateVersion {
+			t.Errorf("expected version %d, got %d", domain.StateVersion, got.Version)
+		}
 		if len(got.Files) != 2 {
 			t.Errorf("expected 2 files, got %d", len(got.Files))
 		}
@@ -169,7 +276,7 @@ func TestPostgresStateBackendSave(t *testing.T) {
 		}
 	})
 
-	t.Run("saving twice changes nothing", func(t *testing.T) {
+	t.Run("saving twice leaves one document", func(t *testing.T) {
 		db := freshStateDB(t)
 		backend := infra.NewPostgresStateBackend(db)
 
@@ -186,12 +293,12 @@ func TestPostgresStateBackendSave(t *testing.T) {
 			t.Fatalf("second Save: %v", err)
 		}
 
-		var rows int
-		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM joka_entity_rows`).Scan(&rows); err != nil {
-			t.Fatalf("counting tracked rows: %v", err)
+		var docs int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM joka_state`).Scan(&docs); err != nil {
+			t.Fatalf("counting documents: %v", err)
 		}
-		if rows != 1 {
-			t.Errorf("expected 1 tracked row after two saves, got %d", rows)
+		if docs != 1 {
+			t.Errorf("expected 1 document after two saves, got %d", docs)
 		}
 	})
 
@@ -262,38 +369,6 @@ func TestPostgresStateBackendSave(t *testing.T) {
 		}
 		if _, ok := got.Row("guest"); !ok {
 			t.Error("expected guest's tracking to survive")
-		}
-	})
-
-	t.Run("it leaves a row with no _id alone", func(t *testing.T) {
-		db := freshStateDB(t)
-		backend := infra.NewPostgresStateBackend(db)
-
-		if _, err := db.ExecContext(ctx,
-			`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
-			 VALUES ('legacy.yaml', 'users', 5, 'id', '', 0)`); err != nil {
-			t.Fatalf("seeding a legacy row: %v", err)
-		}
-
-		state, err := backend.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		state.Track("admin", domain.EntityState{Table: "users", PKColumn: "id", PKValue: 7, File: "a.yaml"})
-
-		if err := backend.Save(ctx, state); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-
-		// The unkeyed row is not something Save can address — it has no _id to
-		// match on — so it must survive rather than be swept up as "not in the
-		// document".
-		after, err := backend.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load after save: %v", err)
-		}
-		if len(after.Unkeyed) != 1 || after.Unkeyed[0].RowPK != 5 {
-			t.Errorf("expected the legacy row untouched, got %+v", after.Unkeyed)
 		}
 	})
 

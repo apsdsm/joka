@@ -3,24 +3,28 @@ package infra
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"sort"
 
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 )
 
+// StateKey is the joka_state row the entity document lives under.
+//
+// The table is keyed rather than single-row so migration bookkeeping could move
+// into it later without another table. Only this key is written today; see
+// proposal_entity_convergence_20260918.md, open question 2.
+const StateKey = "entities"
+
 // PostgresStateBackend keeps the state document in the database it describes,
-// in the joka_entities and joka_entity_rows tables.
+// as one jsonb value in joka_state.
 //
-// The document is stored decomposed across those two tables rather than as one
-// value. That is what they already held, and version 1 of the state shape names
-// it rather than changing it — moving the document into a single jsonb column
-// is a later step with its own tracking version bump.
-//
-// Save writes only what differs from what is already recorded. Rewriting every
-// row would be simpler, but joka_entities.synced_at is a column a human reads,
-// and resetting it on files nothing touched would make it lie.
+// It reads two layouts. Tracking version 3 and later store the document; before
+// that the same information was decomposed across joka_entities and
+// joka_entity_rows, and a database still on version 2 is read from those. That
+// path exists because read-only commands never upgrade, so `joka status` has to
+// describe a database no mutating command has touched yet.
 type PostgresStateBackend struct {
 	db   DBTX
 	conn *sql.DB
@@ -33,19 +37,120 @@ func NewPostgresStateBackend(conn *sql.DB) *PostgresStateBackend {
 
 // NewPostgresTxStateBackend reads and writes inside the given transaction, so
 // the document commits with the rows it describes. Table existence is checked
-// on the raw connection, because the tables are created by DDL that cannot run
-// in the transaction.
+// on the raw connection, because the table is created by DDL that cannot run in
+// the transaction.
 func NewPostgresTxStateBackend(tx *sql.Tx, conn *sql.DB) *PostgresStateBackend {
 	return &PostgresStateBackend{db: tx, conn: conn}
 }
 
+// EnsureStateTable creates joka_state if it is not already there.
+func (b *PostgresStateBackend) EnsureStateTable(ctx context.Context) error {
+	exists, err := jokadb.TableExists(ctx, b.conn, "joka_state")
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	_, err = b.conn.ExecContext(ctx, `
+		CREATE TABLE joka_state (
+			key VARCHAR(64) PRIMARY KEY,
+			doc JSONB NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("creating joka_state: %w", err)
+	}
+	return nil
+}
+
 // Load reads the state of the database.
 //
-// A database with no tracking tables loads as an empty state rather than an
-// error: it has never been written, which is a fact about it and not a failure
-// to read it. This is also what lets a read-only caller use the backend without
-// creating anything.
+// A database with nothing to read loads as an empty state rather than an error:
+// it has never been written, which is a fact about it and not a failure to read
+// it. Nothing is created, which is what lets a read-only caller use the backend.
 func (b *PostgresStateBackend) Load(ctx context.Context) (*domain.State, error) {
+	hasState, err := jokadb.TableExists(ctx, b.conn, "joka_state")
+	if err != nil {
+		return nil, err
+	}
+
+	if hasState {
+		state, found, err := b.loadDocument(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return state, nil
+		}
+	}
+
+	return b.loadLegacy(ctx)
+}
+
+// Save writes the document back, replacing whatever was there.
+//
+// One statement, so a save is atomic on its own and inside the caller's
+// transaction it commits with the rows it describes. The decomposed layout it
+// replaced needed a diff against the recorded state to avoid rewriting rows
+// nothing had touched; a document has nothing to diff.
+func (b *PostgresStateBackend) Save(ctx context.Context, state *domain.State) error {
+	if state.Version == 0 {
+		state.Version = domain.StateVersion
+	}
+
+	doc, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encoding the state document: %w", err)
+	}
+
+	_, err = b.db.ExecContext(ctx,
+		`INSERT INTO joka_state (key, doc) VALUES ($1, $2)
+		 ON CONFLICT (key) DO UPDATE SET doc = EXCLUDED.doc, updated_at = NOW()`,
+		StateKey, doc,
+	)
+	if err != nil {
+		return fmt.Errorf("saving the state document: %w", err)
+	}
+	return nil
+}
+
+// loadDocument reads joka_state. found is false when the table is there but
+// holds no document yet, which is how a database upgraded before anything was
+// synced reads.
+func (b *PostgresStateBackend) loadDocument(ctx context.Context) (*domain.State, bool, error) {
+	var doc []byte
+
+	err := b.db.QueryRowContext(ctx,
+		`SELECT doc FROM joka_state WHERE key = $1`, StateKey).Scan(&doc)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("reading the state document: %w", err)
+	}
+
+	state := domain.NewState()
+	if err := json.Unmarshal(doc, state); err != nil {
+		return nil, false, fmt.Errorf("decoding the state document: %w", err)
+	}
+
+	// An empty object decodes to nil maps, and every caller expects to be able
+	// to write into them.
+	if state.Files == nil {
+		state.Files = make(map[string]domain.FileState)
+	}
+	if state.Entities == nil {
+		state.Entities = make(map[string]domain.EntityState)
+	}
+
+	return state, true, nil
+}
+
+// loadLegacy reads the decomposed layout that tracking versions 1 and 2 used.
+func (b *PostgresStateBackend) loadLegacy(ctx context.Context) (*domain.State, error) {
 	state := domain.NewState()
 
 	hasFiles, err := jokadb.TableExists(ctx, b.conn, "joka_entities")
@@ -53,7 +158,7 @@ func (b *PostgresStateBackend) Load(ctx context.Context) (*domain.State, error) 
 		return nil, err
 	}
 	if hasFiles {
-		if err := b.loadFiles(ctx, state); err != nil {
+		if err := b.loadLegacyFiles(ctx, state); err != nil {
 			return nil, err
 		}
 	}
@@ -63,7 +168,7 @@ func (b *PostgresStateBackend) Load(ctx context.Context) (*domain.State, error) 
 		return nil, err
 	}
 	if hasRows {
-		if err := b.loadEntities(ctx, state); err != nil {
+		if err := b.loadLegacyEntities(ctx, state); err != nil {
 			return nil, err
 		}
 	}
@@ -71,7 +176,7 @@ func (b *PostgresStateBackend) Load(ctx context.Context) (*domain.State, error) 
 	return state, nil
 }
 
-func (b *PostgresStateBackend) loadFiles(ctx context.Context, state *domain.State) error {
+func (b *PostgresStateBackend) loadLegacyFiles(ctx context.Context, state *domain.State) error {
 	rows, err := b.db.QueryContext(ctx,
 		`SELECT entity_file, content_hash FROM joka_entities`)
 	if err != nil {
@@ -91,7 +196,7 @@ func (b *PostgresStateBackend) loadFiles(ctx context.Context, state *domain.Stat
 	return rows.Err()
 }
 
-func (b *PostgresStateBackend) loadEntities(ctx context.Context, state *domain.State) error {
+func (b *PostgresStateBackend) loadLegacyEntities(ctx context.Context, state *domain.State) error {
 	rows, err := b.db.QueryContext(ctx,
 		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
 		 FROM joka_entity_rows ORDER BY entity_file, insertion_order`)
@@ -114,7 +219,7 @@ func (b *PostgresStateBackend) loadEntities(ctx context.Context, state *domain.S
 
 		// A row written before joka recorded an _id. It cannot be keyed, and
 		// dropping it would lose the row it points at, so it is carried where a
-		// reader can report it.
+		// reader can report it. The version 3 upgrade refuses while any remain.
 		if row.RefID == "" {
 			state.Unkeyed = append(state.Unkeyed, row)
 			continue
@@ -137,130 +242,4 @@ func (b *PostgresStateBackend) loadEntities(ctx context.Context, state *domain.S
 	}
 
 	return rows.Err()
-}
-
-// Save writes back what differs from the recorded state.
-//
-// An _id present in the document and absent from the database is inserted, one
-// whose record changed is updated, and one the document dropped has its
-// tracking deleted — never the row it points at. Deleting tracking is how
-// `entity forget` works, and it is reachable only by removing the entry, not by
-// failing to mention it: a caller saves the document it loaded, so an entity it
-// never looked at is still in the map.
-func (b *PostgresStateBackend) Save(ctx context.Context, state *domain.State) error {
-	current, err := b.Load(ctx)
-	if err != nil {
-		return err
-	}
-
-	if err := b.saveFiles(ctx, current, state); err != nil {
-		return err
-	}
-
-	return b.saveEntities(ctx, current, state)
-}
-
-func (b *PostgresStateBackend) saveFiles(ctx context.Context, current, next *domain.State) error {
-	for _, path := range sortedFileKeys(next.Files) {
-		want := next.Files[path]
-		have, tracked := current.Files[path]
-
-		switch {
-		case !tracked:
-			if _, err := b.db.ExecContext(ctx,
-				`INSERT INTO joka_entities (entity_file, content_hash) VALUES ($1, $2)
-				 ON CONFLICT (entity_file) DO UPDATE
-				 SET content_hash = EXCLUDED.content_hash, synced_at = NOW()`,
-				path, want.ContentHash,
-			); err != nil {
-				return fmt.Errorf("recording %s as synced: %w", path, err)
-			}
-		case have.ContentHash != want.ContentHash:
-			if _, err := b.db.ExecContext(ctx,
-				`UPDATE joka_entities SET content_hash = $1, synced_at = NOW() WHERE entity_file = $2`,
-				want.ContentHash, path,
-			); err != nil {
-				return fmt.Errorf("updating the record of %s: %w", path, err)
-			}
-		}
-	}
-
-	for _, path := range sortedFileKeys(current.Files) {
-		if _, keep := next.Files[path]; keep {
-			continue
-		}
-		if _, err := b.db.ExecContext(ctx,
-			`DELETE FROM joka_entities WHERE entity_file = $1`, path,
-		); err != nil {
-			return fmt.Errorf("removing the tracking record for %s: %w", path, err)
-		}
-	}
-
-	return nil
-}
-
-func (b *PostgresStateBackend) saveEntities(ctx context.Context, current, next *domain.State) error {
-	for _, refID := range sortedEntityKeys(next.Entities) {
-		want := next.Entities[refID]
-		have, tracked := current.Entities[refID]
-
-		if !tracked {
-			if _, err := b.db.ExecContext(ctx,
-				`INSERT INTO joka_entity_rows
-				 (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
-				 VALUES ($1, $2, $3, $4, $5, $6)`,
-				want.File, want.Table, want.PKValue, want.PKColumn, refID, want.Order,
-			); err != nil {
-				return fmt.Errorf("tracking %s row %d as %q: %w", want.Table, want.PKValue, refID, err)
-			}
-			continue
-		}
-
-		if have == want {
-			continue
-		}
-
-		if _, err := b.db.ExecContext(ctx,
-			`UPDATE joka_entity_rows
-			 SET entity_file = $1, table_name = $2, row_pk = $3, pk_column = $4, insertion_order = $5
-			 WHERE ref_id = $6`,
-			want.File, want.Table, want.PKValue, want.PKColumn, want.Order, refID,
-		); err != nil {
-			return fmt.Errorf("re-pointing the tracking for %q: %w", refID, err)
-		}
-	}
-
-	for _, refID := range sortedEntityKeys(current.Entities) {
-		if _, keep := next.Entities[refID]; keep {
-			continue
-		}
-		if _, err := b.db.ExecContext(ctx,
-			`DELETE FROM joka_entity_rows WHERE ref_id = $1`, refID,
-		); err != nil {
-			return fmt.Errorf("removing the tracking for %q: %w", refID, err)
-		}
-	}
-
-	return nil
-}
-
-// sortedFileKeys and sortedEntityKeys make the statements a save issues depend
-// only on the data, not on map iteration order, so a failure part-way through
-// is reproducible.
-func sortedFileKeys(m map[string]domain.FileState) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func sortedEntityKeys(m map[string]domain.EntityState) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

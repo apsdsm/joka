@@ -26,26 +26,22 @@ func createPostgresTestTable(t *testing.T, db *sql.DB, name string) {
 	t.Cleanup(func() { testlib.DropTablePostgres(t, db, name) })
 }
 
-// createPostgresEntityTrackingTables creates joka_entities and joka_entity_rows for integration tests.
+// createPostgresEntityTrackingTables prepares the tracking a mutating entity
+// command expects: the state document's table, and none of the decomposed ones
+// tracking version 3 replaced.
 func createPostgresEntityTrackingTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
 
-	adapter := infra.NewPostgresDBAdapter(db)
-	if err := adapter.EnsureTrackingTable(ctx); err != nil {
-		t.Fatalf("EnsureTrackingTable: %v", err)
-	}
-	if err := adapter.EnsureContentHashColumn(ctx); err != nil {
-		t.Fatalf("EnsureContentHashColumn: %v", err)
-	}
-	if err := adapter.EnsureRowTrackingTable(ctx); err != nil {
-		t.Fatalf("EnsureRowTrackingTable: %v", err)
+	for _, table := range []string{"joka_state", "joka_entity_rows", "joka_entities"} {
+		testlib.DropTablePostgres(t, db, table)
 	}
 
-	t.Cleanup(func() {
-		testlib.DropTablePostgres(t, db, "joka_entity_rows")
-		testlib.DropTablePostgres(t, db, "joka_entities")
-	})
+	if err := infra.NewPostgresStateBackend(db).EnsureStateTable(ctx); err != nil {
+		t.Fatalf("EnsureStateTable: %v", err)
+	}
+
+	t.Cleanup(func() { testlib.DropTablePostgres(t, db, "joka_state") })
 }
 
 func TestPostgresEnsureTrackingTable(t *testing.T) {

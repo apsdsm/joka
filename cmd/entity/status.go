@@ -29,12 +29,9 @@ func (r RunEntityStatusCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
-
-	if err := dbAdapter.EnsureTables(ctx); err != nil {
-		return fail(err)
-	}
-
+	// Nothing is created: a state that has never been written reads as empty,
+	// and every file then reports as new, which is the truth about that
+	// database rather than a table this command made on the way past.
 	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
 	if err != nil {
 		return fail(err)

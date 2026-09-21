@@ -149,15 +149,9 @@ func TestStatusAgainstLiveTracking(t *testing.T) {
 		t.Fatalf("seeding widgets: %v", err)
 	}
 
-	entityAdapter := entityinfra.NewPostgresDBAdapter(db)
-	if err := entityAdapter.EnsureTrackingTable(ctx); err != nil {
-		t.Fatalf("ensuring joka_entities: %v", err)
-	}
-	if err := entityAdapter.EnsureContentHashColumn(ctx); err != nil {
-		t.Fatalf("ensuring content_hash: %v", err)
-	}
-	if err := entityAdapter.EnsureRowTrackingTable(ctx); err != nil {
-		t.Fatalf("ensuring joka_entity_rows: %v", err)
+	backend := entityinfra.NewPostgresStateBackend(db)
+	if err := backend.EnsureStateTable(ctx); err != nil {
+		t.Fatalf("ensuring joka_state: %v", err)
 	}
 
 	// widgets.yaml is on disk and tracks two rows, one of which was deleted
@@ -179,19 +173,12 @@ func TestStatusAgainstLiveTracking(t *testing.T) {
 	state.Track("lost", entitydomain.EntityState{
 		Table: "widgets", PKColumn: "id", PKValue: 999, File: "widgets.yaml", Order: 1,
 	})
+	state.Track("orphan_row", entitydomain.EntityState{
+		Table: "dropped_table", PKColumn: "id", PKValue: 5, File: "gone.yaml", Order: 0,
+	})
 
-	if err := entityinfra.NewPostgresStateBackend(db).Save(ctx, state); err != nil {
+	if err := backend.Save(ctx, state); err != nil {
 		t.Fatalf("saving the entity state: %v", err)
-	}
-
-	// gone.yaml's row has no _id, which Save cannot write — joka does not
-	// produce unkeyed rows any more, it only carries the ones already there. It
-	// has to go in by hand for the report to have one to describe.
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
-		 VALUES ('gone.yaml', 'dropped_table', 5, 'id', '', 0)`,
-	); err != nil {
-		t.Fatalf("tracking the unkeyed row: %v", err)
 	}
 
 	report := buildAgainst(t, db, status.Inputs{

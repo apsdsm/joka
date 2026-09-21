@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
 	jokadb "github.com/apsdsm/joka/db"
+	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 	"github.com/apsdsm/joka/internal/meta"
 	"github.com/apsdsm/joka/internal/upgrade"
 	"github.com/apsdsm/joka/testlib"
@@ -31,7 +33,9 @@ func v1DB(t *testing.T) *sql.DB {
 
 	drop := func() {
 		testlib.DropTablePostgres(t, db, meta.Table)
+		testlib.DropTablePostgres(t, db, "joka_state")
 		testlib.DropTablePostgres(t, db, "joka_entity_rows")
+		testlib.DropTablePostgres(t, db, "joka_entities")
 	}
 	drop()
 	t.Cleanup(drop)
@@ -67,16 +71,32 @@ func track(t *testing.T, db *sql.DB, file, refID string, pk int64) {
 	}
 }
 
-func hasRefIDIndex(t *testing.T, db *sql.DB) bool {
+// trackedIDs reads the _ids the state document holds, sorted.
+func trackedIDs(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 
-	var n int
-	if err := db.QueryRow(
-		`SELECT count(*) FROM pg_indexes WHERE indexname = $1`, "joka_entity_rows_ref_id_key",
-	).Scan(&n); err != nil {
-		t.Fatalf("checking for the index: %v", err)
+	state, err := entityinfra.NewPostgresStateBackend(db).Load(context.Background())
+	if err != nil {
+		t.Fatalf("loading the state: %v", err)
 	}
-	return n > 0
+
+	ids := make([]string, 0, len(state.Entities))
+	for id := range state.Entities {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// tableExists reports whether the named table is still in the database.
+func tableExists(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+
+	var exists bool
+	if err := db.QueryRow(`SELECT to_regclass($1) IS NOT NULL`, name).Scan(&exists); err != nil {
+		t.Fatalf("checking for %s: %v", name, err)
+	}
+	return exists
 }
 
 func TestRunUpgradesACleanV1Database(t *testing.T) {
@@ -91,11 +111,19 @@ func TestRunUpgradesACleanV1Database(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if len(applied) != 1 || applied[0].To != 2 {
-		t.Fatalf("expected one step to version 2, got %+v", applied)
+	if len(applied) != 2 || applied[0].To != 2 || applied[1].To != 3 {
+		t.Fatalf("expected steps to version 2 then 3, got %+v", applied)
 	}
-	if !hasRefIDIndex(t, db) {
-		t.Error("expected the unique index added")
+
+	// Both rows are in the document, and the tables they came from are gone —
+	// leaving them would be a second copy of what the document now holds.
+	if got := trackedIDs(t, db); len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
+		t.Errorf("expected alpha and beta in the document, got %v", got)
+	}
+	for _, table := range []string{"joka_entity_rows", "joka_entities"} {
+		if tableExists(t, db, table) {
+			t.Errorf("expected %s dropped", table)
+		}
 	}
 
 	state, err := meta.Read(ctx, db)
@@ -166,8 +194,8 @@ func TestRunBlocksOnRowsWithNoRefID(t *testing.T) {
 
 	// A blocked upgrade must change nothing, or a retry starts from a state
 	// nobody described.
-	if hasRefIDIndex(t, db) {
-		t.Error("expected no index after a blocked upgrade")
+	if tableExists(t, db, "joka_state") {
+		t.Error("expected no state document after a blocked upgrade")
 	}
 	state, _ := meta.Read(ctx, db)
 	if state.Present {
@@ -193,8 +221,8 @@ func TestRunBlocksOnDuplicateRefID(t *testing.T) {
 			t.Errorf("expected %q in:\n%s", want, err)
 		}
 	}
-	if hasRefIDIndex(t, db) {
-		t.Error("expected no index after a blocked upgrade")
+	if tableExists(t, db, "joka_state") {
+		t.Error("expected no state document after a blocked upgrade")
 	}
 }
 
@@ -217,29 +245,11 @@ func TestRunProceedsOnceTheConflictIsCleared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run after clearing: %v", err)
 	}
-	if len(applied) != 1 {
-		t.Errorf("expected the step to run, got %+v", applied)
+	if len(applied) != 2 {
+		t.Errorf("expected both steps to run, got %+v", applied)
 	}
-	if !hasRefIDIndex(t, db) {
-		t.Error("expected the index added")
-	}
-}
-
-func TestUpgradedIndexRejectsADuplicate(t *testing.T) {
-	db := v1DB(t)
-	ctx := context.Background()
-	track(t, db, "a.yaml", "alpha", 1)
-
-	if _, err := upgrade.Run(ctx, db, jokaVersion); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	// The constraint has to be real, not just checked once at upgrade time.
-	_, err := db.Exec(
-		`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
-		 VALUES ('b.yaml', 'fields', 2, 'id', 'alpha', 0)`)
-	if err == nil {
-		t.Error("expected the unique index to reject a second claim on alpha")
+	if got := trackedIDs(t, db); len(got) != 1 || got[0] != "role_owner" {
+		t.Errorf("expected the surviving claim in the document, got %v", got)
 	}
 }
 
@@ -254,13 +264,20 @@ func TestRunLeavesTrackedRowsAlone(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// An upgrade adds constraints; it never rewrites what a row means.
-	var rows int
-	if err := db.QueryRow(`SELECT count(*) FROM joka_entity_rows`).Scan(&rows); err != nil {
-		t.Fatalf("counting: %v", err)
+	// An upgrade may move a record; it never changes what a row means. Both
+	// entities still point at the primary keys they pointed at before.
+	state, err := entityinfra.NewPostgresStateBackend(db).Load(ctx)
+	if err != nil {
+		t.Fatalf("loading the state: %v", err)
 	}
-	if rows != 2 {
-		t.Errorf("expected both rows untouched, got %d", rows)
+	if len(state.Entities) != 2 {
+		t.Fatalf("expected both entities carried over, got %d", len(state.Entities))
+	}
+	if alpha, ok := state.Row("alpha"); !ok || alpha.PKValue != 1 || alpha.Table != "fields" {
+		t.Errorf("expected alpha to still name fields row 1, got %+v ok=%v", alpha, ok)
+	}
+	if beta, ok := state.Row("beta"); !ok || beta.PKValue != 2 {
+		t.Errorf("expected beta to still name row 2, got %+v ok=%v", beta, ok)
 	}
 }
 

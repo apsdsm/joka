@@ -57,6 +57,45 @@ var Steps = []Step{
 			return infra.NewPostgresDBAdapter(db).EnsureRefIDIndex(ctx)
 		},
 	},
+	{
+		To:       3,
+		Describe: "move entity tracking into one joka_state document",
+		Blockers: refIDBlockers,
+		Apply:    migrateEntityStateToDocument,
+	},
+}
+
+// migrateEntityStateToDocument reads the decomposed entity tracking and writes
+// it back as one document, then drops the tables it came from.
+//
+// It is idempotent by construction: the backend's Load prefers the document, so
+// a retry after a partial run reads what was already written rather than the
+// tables it is in the middle of replacing.
+func migrateEntityStateToDocument(ctx context.Context, db *sql.DB) error {
+	backend := infra.NewPostgresStateBackend(db)
+
+	if err := backend.EnsureStateTable(ctx); err != nil {
+		return err
+	}
+
+	state, err := backend.Load(ctx)
+	if err != nil {
+		return err
+	}
+	if err := backend.Save(ctx, state); err != nil {
+		return err
+	}
+
+	// Leaving them would be a second copy of what the document now holds, which
+	// is the failure this whole change is undoing. Row tracking goes first: it
+	// is the one with the foreign-key-free dependency on the other.
+	for _, table := range []string{"joka_entity_rows", "joka_entities"} {
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+table); err != nil {
+			return fmt.Errorf("dropping %s after moving it into the document: %w", table, err)
+		}
+	}
+
+	return nil
 }
 
 // Run brings the database up to meta.TrackingVersion and returns the steps it

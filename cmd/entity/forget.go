@@ -48,7 +48,7 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 
 	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	if err := dbAdapter.EnsureTables(ctx); err != nil {
+	if err := infra.NewPostgresStateBackend(r.DB).EnsureStateTable(ctx); err != nil {
 		return fail(err)
 	}
 

@@ -131,27 +131,20 @@ CREATE TABLE joka_snapshots (
 ```
 
 ```sql
--- Entity sync tracking
-CREATE TABLE joka_entities (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    entity_file VARCHAR(512) NOT NULL UNIQUE,
-    content_hash VARCHAR(64),
-    synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
-
--- Entity row tracking (for reimport support)
-CREATE TABLE joka_entity_rows (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    entity_file VARCHAR(512) NOT NULL,
-    table_name VARCHAR(255) NOT NULL,
-    row_pk BIGINT NOT NULL,
-    pk_column VARCHAR(255) NOT NULL DEFAULT 'id',
-    ref_id VARCHAR(255),
-    insertion_order INT NOT NULL
+-- Entity tracking: one jsonb document per key, only 'entities' today
+CREATE TABLE joka_state (
+    key VARCHAR(64) PRIMARY KEY,
+    doc JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 ```
 
-`joka_lock`, `joka_snapshots`, `joka_entities`, `joka_entity_rows`, and `joka_meta` are auto-created on first use. Only `joka_migrations` requires `joka init`. The one exception is `joka status`, which never creates them — a missing tracking table is something it reports.
+`joka_entities` and `joka_entity_rows` held this until tracking version 3 and are dropped by the
+upgrade that moves them. The backend still **reads** them, because read-only commands never upgrade
+and `joka status` has to describe a database no mutating command has touched yet. Nothing creates or
+writes them.
+
+`joka_lock`, `joka_snapshots`, `joka_state`, and `joka_meta` are auto-created on first use. Only `joka_migrations` requires `joka init`. The one exception is `joka status`, which never creates them — a missing tracking table is something it reports. `entity status` and `entity diff` create nothing either: a state that has never been written reads as empty.
 
 ## Status report
 
@@ -548,8 +541,25 @@ Blocked by two things, both real rather than theoretical:
   file, so two entity sets seeded into one database (a `dev1/` and a `local/` tree of the same
   seeds) both claim the same `_id`s. One claim has to go.
 
-`RecordEntityRow` rejects an empty `ref_id` with `ErrEntitySetInvalid` rather than letting the
-constraint fire — a constraint violation is a worse way to learn that than being told.
+`ReimportEntityAction` and `UpdateEntityAction` reject an empty `_id` with `ErrEntitySetInvalid`
+rather than writing a row the document cannot key.
+
+### Version 3: entity tracking is one document
+
+`joka_state`, keyed `entities`, holding the `domain.State` JSON. `joka_entities` and
+`joka_entity_rows` are read into it and dropped.
+
+It carries the same blockers as version 2, for a different reason: the document is a map keyed on
+`_id`, so a row with no `_id` and an `_id` claimed twice are both unrepresentable rather than merely
+ambiguous. In practice version 2 has already cleared them — steps run in order and `Run` stops at
+the first blocked one — so the checks are there to be honest rather than because they fire.
+
+The step is idempotent by construction: the backend's `Load` prefers the document, so a retry after
+a partial run reads what was already written rather than the tables it is in the middle of replacing.
+
+Version 2's unique index now lives for microseconds — step 3 drops the table it is on. It stays
+because removing a step renumbers history, which is the one thing the version marker exists to
+prevent. Its blockers are what carry the value.
 
 ## Entity state (`domain.State`, `app.StateBackend`)
 
@@ -583,12 +593,17 @@ type State struct {
   reachable on a database whose upgrade is blocked on exactly this.
 
 `StateBackend` is `Load`/`Save` of the whole document, because that is the access pattern every caller
-already has. `infra.PostgresStateBackend` stores it decomposed across `joka_entities` and
-`joka_entity_rows` — version 1 of the state shape names what those tables already held rather than
-changing it. `Save` writes only what differs: rewriting every row would be simpler, but
-`joka_entities.synced_at` is a column a human reads and resetting it on untouched files would make it
-lie. Dropping tracking happens by removing a map entry, never by failing to mention one, because a
-caller saves the document it loaded.
+already has. `infra.PostgresStateBackend` stores it as one jsonb value in `joka_state`, keyed
+`entities`. `Save` is one statement, so it is atomic on its own and inside the caller's transaction
+it commits with the rows it describes. Dropping tracking happens by removing a map entry, never by
+failing to mention one, because a caller saves the document it loaded.
+
+**It reads two layouts.** Version 3 and later store the document; versions 1 and 2 decomposed the
+same information across `joka_entities` and `joka_entity_rows`, and a database still on version 2 is
+read from those. The document wins when both are present — that is a database mid-upgrade, or one
+whose `DROP` did not land, and the document is what the current joka wrote. The legacy reader exists
+because **read-only commands never upgrade**, so `joka status` must describe a database no mutating
+command has reached.
 
 Only the database backend can write the document in the same transaction as the rows it describes,
 which is why it is the default and the only one implemented.
