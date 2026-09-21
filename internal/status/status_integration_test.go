@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	entitydomain "github.com/apsdsm/joka/internal/domains/entity/domain"
 	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 	migrationinfra "github.com/apsdsm/joka/internal/domains/migration/infra"
@@ -169,31 +170,28 @@ func TestStatusAgainstLiveTracking(t *testing.T) {
 		t.Fatalf("writing widgets.yaml: %v", err)
 	}
 
-	if err := entityAdapter.RecordEntitySyncedWithHash(ctx, "widgets.yaml", "stale-hash"); err != nil {
-		t.Fatalf("recording widgets.yaml: %v", err)
-	}
-	if err := entityAdapter.RecordEntitySyncedWithHash(ctx, "gone.yaml", "whatever"); err != nil {
-		t.Fatalf("recording gone.yaml: %v", err)
+	state := entitydomain.NewState()
+	state.TrackFile("widgets.yaml", "stale-hash")
+	state.TrackFile("gone.yaml", "whatever")
+	state.Track("kept", entitydomain.EntityState{
+		Table: "widgets", PKColumn: "id", PKValue: 1, File: "widgets.yaml", Order: 0,
+	})
+	state.Track("lost", entitydomain.EntityState{
+		Table: "widgets", PKColumn: "id", PKValue: 999, File: "widgets.yaml", Order: 1,
+	})
+
+	if err := entityinfra.NewPostgresStateBackend(db).Save(ctx, state); err != nil {
+		t.Fatalf("saving the entity state: %v", err)
 	}
 
-	for _, row := range []struct {
-		file  string
-		table string
-		pk    int64
-		ref   string
-		order int
-	}{
-		{"widgets.yaml", "widgets", 1, "kept", 0},
-		{"widgets.yaml", "widgets", 999, "lost", 1},
-		{"gone.yaml", "dropped_table", 5, "", 0},
-	} {
-		if _, err := db.ExecContext(ctx,
-			`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
-			 VALUES ($1, $2, $3, 'id', $4, $5)`,
-			row.file, row.table, row.pk, row.ref, row.order,
-		); err != nil {
-			t.Fatalf("tracking row for %s: %v", row.file, err)
-		}
+	// gone.yaml's row has no _id, which Save cannot write — joka does not
+	// produce unkeyed rows any more, it only carries the ones already there. It
+	// has to go in by hand for the report to have one to describe.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
+		 VALUES ('gone.yaml', 'dropped_table', 5, 'id', '', 0)`,
+	); err != nil {
+		t.Fatalf("tracking the unkeyed row: %v", err)
 	}
 
 	report := buildAgainst(t, db, status.Inputs{

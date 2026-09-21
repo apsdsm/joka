@@ -69,36 +69,6 @@ func (p *PostgresDBAdapter) EnsureTrackingTable(ctx context.Context) error {
 	return err
 }
 
-// IsEntitySynced returns true if the given file path has already been recorded.
-func (p *PostgresDBAdapter) IsEntitySynced(ctx context.Context, filePath string) (bool, error) {
-	var exists int
-	err := p.db.QueryRowContext(ctx,
-		`SELECT 1 FROM joka_entities WHERE entity_file = $1`,
-		filePath,
-	).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("checking entity sync status: %w", err)
-	}
-	return true, nil
-}
-
-// RecordEntitySynced inserts a row into joka_entities with no content hash.
-//
-// Not part of app.DBAdapter: every caller records a hash. It is kept because it
-// is the only way to construct a pre-hash tracking row, which is the legacy
-// state the "an empty stored hash reads as modified" rule exists for, and the
-// tests for that rule need to be able to build it.
-func (p *PostgresDBAdapter) RecordEntitySynced(ctx context.Context, filePath string) error {
-	_, err := p.db.ExecContext(ctx,
-		`INSERT INTO joka_entities (entity_file) VALUES ($1)`,
-		filePath,
-	)
-	return err
-}
-
 // InsertRow inserts a single row into the given table. For natural-key tables
 // (where pkColumn is present in columns), the value from the columns map is
 // returned so reimport can locate the row later. Otherwise PostgreSQL's
@@ -321,124 +291,6 @@ func (p *PostgresDBAdapter) EnsureContentHashColumn(ctx context.Context) error {
 	return err
 }
 
-// RecordEntitySyncedWithHash inserts a row into joka_entities with a content
-// hash for change detection.
-func (p *PostgresDBAdapter) RecordEntitySyncedWithHash(ctx context.Context, filePath, contentHash string) error {
-	_, err := p.db.ExecContext(ctx,
-		`INSERT INTO joka_entities (entity_file, content_hash) VALUES ($1, $2)
-		 ON CONFLICT (entity_file) DO UPDATE SET content_hash = EXCLUDED.content_hash, synced_at = NOW()`,
-		filePath, contentHash,
-	)
-	return err
-}
-
-// UpdateEntitySynced updates an existing joka_entities row with a new content
-// hash and synced_at timestamp.
-func (p *PostgresDBAdapter) UpdateEntitySynced(ctx context.Context, filePath, contentHash string) error {
-	_, err := p.db.ExecContext(ctx,
-		`UPDATE joka_entities SET content_hash = $1, synced_at = NOW() WHERE entity_file = $2`,
-		contentHash, filePath,
-	)
-	return err
-}
-
-// GetEntityHash returns the content_hash stored for a synced entity file.
-//
-// Not part of app.DBAdapter: a caller that wants one file's hash wants the
-// whole set's, because identity is a property of the set. GetAllSyncedEntities
-// answers that in one query. This is a single-row read for tests.
-func (p *PostgresDBAdapter) GetEntityHash(ctx context.Context, filePath string) (string, error) {
-	var hash sql.NullString
-	err := p.db.QueryRowContext(ctx,
-		`SELECT content_hash FROM joka_entities WHERE entity_file = $1`,
-		filePath,
-	).Scan(&hash)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("getting entity hash: %w", err)
-	}
-	return hash.String, nil
-}
-
-// GetAllSyncedEntities returns all entity_file paths mapped to content hashes.
-func (p *PostgresDBAdapter) GetAllSyncedEntities(ctx context.Context) (map[string]string, error) {
-	rows, err := p.db.QueryContext(ctx,
-		`SELECT entity_file, content_hash FROM joka_entities`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying synced entities: %w", err)
-	}
-	defer rows.Close()
-
-	result := make(map[string]string)
-	for rows.Next() {
-		var file string
-		var hash sql.NullString
-		if err := rows.Scan(&file, &hash); err != nil {
-			return nil, err
-		}
-		result[file] = hash.String
-	}
-	return result, rows.Err()
-}
-
-// RecordEntityRow inserts a row into joka_entity_rows to track an individual
-// inserted entity row.
-//
-// The _id is required: it is what identifies the row from here on, and a
-// constraint violation from the unique index is a worse way to learn that than
-// being told.
-func (p *PostgresDBAdapter) RecordEntityRow(ctx context.Context, row domain.TrackedRow) error {
-	if row.RefID == "" {
-		return fmt.Errorf("%w: cannot track %s row %d from %s",
-			domain.ErrEntitySetInvalid, row.TableName, row.RowPK, row.EntityFile)
-	}
-
-	_, err := p.db.ExecContext(ctx,
-		`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		row.EntityFile, row.TableName, row.RowPK, row.PKColumn, row.RefID, row.InsertionOrder,
-	)
-	return err
-}
-
-// GetTrackedRows returns all tracked rows for a given entity file in reverse
-// insertion order (for deletion).
-func (p *PostgresDBAdapter) GetTrackedRows(ctx context.Context, entityFile string) ([]domain.TrackedRow, error) {
-	rows, err := p.db.QueryContext(ctx,
-		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
-		 FROM joka_entity_rows WHERE entity_file = $1 ORDER BY insertion_order DESC`,
-		entityFile,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying tracked rows: %w", err)
-	}
-	defer rows.Close()
-
-	var result []domain.TrackedRow
-	for rows.Next() {
-		var r domain.TrackedRow
-		var refID sql.NullString
-		if err := rows.Scan(&r.EntityFile, &r.TableName, &r.RowPK, &r.PKColumn, &refID, &r.InsertionOrder); err != nil {
-			return nil, err
-		}
-		r.RefID = refID.String
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
-// DeleteTrackedRows removes all joka_entity_rows entries for a given entity file.
-func (p *PostgresDBAdapter) DeleteTrackedRows(ctx context.Context, entityFile string) error {
-	_, err := p.db.ExecContext(ctx,
-		`DELETE FROM joka_entity_rows WHERE entity_file = $1`,
-		entityFile,
-	)
-	return err
-}
-
 // DeleteRow deletes a single row from the given table by primary key. Returns
 // ErrForeignKeyConflict if a FK constraint blocks the deletion.
 func (p *PostgresDBAdapter) DeleteRow(ctx context.Context, table, pkColumn string, pkValue int64) error {
@@ -454,19 +306,6 @@ func (p *PostgresDBAdapter) DeleteRow(ctx context.Context, table, pkColumn strin
 		return fmt.Errorf("deleting from %s: %w", table, err)
 	}
 	return nil
-}
-
-// DeleteEntityRecord removes the joka_entities row for a given file path.
-//
-// joka_entities DML runs on the same handle as the rows it describes, so a
-// rolled-back sync does not leave a file recorded as synced with no rows behind
-// it.
-func (p *PostgresDBAdapter) DeleteEntityRecord(ctx context.Context, filePath string) error {
-	_, err := p.db.ExecContext(ctx,
-		`DELETE FROM joka_entities WHERE entity_file = $1`,
-		filePath,
-	)
-	return err
 }
 
 // TableExists reports whether the named table is present in the current schema.
@@ -490,23 +329,3 @@ func (p *PostgresDBAdapter) RowExists(ctx context.Context, table, pkColumn strin
 	}
 	return true, nil
 }
-
-// scanTrackedRows reads a result set of the standard tracked-row columns.
-func scanTrackedRows(rows *sql.Rows) ([]domain.TrackedRow, error) {
-	var out []domain.TrackedRow
-
-	for rows.Next() {
-		var row domain.TrackedRow
-		var ref sql.NullString
-
-		if err := rows.Scan(&row.EntityFile, &row.TableName, &row.RowPK, &row.PKColumn, &ref, &row.InsertionOrder); err != nil {
-			return nil, fmt.Errorf("scanning tracked row: %w", err)
-		}
-
-		row.RefID = ref.String
-		out = append(out, row)
-	}
-
-	return out, rows.Err()
-}
-

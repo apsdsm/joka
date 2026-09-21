@@ -149,7 +149,6 @@ func TestPostgresEntitySyncDetectsModifiedColumnValue(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	adapter := infra.NewPostgresDBAdapter(db)
 
 	t.Run("it reports synced immediately after the initial sync", func(t *testing.T) {
 		syncEntityFile(t, db, fullPath, rel)
@@ -187,10 +186,11 @@ func TestPostgresEntitySyncDetectsModifiedColumnValue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hashing edited file: %v", err)
 		}
-		storedHash, err := adapter.GetEntityHash(ctx, rel)
+		state, err := infra.NewPostgresStateBackend(db).Load(ctx)
 		if err != nil {
-			t.Fatalf("GetEntityHash: %v", err)
+			t.Fatalf("loading state: %v", err)
 		}
+		storedHash, _ := state.FileHash(rel)
 		if newHash == storedHash {
 			t.Fatalf("edited file hash matches stored hash %q — edit did not change content", storedHash)
 		}
