@@ -30,6 +30,7 @@ type RunResetCommand struct {
 	IgnoreForeignKeys bool
 	AutoConfirm       bool
 	OutputFormat      string
+	StateFile         string
 	// Profile and JokaVersion are passed through to entity sync, which writes
 	// the state file.
 	Profile     string
@@ -144,6 +145,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		AutoConfirm:  true,
 		OutputFormat: "text",
 		SkipLock:     true,
+		StateFile:    r.StateFile,
 		Profile:      r.Profile,
 		JokaVersion:  r.JokaVersion,
 		// A reset has just dropped and re-seeded everything, so every declared

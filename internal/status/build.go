@@ -30,6 +30,7 @@ type Inputs struct {
 	MigrationsDir string
 	EntitiesDir   string
 	TemplatesDir  string
+	StateFile     string
 	Tables        []templateinfra.TableConfig
 
 	Migration MigrationReader
@@ -76,7 +77,7 @@ func Build(ctx context.Context, in Inputs) (Report, error) {
 		Meta:    metaState,
 	}
 
-	statePath := entityinfra.StateFilePath(in.Profile)
+	statePath := entityinfra.StateFilePath(in.StateFile, in.Profile)
 	doc, hasFile, err := entityinfra.ReadStateFile(statePath)
 	if err != nil {
 		return report, err

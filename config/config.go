@@ -58,6 +58,7 @@ type Profile struct {
 	Migrations        *string           `yaml:"migrations"`
 	Templates         *string           `yaml:"templates"`
 	Entities          *string           `yaml:"entities"`
+	StateFile         *string           `yaml:"statefile"`
 	Tables            []TableConfig     `yaml:"tables"`
 	IgnoreForeignKeys *bool             `yaml:"ignore_foreign_keys"`
 	Connection        *Connection       `yaml:"connection"`
@@ -68,6 +69,7 @@ type Config struct {
 	Migrations        string             `yaml:"migrations"`
 	Templates         string             `yaml:"templates"`
 	Entities          string             `yaml:"entities"`
+	StateFile         string             `yaml:"statefile"`
 	Tables            []TableConfig      `yaml:"tables"`
 	IgnoreForeignKeys bool               `yaml:"ignore_foreign_keys"`
 	Connection        *Connection        `yaml:"connection"`
@@ -122,6 +124,9 @@ func applyProfile(base *Config, p Profile) *Config {
 	}
 	if p.Entities != nil {
 		merged.Entities = *p.Entities
+	}
+	if p.StateFile != nil {
+		merged.StateFile = *p.StateFile
 	}
 	if p.Tables != nil {
 		merged.Tables = p.Tables

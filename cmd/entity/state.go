@@ -20,7 +20,7 @@ import (
 // A failure to write is reported and does not fail the command. The sync
 // already happened, unwinding it is not possible, and an unwritten file is a
 // finding `joka status` reports rather than a reason to claim the run failed.
-func materializeState(ctx context.Context, db *sql.DB, profile, jokaVersion string) error {
+func materializeState(ctx context.Context, db *sql.DB, stateFile, profile, jokaVersion string) error {
 	state, err := infra.NewPostgresStateBackend(db).Load(ctx)
 	if err != nil {
 		return fmt.Errorf("reading the state back to write the state file: %w", err)
@@ -38,5 +38,5 @@ func materializeState(ctx context.Context, db *sql.DB, profile, jokaVersion stri
 	}
 	doc.Stamp(jokaVersion)
 
-	return infra.WriteStateFile(infra.StateFilePath(profile), doc)
+	return infra.WriteStateFile(infra.StateFilePath(stateFile, profile), doc)
 }

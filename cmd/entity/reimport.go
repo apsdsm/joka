@@ -24,6 +24,9 @@ type RunEntityReimportCommand struct {
 	FilePath     string // relative path argument
 	AutoConfirm  bool
 	OutputFormat string
+	// StateFile overrides where the state file is written; empty means the
+	// default beside the working directory.
+	StateFile string
 	// Profile and JokaVersion name the state file and stamp it.
 	Profile     string
 	JokaVersion string
@@ -138,7 +141,7 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
-	if err := materializeState(ctx, r.DB, r.Profile, r.JokaVersion); err != nil {
+	if err := materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion); err != nil {
 		color.Yellow("The change committed, but the state file was not written: %v", err)
 	}
 

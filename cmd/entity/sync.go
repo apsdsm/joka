@@ -23,6 +23,9 @@ type RunEntitySyncCommand struct {
 	EntitiesDir  string
 	AutoConfirm  bool
 	OutputFormat string
+	// StateFile overrides where the state file is written; empty means the
+	// default beside the working directory.
+	StateFile string
 	// Profile and JokaVersion name the state file and stamp it.
 	Profile     string
 	JokaVersion string
@@ -235,7 +238,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return fail(fmt.Errorf("committing transaction: %w", err))
 	}
 
-	if err := materializeState(ctx, r.DB, r.Profile, r.JokaVersion); err != nil {
+	if err := materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion); err != nil {
 		color.Yellow("The sync committed, but the state file was not written: %v", err)
 	}
 

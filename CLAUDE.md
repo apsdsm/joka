@@ -657,6 +657,9 @@ After a write commits, the document is materialized to `joka.state.json` in the 
 run from — `joka.<profile>.state.json` when `--profile` is set. That is the terraform arrangement:
 state beside the configuration it applies.
 
+`--statefile`, or `statefile:` in `.jokarc.yaml`, overrides it. An explicit path wins over both
+defaults including the profile suffix: naming the file is saying where it goes.
+
 **The profile is in the name because one directory syncs several databases.** Without it,
 `--profile dev1` would overwrite the state describing `local`, and the next local sync would find its
 entities untracked and insert a second copy of every one of them.

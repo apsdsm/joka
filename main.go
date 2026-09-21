@@ -41,6 +41,7 @@ func main() {
 		migrationsDir string
 		templatesDir  string
 		entitiesDir   string
+		stateFile     string
 		autoConfirm   bool
 		outputFormat  string
 		dbConn        *sql.DB
@@ -70,6 +71,9 @@ func main() {
 			}
 			if !c.Flags().Changed("entities") && cfg.Entities != "" {
 				entitiesDir = cfg.Entities
+			}
+			if !c.Flags().Changed("statefile") && cfg.StateFile != "" {
+				stateFile = cfg.StateFile
 			}
 
 			if c.Name() == "version" {
@@ -136,6 +140,7 @@ func main() {
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
 	root.PersistentFlags().StringVarP(&templatesDir, "templates", "t", "devops/templates", "Path to the templates directory")
 	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")
+	root.PersistentFlags().StringVar(&stateFile, "statefile", "", "Path to the state file (default: joka[.<profile>].state.json beside the working directory)")
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 
@@ -186,6 +191,7 @@ func main() {
 				TemplatesDir:  templatesDir,
 				EntitiesDir:   entitiesDir,
 				Tables:        tables,
+				StateFile:     stateFile,
 				Compact:       statusCompact,
 				OutputFormat:  outputFormat,
 			}.Execute(c.Context())
@@ -370,6 +376,7 @@ Use --dry-run to print the plan without applying anything.`,
 				DryRun:       dryRun,
 				OnConflict:   policy,
 				Profile:      profile,
+				StateFile:    stateFile,
 				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
@@ -441,6 +448,7 @@ Use --dry-run to print the plan without applying anything.`,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				Profile:      profile,
+				StateFile:    stateFile,
 				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
@@ -463,6 +471,7 @@ Use --dry-run to print the plan without applying anything.`,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				Profile:      profile,
+				StateFile:    stateFile,
 				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
@@ -482,6 +491,7 @@ Use --dry-run to print the plan without applying anything.`,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				Profile:      profile,
+				StateFile:    stateFile,
 				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
@@ -524,6 +534,7 @@ Use --dry-run to print the plan without applying anything.`,
 				AutoConfirm:       autoConfirm,
 				OutputFormat:      outputFormat,
 				Profile:           profile,
+				StateFile:         stateFile,
 				JokaVersion:       version,
 			}.Execute(c.Context())
 		},

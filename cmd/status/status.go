@@ -26,6 +26,7 @@ type RunStatusCommand struct {
 	TemplatesDir  string
 	EntitiesDir   string
 	Tables        []templateinfra.TableConfig
+	StateFile     string
 	// Compact renders the report as a single line instead of the full report.
 	Compact      bool
 	OutputFormat string
@@ -50,6 +51,7 @@ func (r RunStatusCommand) Execute(ctx context.Context) error {
 		Driver:        "postgres",
 		MigrationsDir: r.MigrationsDir,
 		EntitiesDir:   r.EntitiesDir,
+		StateFile:     r.StateFile,
 		TemplatesDir:  r.TemplatesDir,
 		Tables:        r.Tables,
 		Migration:     migrationinfra.NewPostgresDBAdapter(r.DB),

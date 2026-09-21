@@ -10,7 +10,7 @@ import (
 )
 
 func TestStateFilePath(t *testing.T) {
-	if got := infra.StateFilePath(""); got != "joka.state.json" {
+	if got := infra.StateFilePath("", ""); got != "joka.state.json" {
 		t.Errorf("expected joka.state.json, got %q", got)
 	}
 
@@ -18,7 +18,7 @@ func TestStateFilePath(t *testing.T) {
 	// databases. Without it, --profile dev1 would overwrite the state
 	// describing local, and the next local sync would find its entities
 	// untracked and insert a second copy of every one of them.
-	if got := infra.StateFilePath("dev1"); got != "joka.dev1.state.json" {
+	if got := infra.StateFilePath("", "dev1"); got != "joka.dev1.state.json" {
 		t.Errorf("expected joka.dev1.state.json, got %q", got)
 	}
 }
@@ -129,5 +129,13 @@ func TestNewIdentityIsUnique(t *testing.T) {
 	}
 	if len(a) != 32 {
 		t.Errorf("expected 16 bytes of hex, got %d characters", len(a))
+	}
+}
+
+func TestStateFilePathHonoursAnExplicitPath(t *testing.T) {
+	// --statefile, or statefile: in .jokarc.yaml. It wins over both defaults,
+	// including the profile suffix: naming the file is saying where it goes.
+	if got := infra.StateFilePath("/srv/state/dev1.json", "dev1"); got != "/srv/state/dev1.json" {
+		t.Errorf("expected the explicit path, got %q", got)
 	}
 }

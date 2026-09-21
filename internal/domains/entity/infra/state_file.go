@@ -12,14 +12,20 @@ import (
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 )
 
-// StateFilePath is where the state file lives: the directory joka is run from,
-// the way terraform keeps its state beside the configuration it applies.
+// StateFilePath is where the state file lives.
 //
-// The profile is in the name because one directory syncs several databases.
-// Without it, running `--profile dev1` would overwrite the state describing
-// `local`, and the next local sync would find its entities untracked and insert
-// a second copy of every one of them.
-func StateFilePath(profile string) string {
+// An explicit path — `--statefile`, or `statefile:` in .jokarc.yaml — wins.
+// Otherwise it is the directory joka is run from, the way terraform keeps its
+// state beside the configuration it applies.
+//
+// The profile is in the default name because one directory syncs several
+// databases. Without it, running `--profile dev1` would overwrite the state
+// describing `local`, and the next local sync would find its entities untracked
+// and insert a second copy of every one of them.
+func StateFilePath(explicit, profile string) string {
+	if explicit != "" {
+		return explicit
+	}
 	if profile == "" {
 		return "joka.state.json"
 	}
