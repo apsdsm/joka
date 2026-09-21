@@ -54,6 +54,12 @@ var (
 	// different thing wearing the same name.
 	ErrEntityTableChanged = errors.New("_id now declares a different table")
 
+	// ErrRowNotFound means a row joka tracks is no longer in the database.
+	// Somebody deleted it outside joka, or a restore lost it. It is not a
+	// failure to read: the row is gone, which is a fact about the database, and
+	// a convergence tool answers it by putting the row back.
+	ErrRowNotFound = errors.New("tracked row is not in the database")
+
 	// ErrEntityConflict means the database moved out from under the
 	// declaration: a column joka wrote holds a value joka did not write, so
 	// applying the file would discard a change it cannot account for. Which

@@ -40,7 +40,27 @@ func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.ApplySetAction{DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db), Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
+	declared := []*domain.EntityFile{file}
+	dirty := map[string]bool{file.Path: true}
+
+	// The apply takes its instructions from the plan, the way the command does.
+	state, err := infra.NewPostgresTxStateBackend(tx, db).Load(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("loading state: %v", err)
+	}
+
+	plan, err := (app.PlanSyncAction{DB: txAdapter, State: state, Declared: declared, Dirty: dirty}).Execute(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("planning: %v", err)
+	}
+
+	if _, err := (app.ApplySetAction{
+		DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db),
+		Declared: declared, Dirty: dirty,
+		Recreate: plan.Recreate, Write: plan.ColumnsToWrite(),
+	}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("initial sync of %s: %v", rel, err)
 	}
@@ -105,7 +125,27 @@ func applyModified(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.ApplySetAction{DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db), Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
+	declared := []*domain.EntityFile{file}
+	dirty := map[string]bool{file.Path: true}
+
+	// The apply takes its instructions from the plan, the way the command does.
+	state, err := infra.NewPostgresTxStateBackend(tx, db).Load(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("loading state: %v", err)
+	}
+
+	plan, err := (app.PlanSyncAction{DB: txAdapter, State: state, Declared: declared, Dirty: dirty}).Execute(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("planning: %v", err)
+	}
+
+	if _, err := (app.ApplySetAction{
+		DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db),
+		Declared: declared, Dirty: dirty,
+		Recreate: plan.Recreate, Write: plan.ColumnsToWrite(),
+	}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("update sync of %s: %v", rel, err)
 	}

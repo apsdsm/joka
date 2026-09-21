@@ -272,6 +272,8 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Declared: all,
 		Dirty:    dirty,
 		Keep:     keep,
+		Recreate: plan.Recreate,
+		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck

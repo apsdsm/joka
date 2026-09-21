@@ -22,6 +22,11 @@ type SyncPlan struct {
 	// declaration would discard a change joka did not make, so what happens to
 	// them is the caller's decision — see OnConflict.
 	Conflicts []RowConflict
+	// Recreate are the _ids joka tracks whose row is no longer in the database.
+	// Somebody deleted it, or a restore lost it. The apply inserts them again
+	// and re-points the tracking, which is the whole job of a tool that makes
+	// the database match the declaration.
+	Recreate map[string]bool
 	// Undeclared are tracked rows no file declares any more. Nothing would be
 	// deleted on their account; they are here so a dry run reports them.
 	Undeclared []domain.TrackedRow
@@ -71,6 +76,7 @@ type FileUpdatePlan struct {
 
 // RowUpdatePlan is a single tracked row and the columns that would change on it.
 type RowUpdatePlan struct {
+	RefID    string
 	Table    string
 	PKColumn string
 	PKValue  int64
@@ -125,6 +131,47 @@ func (p *SyncPlan) ConflictedColumns() int {
 		n += len(row.Columns)
 	}
 	return n
+}
+
+// ColumnsToWrite is the plan's answer to "what does the apply write", per _id.
+//
+// The apply used to decide for itself: it rewrote every column of every entity
+// in a file whose hash had moved. That disagreed with the plan in two ways that
+// mattered. It wrote nothing at all for a clean file, so a conflict resolved in
+// the declaration's favour and a row somebody had deleted were both planned and
+// then silently skipped. And it wrote every column rather than the changed
+// ones, so a `{{ now }}` in a file edited for an unrelated reason was rewritten
+// along with it.
+//
+// Taking the answer from the plan is also what makes `--on-conflict=ask` mean
+// anything: the operator answered questions about this plan, so this plan is
+// what has to be executed.
+// A conflicted column is included too, and filtered back out by ApplySetAction's
+// Keep. That is one rule instead of a policy argument, and it lands the four
+// cases correctly: under --on-conflict=file Keep is empty so the declaration is
+// written over the drift; under db every conflicted column is kept so none is;
+// under ask only the conceded ones are; and fail never reaches the apply.
+func (p *SyncPlan) ColumnsToWrite() map[string][]string {
+	out := make(map[string][]string)
+
+	for _, file := range p.Updates {
+		for _, row := range file.Rows {
+			if row.RefID == "" {
+				continue
+			}
+			for _, c := range row.Changes {
+				out[row.RefID] = append(out[row.RefID], c.Column)
+			}
+		}
+	}
+
+	for _, row := range p.Conflicts {
+		for _, c := range row.Columns {
+			out[row.RefID] = append(out[row.RefID], c.Column)
+		}
+	}
+
+	return out
 }
 
 // splitByVerdict separates the columns sync would write from the ones where the
@@ -199,6 +246,8 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 			// A table change is refused at apply time; the plan says so rather
 			// than reading a row that does not describe this entity.
 			if row.Table != e.Table {
+				// No RefID: the apply refuses this entity, so it must not
+				// reach ColumnsToWrite as something to write.
 				fup.Rows = append(fup.Rows, RowUpdatePlan{
 					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.PKValue,
 					Changes: []ColumnChange{{
@@ -211,6 +260,24 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 			}
 
 			changes, err := ResolveRowChanges(ctx, a.DB, e, row, refMap, now, a.Dirty[file.Path])
+
+			// The row joka tracks is gone. That is not a failure to read it —
+			// it is the state of the database, and the answer is to put the
+			// row back rather than to stop.
+			if errors.Is(err, domain.ErrRowNotFound) {
+				rip, planErr := a.planInsert(ctx, e, now)
+				if planErr != nil {
+					return nil, fmt.Errorf("%s: previewing: %w", file.Path, planErr)
+				}
+				fp.Rows = append(fp.Rows, rip)
+
+				if plan.Recreate == nil {
+					plan.Recreate = make(map[string]bool)
+				}
+				plan.Recreate[e.RefID] = true
+				continue
+			}
+
 			if err != nil {
 				return nil, fmt.Errorf("%s: previewing %s (_id %s): %w", file.Path, e.Table, e.RefID, err)
 			}
@@ -219,7 +286,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 
 			if len(pushes) > 0 {
 				fup.Rows = append(fup.Rows, RowUpdatePlan{
-					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.PKValue, Changes: pushes,
+					RefID: e.RefID, Table: e.Table, PKColumn: row.PKColumn, PKValue: row.PKValue, Changes: pushes,
 				})
 			}
 			if len(conflicts) > 0 {

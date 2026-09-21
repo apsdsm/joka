@@ -799,7 +799,34 @@ yes, so the declaration stays true instead of slowly becoming fiction.
 
 `ApplySetAction` takes the decision as `Keep` (`_id` → column → live hash) rather than a policy
 enum, so the applier has one concept — "these columns are the database's" — and the same field
-carries a per-column answer when the interactive resolve lands.
+carries the per-column answers `ask` produces.
+
+### The apply executes the plan
+
+`ApplySetAction` writes exactly what `SyncPlan.ColumnsToWrite` says, per `_id`. It used to decide for
+itself: rewrite every column of every entity in a file whose hash had moved. That disagreed with the
+plan in three ways, two of them bugs:
+
+- **A clean file was skipped entirely**, so a conflict resolved in the declaration's favour and a row
+  somebody had deleted were both planned and then never written.
+- **Every column was rewritten**, so a `{{ now }}` moved whenever anything else in its file did.
+- The operator answers `ask`'s questions about the plan, so the plan is what has to be executed.
+
+`ColumnsToWrite` includes conflicted columns and lets `Keep` filter them back out. One rule lands all
+four policies: under `file` `Keep` is empty so the declaration is written over the drift; under `db`
+every conflicted column is kept so none is; under `ask` only the conceded ones are; `fail` never
+reaches the apply.
+
+An entity with nothing to write is still **re-tracked** if its position or file moved — an insert
+earlier in the file shifts everything after it, and the record of where an entity was last declared
+is what error messages and `entity diff` read. Only a file that was actually written gets its content
+hash refreshed.
+
+**A tracked row that is no longer in the database is re-created.** `GetRow` reports it as
+`ErrRowNotFound`, the plan turns it into an insert and records the `_id` in `Recreate`, and the apply
+inserts it and re-points the tracking. The `_id` is the identity; which primary key it holds is not.
+Before this the run died reading a row that was not there — the failure `--force` was added for and
+never fixed.
 
 ## Identity matching (`ApplySetAction`)
 

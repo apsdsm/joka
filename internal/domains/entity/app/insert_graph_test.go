@@ -161,8 +161,15 @@ func (m *mockDBAdapter) UpdateRow(_ context.Context, table, pkColumn string, pkV
 	return nil
 }
 
-func (m *mockDBAdapter) GetRow(_ context.Context, table string, columns []string, _ string, pkValue int64) (map[string]any, error) {
-	row := m.currentRows[fmt.Sprintf("%s|%d", table, pkValue)]
+// GetRow reports a row that is not in currentRows the way the real adapter
+// does. Returning an empty map instead hid a real bug: a tracked row somebody
+// deleted read as every column being NULL.
+func (m *mockDBAdapter) GetRow(_ context.Context, table string, columns []string, pkColumn string, pkValue int64) (map[string]any, error) {
+	row, live := m.currentRows[fmt.Sprintf("%s|%d", table, pkValue)]
+	if !live {
+		return nil, fmt.Errorf("%w: %s %s=%d", domain.ErrRowNotFound, table, pkColumn, pkValue)
+	}
+
 	result := make(map[string]any, len(columns))
 	for _, c := range columns {
 		result[c] = row[c]

@@ -18,7 +18,9 @@ func col(table, refID string, columns map[string]any, children ...domain.Entity)
 	return domain.Entity{Table: table, RefID: refID, PKColumn: "id", Columns: columns, Children: children}
 }
 
-// applyAll runs every given file as dirty.
+// applyAll plans and applies every given file as dirty, the way the sync
+// command does. The apply takes its instructions from the plan, so a test that
+// skipped the plan would be exercising something the command never does.
 func applyAll(t *testing.T, db *mockDBAdapter, files ...*domain.EntityFile) *ApplyResult {
 	t.Helper()
 
@@ -27,7 +29,29 @@ func applyAll(t *testing.T, db *mockDBAdapter, files ...*domain.EntityFile) *App
 		dirty[f.Path] = true
 	}
 
-	result, err := ApplySetAction{DB: db, Backend: db.backend(), Declared: files, Dirty: dirty}.Execute(context.Background())
+	return applyPlanned(t, db, dirty, files...)
+}
+
+// applyPlanned is applyAll with the dirty set under the test's control, and the
+// declaration winning every conflict.
+func applyPlanned(t *testing.T, db *mockDBAdapter, dirty map[string]bool, files ...*domain.EntityFile) *ApplyResult {
+	t.Helper()
+
+	ctx := context.Background()
+
+	plan, err := (PlanSyncAction{DB: db, State: db.state, Declared: files, Dirty: dirty}).Execute(ctx)
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+
+	result, err := ApplySetAction{
+		DB:       db,
+		Backend:  db.backend(),
+		Declared: files,
+		Dirty:    dirty,
+		Recreate: plan.Recreate,
+		Write:    plan.ColumnsToWrite(),
+	}.Execute(ctx)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -84,8 +108,10 @@ func TestApplySetAddingAnEntityIsOneInsert(t *testing.T) {
 	if len(result.Inserted) != 1 || result.Inserted[0] != "second" {
 		t.Fatalf("expected exactly the new entity inserted, got %+v", result.Inserted)
 	}
-	if len(result.Updated) != 2 {
-		t.Errorf("expected the other two updated in place, got %+v", result.Updated)
+	// The other two did not change, so nothing is written to them. Adding an
+	// entity mid-file used to rewrite every row after it.
+	if len(result.Updated) != 0 {
+		t.Errorf("expected the unchanged rows left alone, got %+v", result.Updated)
 	}
 	if len(db.deletedRows) != 0 {
 		t.Errorf("expected nothing deleted, got %+v", db.deletedRows)

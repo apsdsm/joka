@@ -171,7 +171,7 @@ func (p *PostgresDBAdapter) GetRow(ctx context.Context, table string, columns []
 
 	err := p.db.QueryRowContext(ctx, query, pkValue).Scan(scan...)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("reading %s row %s=%d: row not found", table, pkColumn, pkValue)
+		return nil, fmt.Errorf("%w: %s %s=%d", domain.ErrRowNotFound, table, pkColumn, pkValue)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading %s row %s=%d: %w", table, pkColumn, pkValue, err)

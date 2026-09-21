@@ -53,6 +53,21 @@ type ApplySetAction struct {
 	// column is written. Never reached under --on-conflict=fail, which refuses
 	// before a transaction is opened.
 	Keep map[string]map[string]string
+	// Recreate names the _ids the plan found tracked but no longer in the
+	// database. They are inserted again and the tracking is re-pointed at the
+	// new row, rather than updated against a row that is not there.
+	Recreate map[string]bool
+	// Write is the plan's ColumnsToWrite: which columns of which _id to write.
+	// An _id absent from it has nothing to write, so its row is left alone and
+	// only its recorded position is refreshed.
+	//
+	// The apply used to decide this itself, by rewriting every column of every
+	// entity in a file whose hash had moved. That disagreed with the plan
+	// twice over: a clean file was skipped entirely, so a resolved conflict or
+	// a deleted row was planned and then never written; and every column was
+	// rewritten rather than the changed ones, so a {{ now }} moved whenever
+	// anything else in its file did.
+	Write map[string][]string
 }
 
 // ApplyResult reports what the run did.
@@ -108,12 +123,15 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			declared[e.RefID] = true
 		}
 
-		if !a.Dirty[file.Path] {
-			continue
-		}
-
 		for i, e := range entities {
 			row, isTracked := state.Row(e.RefID)
+
+			// A tracked row somebody deleted is inserted again. The _id is the
+			// identity; which primary key it happens to hold is not, so
+			// re-pointing it at a new row is the same entity continuing.
+			if isTracked && a.Recreate[e.RefID] {
+				isTracked = false
+			}
 
 			if !isTracked {
 				pk, applied, err := a.insert(ctx, e, refMap, now)
@@ -144,13 +162,20 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 					domain.ErrEntityTableChanged, e.RefID, row.Table, file.Path, e.Table)
 			}
 
-			kept := a.Keep[e.RefID]
+			refMap[e.RefID] = row.PKValue
 
-			applied, err := a.update(ctx, e, row, refMap, now, kept)
+			columns, hasWork := a.Write[e.RefID]
+			if !hasWork {
+				// Nothing about this row changed. Its position may still have,
+				// so the tracking is refreshed below without touching the row.
+				a.retrack(state, result, e, row, file.Path, i)
+				continue
+			}
+
+			applied, err := a.update(ctx, e, row, refMap, now, a.Keep[e.RefID], columns)
 			if err != nil {
 				return nil, err
 			}
-			refMap[e.RefID] = row.PKValue
 			result.Updated = append(result.Updated, e.RefID)
 
 			if row.File != file.Path {
@@ -159,17 +184,22 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 				})
 			}
 
-			// The baseline is re-recorded whether or not the position moved:
-			// the row was just rewritten, so what joka last applied is what it
-			// applied a moment ago.
+			// The row was just rewritten, so what joka last applied is what it
+			// applied a moment ago — for the columns it wrote. The rest keep
+			// the baseline they had.
 			row.File = file.Path
 			row.Order = i
-			row.Columns = baselineAfterUpdate(row.Columns, applied, e, kept)
+			row.Columns = baselineAfterUpdate(row.Columns, applied, e, a.Keep[e.RefID])
 			state.Track(e.RefID, row)
 		}
 
-		state.TrackFile(file.Path, file.ContentHash)
-		result.Files = append(result.Files, file.Path)
+		// Only a file that was written gets its content hash refreshed. A
+		// clean file's hash already matches, and a file whose entities were
+		// all conceded to the database has not been made to agree with it.
+		if a.Dirty[file.Path] {
+			state.TrackFile(file.Path, file.ContentHash)
+			result.Files = append(result.Files, file.Path)
+		}
 	}
 
 	// Read after the writes rather than before: everything written this run is
@@ -216,8 +246,9 @@ func (a ApplySetAction) update(
 	refMap map[string]int64,
 	now string,
 	kept map[string]string,
+	planned []string,
 ) (map[string]any, error) {
-	columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
+	resolved, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
 	if err != nil {
 		return nil, fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
 	}
@@ -227,17 +258,46 @@ func (a ApplySetAction) update(
 		pkColumn = "id"
 	}
 
-	// A _once column was seeded when the row was inserted and belongs to the
-	// database from then on. Writing it here is what made a password reset
-	// revert on the next sync of a modified file. A kept column is the same
-	// thing decided for this run rather than declared in the file.
-	writable := writableColumns(columns, e, kept)
+	// The plan said which columns differ; a _once column belongs to the
+	// database from the moment it was seeded, and a kept one was conceded to it
+	// for this run. Writing more than that is what made a password reset revert
+	// and a {{ now }} move whenever anything else in its file did.
+	writable := writableColumns(resolved, e, kept, planned)
+	if len(writable) == 0 {
+		return writable, nil
+	}
 
 	if err := a.DB.UpdateRow(ctx, e.Table, pkColumn, row.PKValue, writable); err != nil {
 		return nil, fmt.Errorf("updating %s (_id %s): %w", e.Table, e.RefID, err)
 	}
 
 	return writable, nil
+}
+
+// retrack records where an entity is declared now, for a row nothing wrote to.
+//
+// An entity can move file or shift position without its values changing — an
+// insert earlier in the file moves everything after it — and the record of
+// where it was last declared is what error messages and `entity diff` read.
+func (a ApplySetAction) retrack(
+	state *domain.State,
+	result *ApplyResult,
+	e domain.Entity,
+	row domain.EntityState,
+	path string,
+	position int,
+) {
+	if row.File == path && row.Order == position {
+		return
+	}
+
+	if row.File != path {
+		result.Moved = append(result.Moved, EntityMove{RefID: e.RefID, From: row.File, To: path})
+	}
+
+	row.File = path
+	row.Order = position
+	state.Track(e.RefID, row)
 }
 
 // baselineAfterUpdate records what the update just wrote, plus the two kinds of
@@ -275,25 +335,26 @@ func baselineAfterUpdate(
 	return out
 }
 
-// writableColumns drops the columns this run must not write: the ones the file
-// declares `_once`, and the ones a conflict was resolved in the database's
-// favour. It returns the map unchanged when there are neither, which is almost
-// every entity.
-func writableColumns(columns map[string]any, e domain.Entity, kept map[string]string) map[string]any {
-	if len(e.Once) == 0 && len(kept) == 0 {
-		return columns
-	}
+// writableColumns narrows a resolved row to the columns this run writes: the
+// ones the plan found different, minus the ones the file declares `_once` and
+// the ones a conflict was conceded to the database.
+func writableColumns(resolved map[string]any, e domain.Entity, kept map[string]string, planned []string) map[string]any {
+	out := make(map[string]any, len(planned))
 
-	out := make(map[string]any, len(columns))
-	for name, value := range columns {
+	for _, name := range planned {
 		if e.IsOnce(name) {
 			continue
 		}
 		if _, held := kept[name]; held {
 			continue
 		}
+		value, declared := resolved[name]
+		if !declared {
+			continue
+		}
 		out[name] = value
 	}
+
 	return out
 }
 

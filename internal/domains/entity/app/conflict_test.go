@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -186,6 +187,7 @@ func TestApplyKeepsTheDatabasesValue(t *testing.T) {
 		Declared: []*domain.EntityFile{changed},
 		Dirty:    map[string]bool{"a.yaml": true},
 		Keep:     KeepFromConflicts(plan.Conflicts, ConflictDB),
+		Write:    plan.ColumnsToWrite(),
 	}).Execute(context.Background()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -284,6 +286,7 @@ func TestRegeneratedColumnDriftIsDetected(t *testing.T) {
 			Declared: []*domain.EntityFile{file},
 			Dirty:    map[string]bool{"a.yaml": true},
 			Keep:     KeepFromConflicts(plan.Conflicts, ConflictDB),
+			Write:    plan.ColumnsToWrite(),
 		}).Execute(context.Background()); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
@@ -332,5 +335,68 @@ func TestRegeneratedColumnIsRewrittenOnlyWhenTheFileMoved(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected created_at queued as a regenerated push, got %+v", plan.Updates[0].Rows[0].Changes)
+	}
+}
+
+func TestPlanRecreatesADeletedRow(t *testing.T) {
+	// The failure --force was added for and never fixed: a tracked row
+	// somebody deleted used to make the whole run die reading a row that was
+	// not there.
+	db := newMockDBAdapter()
+	file := entityFile("a.yaml", col("fields", "alpha", map[string]any{"label": "Alpha"}))
+	applyAll(t, db, file)
+
+	delete(db.currentRows, "fields|1")
+
+	plan := seeded(t, db, file)
+
+	if !plan.Recreate["alpha"] {
+		t.Fatalf("expected alpha marked for re-creation, got %+v", plan.Recreate)
+	}
+	if len(plan.Inserts) != 1 || len(plan.Inserts[0].Rows) != 1 {
+		t.Fatalf("expected the row planned as an insert, got %+v", plan.Inserts)
+	}
+	if len(plan.Conflicts) != 0 {
+		t.Errorf("expected a missing row not reported as a conflict, got %+v", plan.Conflicts)
+	}
+}
+
+func TestApplyRecreatesADeletedRow(t *testing.T) {
+	db := newMockDBAdapter()
+	file := entityFile("a.yaml", col("fields", "alpha", map[string]any{"label": "Alpha"}))
+	applyAll(t, db, file)
+
+	before, _ := db.state.Row("alpha")
+	delete(db.currentRows, "fields|1")
+
+	plan := seeded(t, db, file)
+
+	if _, err := (ApplySetAction{
+		DB:       db,
+		Backend:  db.backend(),
+		Declared: []*domain.EntityFile{file},
+		Dirty:    map[string]bool{},
+		Recreate: plan.Recreate,
+	}).Execute(context.Background()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	after, ok := db.state.Row("alpha")
+	if !ok {
+		t.Fatal("expected alpha still tracked")
+	}
+
+	// The _id is the identity; which primary key it holds is not, so the
+	// tracking follows the new row.
+	if after.PKValue == before.PKValue {
+		t.Errorf("expected the tracking re-pointed at a new row, still at %d", after.PKValue)
+	}
+	if _, live := db.currentRows[fmt.Sprintf("fields|%d", after.PKValue)]; !live {
+		t.Error("expected the row back in the database")
+	}
+
+	// And the run settles: nothing left to do.
+	if plan := seeded(t, db, file); plan.HasChanges() {
+		t.Errorf("expected the re-creation to settle, got %+v", plan)
 	}
 }
