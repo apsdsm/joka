@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/apsdsm/joka/cmd/shared"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/infra"
 	"github.com/apsdsm/joka/internal/textui"
@@ -45,24 +44,27 @@ func (r RunEntityDiffCommand) Execute(ctx context.Context) error {
 
 	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	// The tracking tables are read, never created: a file that has never been
-	// synced is a finding, and diff is the command you reach for on a database
-	// where something is already wrong.
-	tracked, err := jokadb.TableExists(ctx, r.DB, "joka_entities")
-	if err != nil {
-		return fail(err)
-	}
-
 	fullPath := filepath.Join(r.EntitiesDir, r.FilePath)
 	onDisk := true
 	if _, err := os.Stat(fullPath); err != nil {
 		onDisk = false
 	}
 
+	// Tracking is read, never created: a file that has never been synced is a
+	// finding, and diff is the command you reach for on a database where
+	// something is already wrong. Load returns an empty state for a database
+	// with no tracking at all, so "has anything ever been synced" comes from
+	// the state rather than from a probe for a particular table.
+	//
+	// It used to probe joka_entities, which tracking version 3 drops. Every
+	// up-to-date database therefore reported every file as never synced, and
+	// diff rendered the untracked view for all of them.
 	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
 	if err != nil {
 		return fail(err)
 	}
+
+	tracked := len(state.Files) > 0 || len(state.Entities) > 0 || len(state.Unkeyed) > 0
 
 	action := app.DiffEntityAction{
 		DB:         dbAdapter,
@@ -80,13 +82,8 @@ func (r RunEntityDiffCommand) Execute(ctx context.Context) error {
 		action.Entities = file.Entities
 	}
 
-	if !tracked {
-		// Nothing has ever been synced, so IsEntitySynced would fail against a
-		// table that does not exist.
-		if !onDisk {
-			return fail(fmt.Errorf("%s is neither on disk nor tracked", r.FilePath))
-		}
-		return r.renderUntracked(action, jsonOut)
+	if !tracked && !onDisk {
+		return fail(fmt.Errorf("%s is neither on disk nor tracked", r.FilePath))
 	}
 
 	diff, err := action.Execute(ctx)
@@ -106,31 +103,6 @@ func (r RunEntityDiffCommand) Execute(ctx context.Context) error {
 	return nil
 }
 
-// renderUntracked covers a database with no joka_entities table at all: every
-// declared entity would be inserted.
-func (r RunEntityDiffCommand) renderUntracked(action app.DiffEntityAction, jsonOut bool) error {
-	diff := &app.EntityDiff{
-		Path:          action.Path,
-		OnDisk:        true,
-		MatchedBy:     app.MatchByPosition,
-		DeclaredCount: app.CountEntities(action.Entities),
-	}
-	diff.Inserts = diff.DeclaredCount
-
-	if jsonOut {
-		shared.PrintJSON(struct {
-			Status string `json:"status"`
-			*app.EntityDiff
-		}{Status: "ok", EntityDiff: diff})
-		return nil
-	}
-
-	fmt.Println()
-	color.Cyan("%s has never been synced — all %d entities would be inserted.", diff.Path, diff.DeclaredCount)
-	fmt.Println()
-	return nil
-}
-
 // renderDiff writes the alignment.
 func renderDiff(w io.Writer, d *app.EntityDiff) {
 	bold := color.New(color.Bold)
@@ -140,6 +112,9 @@ func renderDiff(w io.Writer, d *app.EntityDiff) {
 	bold.Fprintf(w, "entity diff  %s\n", d.Path)
 
 	switch {
+	case !d.Tracked && d.Adoptions > 0:
+		dim.Fprintf(w, "not tracked — %d of %d entities are already in the database and would be claimed\n",
+			d.Adoptions, d.DeclaredCount)
 	case !d.Tracked:
 		dim.Fprintln(w, "not tracked — every entity would be inserted")
 	case !d.OnDisk:
@@ -178,8 +153,8 @@ func renderDiff(w io.Writer, d *app.EntityDiff) {
 func renderDiffSummary(w io.Writer, d *app.EntityDiff) {
 	dim := color.New(color.Faint)
 
-	dim.Fprintf(w, "  %d declared · %d tracked · %d insert · %d delete · %d changed · %d moved\n",
-		d.DeclaredCount, d.TrackedCount, d.Inserts, d.Deletes, d.Changes, d.Moves)
+	dim.Fprintf(w, "  %d declared · %d tracked · %d insert · %d claim · %d delete · %d changed · %d moved\n",
+		d.DeclaredCount, d.TrackedCount, d.Inserts, d.Adoptions, d.Deletes, d.Changes, d.Moves)
 
 	if len(d.RegeneratedColumns) > 0 {
 		dim.Fprintf(w, "  rewritten on every sync regardless of what the row holds: %s\n",
@@ -212,6 +187,9 @@ func renderDiffSummary(w io.Writer, d *app.EntityDiff) {
 	fmt.Fprintln(w)
 
 	switch {
+	case !d.Tracked && d.Adoptions > 0:
+		color.New(color.FgCyan).Fprintf(w, "  → joka entity sync   (claims %d, inserts %d)\n",
+			d.Adoptions, d.Inserts)
 	case !d.Tracked:
 		color.New(color.FgCyan).Fprintf(w, "  → joka entity sync   (inserts all %d)\n", d.DeclaredCount)
 	case !d.OnDisk:
@@ -219,8 +197,8 @@ func renderDiffSummary(w io.Writer, d *app.EntityDiff) {
 	case d.Changes > 0:
 		color.New(color.FgYellow).Fprintf(w, "  → joka entity sync   (updates %d %s in place)\n", d.Changes, isAreRowsNoun(d.Changes))
 	case d.MissingRows > 0:
-		color.New(color.FgYellow).Fprintf(w, "  → joka entity reimport %s   (re-creates the missing %s)\n",
-			d.Path, isAreRowsNoun(d.MissingRows))
+		color.New(color.FgYellow).Fprintf(w, "  → joka entity sync   (puts back the missing %s)\n",
+			isAreRowsNoun(d.MissingRows))
 		color.New(color.FgYellow).Fprintf(w, "  → joka entity forget %s     (drops the tracking instead, if the deletion was deliberate)\n", d.Path)
 	default:
 		color.New(color.FgGreen).Fprintln(w, "  the file and the tracking agree")
@@ -234,6 +212,10 @@ func diffMarker(line app.DiffLine) string {
 	switch {
 	case line.Status == app.DiffInsert:
 		return "+"
+	// Distinct from + because the row is already there: sync claims it and
+	// writes the declaration over it, rather than creating anything.
+	case line.Status == app.DiffAdopt:
+		return "@"
 	case line.Status == app.DiffDelete:
 		return "-"
 	case line.Status == app.DiffUnpaired:
@@ -251,6 +233,8 @@ func diffStyle(line app.DiffLine) *color.Color {
 	switch {
 	case line.Status == app.DiffInsert:
 		return color.New(color.FgCyan)
+	case line.Status == app.DiffAdopt:
+		return color.New(color.FgYellow)
 	case line.Status == app.DiffDelete, line.Status == app.DiffUnpaired:
 		return color.New(color.FgRed)
 	case line.Status == app.DiffChanged, line.Moved:
@@ -261,6 +245,12 @@ func diffStyle(line app.DiffLine) *color.Color {
 }
 func diffNotes(line app.DiffLine) []string {
 	var notes []string
+
+	if line.Status == app.DiffAdopt {
+		notes = append(notes, fmt.Sprintf(
+			"already in the database and not tracked — sync would claim this row, matched on %s",
+			strings.Join(line.MatchedOn, ", ")))
+	}
 
 	if line.DeclaredTable != "" {
 		notes = append(notes, fmt.Sprintf("the file declares table %s here, the tracked row is in %s",
@@ -296,6 +286,12 @@ func diffTable(line app.DiffLine) string {
 }
 
 func rowLabel(line app.DiffLine) string {
+	// An adopted line has no tracked position — that is what makes it an
+	// adoption — but it does name the row sync would claim, which is the one
+	// thing the reader wants to see on that line.
+	if line.Status == app.DiffAdopt {
+		return fmt.Sprintf("%s %d", line.PKColumn, line.PKValue)
+	}
 	if line.TrackedPos == 0 {
 		return "·"
 	}

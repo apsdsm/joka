@@ -506,3 +506,69 @@ func TestDiffEntityDepth(t *testing.T) {
 		}
 	})
 }
+
+func TestDiffReportsAnAdoptionRatherThanAnInsert(t *testing.T) {
+	// The diff is the no-risk half of sync, so it has to look where sync looks.
+	// An untracked entity whose row is already in the database is claimed, not
+	// inserted, and a diff that said "insert" would be describing a run that
+	// cannot happen.
+	db := newMockDBAdapter()
+	db.uniqueKeys = map[string][][]string{"fields": {{"xid"}}}
+	db.currentRows["fields|7"] = map[string]any{"xid": "field-one", "label": "Set up by hand"}
+
+	diff, err := (DiffEntityAction{
+		DB:    db,
+		State: domain.NewState(),
+		Path:  "a.yaml",
+		Entities: []domain.Entity{{
+			Table: "fields", RefID: "alpha", PKColumn: "id",
+			Columns: map[string]any{"xid": "field-one", "label": "Declared"},
+		}},
+		OnDisk:     true,
+		SkipValues: true,
+	}).Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if diff.Adoptions != 1 || diff.Inserts != 0 {
+		t.Fatalf("expected 1 claim and no insert, got %d/%d", diff.Adoptions, diff.Inserts)
+	}
+	if len(diff.Lines) != 1 || diff.Lines[0].Status != DiffAdopt {
+		t.Fatalf("expected an adopt line, got %+v", diff.Lines)
+	}
+
+	// The row it would claim, and the key it matched on: a claim is
+	// consequential enough that the reader has to be able to check both.
+	line := diff.Lines[0]
+	if line.PKValue != 7 {
+		t.Errorf("expected the row it would claim named, got %d", line.PKValue)
+	}
+	if len(line.MatchedOn) != 1 || line.MatchedOn[0] != "xid" {
+		t.Errorf("expected the key reported, got %v", line.MatchedOn)
+	}
+}
+
+func TestDiffStillReportsAnInsertWhenThereIsNothingToClaim(t *testing.T) {
+	db := newMockDBAdapter()
+	db.uniqueKeys = map[string][][]string{"fields": {{"xid"}}}
+
+	diff, err := (DiffEntityAction{
+		DB:    db,
+		State: domain.NewState(),
+		Path:  "a.yaml",
+		Entities: []domain.Entity{{
+			Table: "fields", RefID: "alpha", PKColumn: "id",
+			Columns: map[string]any{"xid": "field-two"},
+		}},
+		OnDisk:     true,
+		SkipValues: true,
+	}).Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if diff.Inserts != 1 || diff.Adoptions != 0 {
+		t.Errorf("expected an ordinary insert, got %d insert / %d claim", diff.Inserts, diff.Adoptions)
+	}
+}

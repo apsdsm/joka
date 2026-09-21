@@ -21,8 +21,6 @@ go run . [command] [options]
 
 # Examples
 go run . init
-go run . status
-go run . status --compact
 go run . make "add_users_table"
 go run . migrate up
 go run . migrate status
@@ -31,11 +29,8 @@ go run . migrate verify
 go run . migrate consolidate --up-to 250116140000
 go run . data sync
 go run . entity sync
-go run . entity status
 go run . entity diff admin_user.yaml
-go run . entity reimport admin_user.yaml
 go run . entity forget admin_user.yaml
-go run . entity update admin_user.yaml
 go run . drop
 go run . reset
 go run . unlock
@@ -57,8 +52,7 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 - **`db/`** — Database utilities (`Open`, `TableExists`).
 - **`cmd/`** — Command handlers. Each receives dependencies and calls into domain actions.
 - **`internal/domains/`** — Domain logic, organized by bounded context.
-- **`internal/status/`** — Cross-domain read model behind `joka status`. Sits above the domains (they never import each other) and reads from all of them.
-- **`internal/textui/`** — Rune-aware terminal table used by `joka status` and `joka entity diff`. Widths are counted in runes, never bytes: `✓` is three bytes and `·` is two, so byte padding misaligns them by different amounts.
+- **`internal/textui/`** — Rune-aware terminal table used by `joka entity diff`. Widths are counted in runes, never bytes: `✓` is three bytes and `·` is two, so byte padding misaligns them by different amounts.
 
 ### Domains
 
@@ -99,7 +93,7 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
 - **CLI flags**: `--env` for .env path, `--profile`/`-p` for the config profile, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
 - **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
-- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, `entity reimport`, `entity forget`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
+- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, `entity forget`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
 
@@ -141,59 +135,10 @@ CREATE TABLE joka_state (
 
 `joka_entities` and `joka_entity_rows` held this until tracking version 3 and are dropped by the
 upgrade that moves them. The backend still **reads** them, because read-only commands never upgrade
-and `joka status` has to describe a database no mutating command has touched yet. Nothing creates or
+and `entity diff` has to describe a database no mutating command has touched yet. Nothing creates or
 writes them.
 
-`joka_lock`, `joka_snapshots`, `joka_state`, and `joka_meta` are auto-created on first use. Only `joka_migrations` requires `joka init`. The one exception is `joka status`, which never creates them — a missing tracking table is something it reports. `entity status` and `entity diff` create nothing either: a state that has never been written reads as empty.
-
-## Status report
-
-`joka status` (`internal/status`, `cmd/status`) builds one read-only report of the three
-states joka works between: **declared** (the devops folder), **tracked** (the `joka_*` tables) and
-**live** (the database). Every mismatch joka can hit is a disagreement between two of those.
-
-Coverage per edge, and which command reported it before:
-
-| Edge | Previously | In the report |
-|---|---|---|
-| migration files vs `joka_migrations` | `migrate status` | MIGRATIONS section |
-| snapshot vs live schema | `migrate verify` | drift subsection |
-| entity file hash vs `joka_entities` | `entity status` | ENTITIES section |
-| `joka_entity_rows` vs live rows | nothing | ENTITIES `live` / `missing_rows` |
-| template records vs table row counts | nothing | TEMPLATES section |
-| held advisory lock | error text on the next mutating command | LOCK section |
-
-### Design notes
-
-- **Read-only, including tracking tables.** Every other command auto-creates the `joka_*` table it
-  needs. Status must not: a missing tracking table is a finding. Reads that would create one
-  (`GetLatestSnapshotIndex` calls `EnsureSnapshotsTable`; the lock adapter's `GetLock` calls
-  `EnsureTable`) are gated behind a `Probe.TableExists` check. `TestStatusIsReadOnly` asserts a bare
-  database still has no `joka_*` tables after a full report.
-- **Alignment is by index, not by position.** `GetMigrationChainAction` (behind `migrate status` and
-  `migrate up`) walks files and rows positionally and returns an error the moment they disagree, so
-  on exactly the databases worth diagnosing it reports nothing. `buildMigrations` takes the union of
-  indexes from both sides, which is what makes `file_missing` and `out_of_order` reportable.
-- **The file verdict comes from sync's own check.** Whether a file counts as new, modified or synced
-  is `app.FileStatusFor`, the one function `entity status` and `entity sync` also call, so the three
-  cannot disagree about what a sync would rewrite. The rule they share is that an empty stored hash
-  (a row synced before content hashing existed) reads as modified.
-- **Not every finding has a command.** `Action.Command` is empty when joka has nothing that fixes
-  the finding; the text report prints `(nothing joka can run)`. Do not invent a command in the
-  actions list that does not exist — add the command first (`entity forget` was added exactly this
-  way, for the orphan and deleted-row findings that previously had no answer).
-- **`--compact` is one line, positionally stable.** Every section appears whether or not it has a
-  problem, so the line reads the same way each time (`internal/status/compact.go`). `+N` is entity
-  files new or modified, `!N` is real problems, `n/a` is a section that could not be read. It is
-  rejected alongside `--output json`, which is already the whole report.
-- **`--output json` is the same struct.** Text and JSON render one `status.Report`; empty slices are
-  normalized to `[]` (`Report.normalize`) so consumers do not need null checks. Exit code is 0
-  whenever the report could be built — `migrate verify` remains the drift gate for CI.
-- **Column widths are counted in runes.** `✓` is three bytes and `·` is two, so
-  `internal/textui` pads by rune count and colours whole lines rather than cells (an escape
-  sequence inside a padded cell breaks the alignment it was padded for).
-  `TestRenderTextAlignsMultiByteGlyphs` and `TestTableAlignsMultiByteGlyphs` guard this — both assert
-  on **rune** offsets, since two aligned columns sit at different byte offsets when the glyphs differ.
+`joka_lock`, `joka_snapshots`, `joka_state`, and `joka_meta` are auto-created on first use. Only `joka_migrations` requires `joka init`. `entity diff` creates nothing: it is read-only, and a state that has never been written reads as empty.
 
 ## Schema drift detection
 
@@ -331,16 +276,23 @@ which is the problem that made `entity sync` skip already-synced files in the fi
 - Each entity's auto-generated PK is stored in a reference map under its `_id` handle
 - Children can reference any previously inserted entity via `{{ handle.id }}`
 - All inserts within a file run in a single transaction
-- Files are tracked in `joka_entities`; unchanged files are skipped on re-run
-- Each inserted row is tracked in `joka_entity_rows` with table, PK, and insertion order
-- Duplicate `_id` handles within a single file are rejected with an error
+- Every entity and every row it wrote is recorded in the state document (see **Entity state**)
+- An `_id` claimed twice anywhere in the loaded set is rejected before anything is written
 
-**Sync of modified files** (`joka entity sync`):
-- New files (not yet tracked) have their entity graph inserted.
-- Files whose content changed since the last sync (`[modified]` per `entity status`) are reconciled **in place**: the file's entity graph is flattened depth-first (the same order rows were inserted and recorded in `joka_entity_rows`) and each entity is `UPDATE`d against the tracked row at the same position, by primary key. This is non-destructive — existing PKs are preserved, so external rows that reference them by id stay valid (no delete, so no FK conflict). Entities without an `_id` are handled fine; matching is positional, not by `_id`.
-- Unchanged files (stored hash matches) are skipped. A tracked file with an empty stored hash (synced before content hashing existed) is treated as modified, and the update backfills the hash.
-- The update path rewrites **all** columns of each matched row (the PK column itself is never written), so non-deterministic expressions like `{{ argon2id|… }}` produce a fresh value on every sync of a modified file.
-- Sync refuses to update a modified file and recommends `entity reimport` (returning `ErrStructuralChange`) when it detects a structural change: a different number of entities than tracked (one was added or removed), an entity whose table no longer matches the tracked row at that position, or an `_id` that disagrees with the tracked row at that position (reorder/rename). Use `entity reimport` (full re-insert) or, for additive-only changes where every entity has an `_id`, `entity update`.
+**What a sync does** (`joka entity sync`):
+- The seed files are the desired state. Every declared entity is compared against the database,
+  whether or not its file changed — the content hash decides which files get their hash rewritten,
+  not what gets reconciled.
+- An entity is matched to its row by `_id`, across the whole set rather than within one file, so it
+  can move between files and keep its row. See **Identity matching**.
+- An entity joka does not track is looked for by a unique key its declaration fills in. Found, the
+  row is claimed; not found, it is inserted. See **Adoption**.
+- A tracked entity has each declared column compared three ways — file, database, and what joka last
+  applied. Only the file moved: push. The database moved: conflict, and `--on-conflict` decides.
+  See **Convergence**.
+- A tracked row that is gone from the database is inserted again and the tracking re-pointed at it.
+- Nothing is ever deleted. A tracked entity no file declares is reported, not removed.
+- Updates preserve primary keys, so external rows referencing them by id stay valid.
 
 **Preview / dry-run** (`joka entity sync --dry-run`):
 - Prints the plan without applying anything or acquiring the advisory lock: new files show the rows/columns that would be inserted; modified files show a per-column before/after diff (the "before" is read live from the DB).
@@ -350,43 +302,18 @@ which is the problem that made `entity sync` skip already-synced files in the fi
 - `--output json` includes a `plan` object (and `dry_run: true` for `--dry-run`).
 - Value comparison normalizes driver types to strings; a column stored as a SQL decimal may show a spurious diff against a YAML float that formats differently (e.g. `3.50` vs `3.5`).
 
-**Entity status** (`joka entity status`):
-- Compares entity files on disk with the tracking table
-- Reports status per file: `synced` (hash matches), `modified` (hash differs), `new` (not yet synced), `orphaned` (tracked but file deleted)
-- Uses SHA-256 content hashing stored in `joka_entities.content_hash`
-
-**Entity reimport** (`joka entity reimport <file>`):
-- Deletes the rows it still declares, in reverse insertion order (children first, then parents)
-- **Leaves a row the file no longer declares**, and reports it. `entity sync` refuses to delete an
-  undeclared entity because a seed file edited by mistake must not take data with it; reimport
-  deleting it silently — while the output said only "tracked rows to delete: N" — was the same
-  mistake with a different command name on it. `--prune` says to mean it.
-- Reads and validates the **whole set**, not just the named file: an `_id` is unique across the set,
-  and an entity can be tracked against a file other than the one declaring it.
-- Re-inserts the entity graph from the YAML file
-- Aborts on FK constraint violations from external references
-- Updates the content hash and row tracking after successful reimport
-- Requires prior sync; use `entity sync` first for new files
-
-**Entity update** (`joka entity update <file>`):
-- Additive-only alternative to reimport — never deletes existing rows
-- Skips entities whose `_id` is already tracked; inserts only new ones
-- Pre-populates the reference map from tracked data so new children can reference existing parents via `{{ parent.id }}`
-- All entities must have `_id` (required to determine skip vs insert)
-- Requires prior sync; use `entity sync` first for new files
-- New rows are tracked with `insertion_order` continuing from existing maximum
-
 **Entity forget** (`joka entity forget <file>` / `--orphans`):
 - Removes the `joka_entities` record and every `joka_entity_rows` entry for a file. **Never touches
   the rows they point at, and never touches the file on disk.** The inverse of `reimport`, which
   replaces the rows and keeps the tracking.
 - Answers the two states nothing else resolves: tracking whose rows were deleted by hand elsewhere,
-  and an orphan (file and rows both gone, tracking left behind). `joka status` names it for both.
+  and an orphan (file and rows both gone, tracking left behind). `entity diff` shows both.
 - **Refuses when a tracked row is still in the database** (`ErrRowsStillLive`), because dropping the
   tracking for a live row leaves a row joka does not own and the next sync inserts a second copy.
   `--force` overrides; the plan still reports the live rows either way.
-- `--orphans` resolves its targets through `EntityStatusAction`, the same comparison `entity status`
-  reports, so the two can never disagree about which files are orphaned.
+- `--orphans` resolves its targets through `EntityStatusAction`, which compares the files on disk
+  against the tracked ones. It is the last caller of that action; `entity status`, the command it was
+  written for, is gone.
 - `ForgetEntityAction` splits `Plan` (read-only, used for the preview and the refusal) from
   `Execute`. `Execute` returns the plan it acted on, and returns it alongside `ErrRowsStillLive` too,
   so the caller shows the offending rows rather than packing them into the error string.
@@ -467,7 +394,7 @@ joka is the *newer* of the two. The case sniffing cannot cover is an older joka 
 newer joka already wrote: it has no way to know the format moved. `Check` makes that refusable.
 
 - **A blocker must not block its own remedy.** Version 2 refused a database whose tracked rows had no
-`_id` and told the reader to run `entity reimport` or `entity forget`; both are mutating commands, so
+`_id` and told the reader to run a mutating command to clear it; those are mutating commands, so
 the same refusal stopped them, and `drop` and `reset` with them. Before adding a blocker, check that
 something can still be run to clear it.
 
@@ -490,7 +417,24 @@ something can still be run to clear it.
   `PersistentPostRunE` only on success, so a failed reset leaves the marker alone.
 - **An unparseable version is treated as too new.** joka writes a decimal string, so anything else
   came from something this build does not understand.
-- `joka status` reports the marker in its header (`written by joka 0.14.0`) and in JSON under `meta`.
+- Nothing reports the marker now that `joka status` is gone. `meta.Read` is where to get it.
+
+## Commands the convergence work removed
+
+`entity update`, `entity status`, `entity reimport` and `joka status` are gone. Each existed to work
+around something sync could not do, and sync does all of it now.
+
+| Removed | Why |
+|---|---|
+| `entity update` | Skipped tracked `_id`s and inserted the rest. Sync does that for the whole set. Its one distinguishing property — never touching an existing row — meant an edit to an existing entity was silently ignored. |
+| `entity status` | Reported per-file `synced`/`modified` from the content hash, which no longer decides what a sync does. `entity sync --dry-run` answers the question it was being asked. `EntityStatusAction` survives for `entity forget --orphans`. |
+| `entity reimport` | Existed for the structural changes sync used to refuse. `--decayed` rewrites every column, `Recreate` puts back a deleted row, and identity matching handles renames and moves. |
+| `joka status` | Visibility work from the same commit as `entity diff` and `entity forget`, done to find a way around a sync that could not be trusted. The per-domain commands it aggregated are all still there. |
+
+**joka can no longer delete a seeded row.** `reimport --prune` was the only thing that did, and
+`DBAdapter.DeleteRow` went with it. Sync reports an undeclared entity and leaves the row alone;
+`entity forget` drops the tracking without touching it; `drop` takes whole tables. If pruning is
+wanted back it belongs on sync as a flag, not as a command whose safe uses are all covered elsewhere.
 
 ## Entity identity (`_id`)
 
@@ -522,9 +466,9 @@ now, which is how they could write a set sync would refuse and, since the state 
 ### Where it is enforced
 
 - **`entity sync`** validates the whole set before writing anything, and refuses.
-- **`joka status`** reports problems per file (`EntityFile.IdentityProblems`) and raises an action
-  with no command — an `_id` has to be authored, and choosing one is a decision about what the
-  entity is.
+- **`entity diff`** names the entities and rows with no `_id` (`UnkeyedDeclared`, `UnkeyedTracked`),
+  which is what stops an identity match. Choosing an `_id` is a decision about what the entity is, so
+  no command can do it for you.
 - Sync now **parses every file**, including ones the content hash says are unchanged: `_id`
   uniqueness is a property of the whole set, so an unchanged file still has to be read to know what
   it claims. The hash decides whether a file is *written*, not whether it is *read*.
@@ -572,7 +516,7 @@ var Steps = []Step{
   case is invisible, the case needing a human is loud. This avoids the boot-blocking stop a
   mandatory `joka upgrade` command would put in every `&&` chain.
 - **Only mutating commands upgrade.** Read-only commands work fine against a database that is behind
-  or blocked — you can always run `joka status` to see what is wrong.
+  or blocked — `entity diff` still works, and the refusal names what stands in the way.
 - **A blocked upgrade changes nothing**, including the version stamp, so a retry starts from a state
   that was described. `Apply` must be idempotent.
 - **Steps add constraints, never rewrite data.** An upgrade may add an index or a column; it must not
@@ -589,8 +533,7 @@ as metadata — where the entity was last declared — and is no longer what ide
 
 Blocked by two things, both real rather than theoretical:
 
-- **Rows with no `ref_id`**, synced before joka recorded one. Fix with `entity reimport` or
-  `entity forget`.
+- **Rows with no `ref_id`**, synced before joka recorded one. Fix with `entity forget`.
 - **An `_id` claimed by more than one tracked row.** Version 1 allowed this because it keyed on the
   file, so two entity sets seeded into one database (a `dev1/` and a `local/` tree of the same
   seeds) both claim the same `_id`s. One claim has to go.
@@ -607,10 +550,10 @@ It blocks on **one** thing: an `_id` claimed by more than one tracked row. The d
 keyed on `_id`, so two rows under one key is not a hard case, it is an impossible one.
 
 A row with **no** `_id` is deliberately not a blocker, and version 2 no longer blocks on one either.
-It used to, and the refusal named `entity reimport` and `entity forget` as the remedy — both of which
+It used to, and the refusal named mutating commands as the remedy — both of which
 the same refusal blocked, along with `drop` and `reset`. A database in that state had no joka command
 that could move it; tic_main was found in exactly that state. Those rows go into the document's
-`Unkeyed`, where `joka status` reports them and `entity forget` clears them.
+`Unkeyed`, where `entity forget` clears them.
 
 **`drop` and `reset` are not gated on the upgrade at all** (`joka:wipes`). They destroy the tracking,
 so upgrading it first is meaningless, and being unable to reset a database because its bookkeeping
@@ -679,7 +622,7 @@ failing to mention one, because a caller saves the document it loaded.
 same information across `joka_entities` and `joka_entity_rows`, and a database still on version 2 is
 read from those. The document wins when both are present — that is a database mid-upgrade, or one
 whose `DROP` did not land, and the document is what the current joka wrote. The legacy reader exists
-because **read-only commands never upgrade**, so `joka status` must describe a database no mutating
+because **read-only commands never upgrade**, so `entity diff` must describe a database no mutating
 command has reached.
 
 Only the database backend can write the document in the same transaction as the rows it describes,
@@ -708,8 +651,8 @@ markers in `joka_meta` make that comparison possible:
 | `state_identity` | a UUID naming this database, stamped once with `ON CONFLICT DO NOTHING` and never rewritten — it travels with a dump, which is the point |
 | `state_version` | incremented in the same transaction as the write, because a count that could commit without the write it counts is worse than no count |
 
-`app.AuditState` reads the pair against the file's and returns one of six verdicts; `joka status`
-prints the note when it is not `agrees` or `untracked`.
+`app.AuditState` reads the pair against the file's and returns one of seven verdicts. Nothing
+prints them now that `joka status` is gone — only the refusal below acts on one.
 
 | | |
 |---|---|
@@ -731,7 +674,7 @@ A database with no state at all is not evidence of anything — it is a fresh on
 and syncing into it is the ordinary first run.
 
 **Writing is after the commit and cannot fail the command.** A file cannot join a transaction. The
-database is already consistent; an unwritten file is a finding `joka status` reports, not a reason to
+database is already consistent; an unwritten file is a finding, not a reason to
 claim a sync that happened did not. The write goes to a temporary file beside the target and is
 renamed, so a reader never sees half a document.
 
@@ -741,9 +684,9 @@ is written, which is not done.
 
 ### Who loads and who saves
 
-- **Read-only commands** (`joka status`, `entity status`, `entity diff`) load once on the raw
-  connection and pass the value to the actions. The actions take a `*domain.State`, not a backend, so
-  they cannot write and cannot create a table — which is what keeps `joka status` read-only.
+- **Read-only commands** (`entity diff`) load once on the raw connection and pass the value to the
+  actions. The actions take a `*domain.State`, not a backend, so they cannot write and cannot create
+  a table — which is what keeps the diff read-only.
 - **Writing commands** load *twice*: once outside the transaction for the preview, and once inside it
   in the action that writes. `entity sync` previews with `PlanSyncAction` on the outer read and
   applies with `ApplySetAction` on the inner one. Making the apply consume the previewed plan instead

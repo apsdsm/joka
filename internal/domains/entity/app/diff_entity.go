@@ -30,7 +30,8 @@ const (
 const (
 	DiffSame     = "same"     // paired, no column changes
 	DiffChanged  = "changed"  // paired, some columns differ
-	DiffInsert   = "insert"   // declared but not tracked
+	DiffInsert   = "insert"   // declared, not tracked, and not in the database
+	DiffAdopt    = "adopt"    // declared, not tracked, but already in the database
 	DiffDelete   = "delete"   // tracked but not declared
 	DiffUnpaired = "unpaired" // paired, but the two sides name different tables
 )
@@ -77,6 +78,12 @@ type EntityDiff struct {
 	// MissingRows counts tracked rows that are no longer in the database.
 	MissingRows int `json:"missing_rows"`
 
+	// Adoptions counts declared entities joka does not track that are already
+	// in the database, found by a unique key the declaration fills in. Sync
+	// claims those rows rather than inserting over them, so a diff that
+	// reported them as inserts would be describing a run that cannot happen.
+	Adoptions int `json:"adoptions"`
+
 	// KeyedByID reports whether every declared entity and every tracked row
 	// carries an _id — the precondition for matching on identity rather than
 	// position.
@@ -105,6 +112,12 @@ type DiffLine struct {
 	// entity, 1 for one under a `_has:`, and so on. 0 for a line with no
 	// declared side — a tracked row records no nesting.
 	Depth int `json:"depth"`
+
+	// MatchedOn names the unique-key columns an adopted row was found by, and
+	// is empty on every other line. A claim is consequential enough that the
+	// reader has to be able to check joka matched on the column they would
+	// have.
+	MatchedOn []string `json:"matched_on,omitempty"`
 
 	// DeclaredPos is the 1-based depth-first position in the file, or 0 when
 	// the line has no declared side.
@@ -252,6 +265,22 @@ func (a DiffEntityAction) buildLines(ctx context.Context, diff *EntityDiff, decl
 			line.Status = DiffDelete
 			diff.Deletes++
 		case row == nil:
+			// Untracked does not mean absent. Sync looks the row up by a unique
+			// key the declaration fills in and claims it if it is there, so the
+			// diff has to look in the same place or it reports an insert that
+			// sync will not perform.
+			adoption, adopted, err := adopt(ctx, a.DB, *entity, a.Path, p.declared)
+			if err != nil {
+				return err
+			}
+			if adopted {
+				line.Status = DiffAdopt
+				line.PKColumn = adoption.Row.PKColumn
+				line.PKValue = adoption.Row.PKValue
+				line.MatchedOn = adoption.MatchedOn
+				diff.Adoptions++
+				break
+			}
 			line.Status = DiffInsert
 			diff.Inserts++
 		default:

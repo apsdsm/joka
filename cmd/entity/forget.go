@@ -97,7 +97,7 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 		if !jsonOut {
 			printPlans(plans)
 		}
-		return fail(fmt.Errorf("%w: %d of %d; use --force to forget them anyway, or 'entity reimport' to replace them",
+		return fail(fmt.Errorf("%w: %d of %d; use --force to forget them anyway",
 			domain.ErrRowsStillLive, live, totalRows(plans)))
 	}
 
@@ -177,7 +177,7 @@ func (r RunEntityForgetCommand) resolveTargets(state *domain.State) ([]string, e
 		return []string{r.FilePath}, nil
 	}
 
-	// Orphans come from the same comparison `entity status` reports, so the
+	// Orphans come from the same comparison the status action reports, so the
 	// two can never disagree about which files are orphaned.
 	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
 	if err != nil {

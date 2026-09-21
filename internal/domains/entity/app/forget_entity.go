@@ -128,7 +128,7 @@ func (a ForgetEntityAction) Execute(ctx context.Context) (*ForgetPlan, error) {
 	}
 
 	if plan.Live > 0 && !a.Force {
-		return plan, fmt.Errorf("%w: %d of %d for %s; use --force to forget them anyway, or 'entity reimport' to replace them",
+		return plan, fmt.Errorf("%w: %d of %d for %s; use --force to forget them anyway",
 			domain.ErrRowsStillLive, plan.Live, len(plan.Rows), a.FilePath)
 	}
 
