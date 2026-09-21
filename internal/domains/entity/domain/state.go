@@ -8,7 +8,11 @@ import "sort"
 // table, primary key and the file that last declared them. This is the shape
 // joka_entities and joka_entity_rows already held; version 1 names it rather
 // than changing it.
-const StateVersion = 1
+//
+// 2 — each entity also carries a per-column baseline: the SHA-256 of every
+// value joka last applied. Additive, and an older joka ignores it harmlessly,
+// which is why meta.TrackingVersion does not move with it.
+const StateVersion = 2
 
 // State is what joka last applied to one database.
 //
@@ -63,6 +67,22 @@ type EntityState struct {
 	// in reverse order so children go before parents, and a foreign key makes
 	// that ordering load-bearing.
 	Order int `json:"order"`
+
+	// Columns is the baseline: the SHA-256 of every value joka last applied,
+	// keyed by column. It is the third point a merge needs — with the
+	// declaration and the live row it says which side moved, where two points
+	// can only say that they differ.
+	//
+	// Nil for a row written before the baseline existed, or by a reimport that
+	// could not resolve one. A nil baseline reads as "unknown", which behaves
+	// exactly as joka did before it: every difference is a conflict.
+	Columns map[string]string `json:"columns,omitempty"`
+}
+
+// Baseline returns the recorded hash for one column and whether there is one.
+func (e EntityState) Baseline(column string) (string, bool) {
+	hash, ok := e.Columns[column]
+	return hash, ok
 }
 
 // NewState returns an empty state at the current version.

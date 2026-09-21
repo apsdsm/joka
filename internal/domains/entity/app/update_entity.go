@@ -107,6 +107,7 @@ func (a UpdateEntityAction) Execute(ctx context.Context) (*UpdateEntityResult, e
 			PKValue:  row.RowPK,
 			File:     a.FilePath,
 			Order:    row.InsertionOrder,
+			Columns:  action.Baselines[row.RefID],
 		})
 	}
 

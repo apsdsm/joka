@@ -80,6 +80,7 @@ func (a ReimportEntityAction) Execute(ctx context.Context) error {
 			PKValue:  row.RowPK,
 			File:     a.FilePath,
 			Order:    row.InsertionOrder,
+			Columns:  action.Baselines[row.RefID],
 		})
 	}
 

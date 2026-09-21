@@ -106,7 +106,7 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			row, isTracked := state.Row(e.RefID)
 
 			if !isTracked {
-				pk, err := a.insert(ctx, e, refMap, now)
+				pk, applied, err := a.insert(ctx, e, refMap, now)
 				if err != nil {
 					return nil, err
 				}
@@ -117,6 +117,7 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 					PKValue:  pk,
 					File:     file.Path,
 					Order:    i,
+					Columns:  BaselineOf(applied),
 				})
 
 				refMap[e.RefID] = pk
@@ -133,22 +134,26 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 					domain.ErrEntityTableChanged, e.RefID, row.Table, file.Path, e.Table)
 			}
 
-			if err := a.update(ctx, e, row, refMap, now); err != nil {
+			applied, err := a.update(ctx, e, row, refMap, now)
+			if err != nil {
 				return nil, err
 			}
 			refMap[e.RefID] = row.PKValue
 			result.Updated = append(result.Updated, e.RefID)
 
-			if row.File != file.Path || row.Order != i {
-				if row.File != file.Path {
-					result.Moved = append(result.Moved, EntityMove{
-						RefID: e.RefID, From: row.File, To: file.Path,
-					})
-				}
-				row.File = file.Path
-				row.Order = i
-				state.Track(e.RefID, row)
+			if row.File != file.Path {
+				result.Moved = append(result.Moved, EntityMove{
+					RefID: e.RefID, From: row.File, To: file.Path,
+				})
 			}
+
+			// The baseline is re-recorded whether or not the position moved:
+			// the row was just rewritten, so what joka last applied is what it
+			// applied a moment ago.
+			row.File = file.Path
+			row.Order = i
+			row.Columns = BaselineOf(applied)
+			state.Track(e.RefID, row)
 		}
 
 		state.TrackFile(file.Path, file.ContentHash)
@@ -173,28 +178,29 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 	return result, nil
 }
 
-// insert resolves an entity's columns and inserts the row.
-func (a ApplySetAction) insert(ctx context.Context, e domain.Entity, refMap map[string]int64, now string) (int64, error) {
+// insert resolves an entity's columns and inserts the row. It returns the
+// resolved columns so the caller can record them as the baseline.
+func (a ApplySetAction) insert(ctx context.Context, e domain.Entity, refMap map[string]int64, now string) (int64, map[string]any, error) {
 	columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
 	if err != nil {
-		return 0, fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
+		return 0, nil, fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
 	}
 
 	pk, err := a.DB.InsertRow(ctx, e.Table, columns, e.PKColumn)
 	if err != nil {
-		return 0, fmt.Errorf("inserting %s (_id %s): %w", e.Table, e.RefID, err)
+		return 0, nil, fmt.Errorf("inserting %s (_id %s): %w", e.Table, e.RefID, err)
 	}
 
-	return pk, nil
+	return pk, columns, nil
 }
 
 // update rewrites every column of the tracked row. All columns are written, not
 // just changed ones, so a non-deterministic template produces a fresh value on
 // every sync of a file that changed.
-func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.EntityState, refMap map[string]int64, now string) error {
+func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.EntityState, refMap map[string]int64, now string) (map[string]any, error) {
 	columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
 	if err != nil {
-		return fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
+		return nil, fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
 	}
 
 	pkColumn := row.PKColumn
@@ -203,10 +209,10 @@ func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.
 	}
 
 	if err := a.DB.UpdateRow(ctx, e.Table, pkColumn, row.PKValue, columns); err != nil {
-		return fmt.Errorf("updating %s (_id %s): %w", e.Table, e.RefID, err)
+		return nil, fmt.Errorf("updating %s (_id %s): %w", e.Table, e.RefID, err)
 	}
 
-	return nil
+	return columns, nil
 }
 
 // forgetEmptyFiles drops the record of a file that is no longer declared and no

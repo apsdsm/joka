@@ -572,10 +572,25 @@ columns it happened to need, which is how three undocumented format changes got 
 type State struct {
     Version  int                    // domain.StateVersion
     Files    map[string]FileState   // path → content hash
-    Entities map[string]EntityState // _id → table, pk, file, position
+    Entities map[string]EntityState // _id → table, pk, file, position, baseline
     Unkeyed  []TrackedRow           // rows with no _id
 }
 ```
+
+- **`EntityState.Columns` is the baseline**: the SHA-256 of every value joka last applied, keyed by
+  column. It is the third point a merge needs — with the declaration and the live row it says which
+  side moved, where two points can only say that they differ. Recorded on every insert and on every
+  update, because the row was just rewritten. Nothing reads it yet.
+- **It stores hashes, not values**, for three reasons in order of weight. Secrets: `resolveColumns`
+  turns `{{ asm.… }}` into the actual secret before inserting, and the planner goes out of its way
+  never to materialize one — storing values would undo that and put Secrets Manager plaintext into
+  any state anyone copies. Size: 64 bytes a column whatever it holds, so a large JSON column does
+  not bloat the document. And nothing needs the value back, because both sides a prompt would show
+  are read live.
+- **`app.HashValue` renders through `normalizeValue`**, the same rendering the plan compares with, so
+  a baseline and a diff cannot disagree about what a value is.
+- **A nil baseline reads as "unknown"** — a row written before it existed — and behaves exactly as
+  joka did before: every difference is a conflict.
 
 - **Nothing is keyed on the file.** An entity moves between files, so `EntityState.File` records where
   it was last declared and nothing matches on it. `RowsInFile` exists for the places a file is still

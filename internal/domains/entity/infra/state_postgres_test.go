@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/apsdsm/joka/internal/domains/entity/app"
@@ -271,7 +272,7 @@ func TestPostgresStateBackendSave(t *testing.T) {
 		if !ok {
 			t.Fatal("expected admin tracked")
 		}
-		if admin != want.Entities["admin"] {
+		if !reflect.DeepEqual(admin, want.Entities["admin"]) {
 			t.Errorf("expected %+v, got %+v", want.Entities["admin"], admin)
 		}
 	})
