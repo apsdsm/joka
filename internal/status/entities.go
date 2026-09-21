@@ -20,14 +20,30 @@ import (
 func buildEntities(ctx context.Context, in Inputs) (Entities, error) {
 	out := Entities{Dir: in.EntitiesDir}
 
-	// The state loads as empty whether the tracking tables are absent or merely
-	// empty, so the missing-table finding still comes from a direct probe.
-	hasTracking, err := in.Probe.TableExists(ctx, "joka_entities")
+	// The state loads as empty whether the tracking is absent or merely empty,
+	// so the missing-table finding still comes from a direct probe.
+	//
+	// It probes joka_state, the table tracking version 3 moved entity tracking
+	// into. Probing joka_entities outlived the table: version 3 drops it, so
+	// every up-to-date database reported "no entity file has been synced yet"
+	// directly above the table listing the files it had synced.
+	//
+	// A version 1 or 2 database still has joka_entities and no joka_state, and
+	// its state is read from the old tables, so both count as tracking being
+	// present.
+	hasTracking, err := in.Probe.TableExists(ctx, "joka_state")
 	if err != nil {
 		return out, err
 	}
 	if !hasTracking {
-		out.Skipped = "joka_entities does not exist — no entity file has been synced yet"
+		legacy, err := in.Probe.TableExists(ctx, "joka_entities")
+		if err != nil {
+			return out, err
+		}
+		hasTracking = legacy
+	}
+	if !hasTracking {
+		out.Skipped = "no entity tracking in this database — no entity file has been synced yet"
 	}
 
 	state := in.EntityState
