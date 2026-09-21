@@ -729,7 +729,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--ignore-foreign-keys` | | `false` | Defer FK constraint checks during data sync truncate |
 | `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`) |
 | `--statefile` | | | Path to the state file (default: `joka[.<profile>].state.json` beside the working directory) |
-| `--on-conflict` | | `fail` | What to do when the database changed since joka last wrote: `fail`, `file` or `db` (`entity sync`) |
+| `--on-conflict` | | `fail` | What to do when the database changed since joka last wrote: `fail`, `file`, `db` or `ask` (`entity sync`) |
 
 ## How It Works
 

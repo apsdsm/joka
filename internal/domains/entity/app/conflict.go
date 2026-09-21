@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -24,20 +25,58 @@ const (
 	// column alone and record what it holds as the new baseline, so the same
 	// difference is not reported again.
 	//
-	// It does not rewrite the YAML. Updating the declaration to match is what
-	// `entity resolve` is for; this only stops joka fighting the database.
+	// It does not rewrite the YAML. Keeping the database's value and updating
+	// the declaration to match it are different decisions, and `ask` is where
+	// the second one is made.
 	ConflictDB ConflictPolicy = "db"
+	// ConflictAsk shows each conflict and asks which side is right.
+	//
+	// This is the mode the whole model exists for: seeds drift in a dozen
+	// places, and the useful question when they do is "the database says this,
+	// did you mean that?" — with joka updating the seed file when the answer is
+	// yes, so the declaration stays true instead of slowly becoming fiction.
+	//
+	// It needs someone to ask, so it is refused under --output json and with
+	// --auto.
+	ConflictAsk ConflictPolicy = "ask"
 )
 
 // ParseConflictPolicy reads the --on-conflict value.
 func ParseConflictPolicy(s string) (ConflictPolicy, error) {
 	switch ConflictPolicy(s) {
-	case ConflictFail, ConflictFile, ConflictDB:
+	case ConflictFail, ConflictFile, ConflictDB, ConflictAsk:
 		return ConflictPolicy(s), nil
 	case "":
 		return ConflictFail, nil
 	}
-	return "", fmt.Errorf("unknown --on-conflict %q: expected fail, file or db", s)
+	return "", fmt.Errorf("unknown --on-conflict %q: expected fail, file, db or ask", s)
+}
+
+// Resolution is what was decided about one conflicted column.
+type Resolution struct {
+	File   string
+	RefID  string
+	Column string
+	// Value is what the database holds, for a column the file is to be updated
+	// to match. Empty when the file wins.
+	Value string
+	// KeepDatabase is true when the database's value stands. UpdateFile is true
+	// when the declaration is to be rewritten to match it — which is only
+	// possible for a literal, so a templated column can be kept without being
+	// rewritten.
+	KeepDatabase bool
+	UpdateFile   bool
+}
+
+// Writable reports whether a conflicted column's declaration can be rewritten
+// to match the database.
+//
+// A templated value cannot: writing a literal over `{{ lookup|… }}` would
+// replace the indirection with whatever it resolved to this time. A regenerated
+// column cannot either — there is no value to write, and for a secret there
+// must not be.
+func Writable(c ColumnChange) bool {
+	return !c.Regenerated && !c.Deferred && !isTemplateString(c.After)
 }
 
 // KeepFromConflicts turns a plan's conflicts into the Keep map ApplySetAction
@@ -62,6 +101,73 @@ func KeepFromConflicts(conflicts []RowConflict, policy ConflictPolicy) map[strin
 	}
 
 	return keep
+}
+
+// KeepFromResolutions builds the same map from per-column answers.
+//
+// A column resolved in the database's favour is kept whether or not the file
+// could be rewritten to match: keeping the value and updating the declaration
+// are separate, and a templated column can have the first without the second.
+func KeepFromResolutions(conflicts []RowConflict, resolutions []Resolution) map[string]map[string]string {
+	kept := make(map[string]map[string]bool)
+	for _, r := range resolutions {
+		if !r.KeepDatabase {
+			continue
+		}
+		if kept[r.RefID] == nil {
+			kept[r.RefID] = make(map[string]bool)
+		}
+		kept[r.RefID][r.Column] = true
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+
+	keep := make(map[string]map[string]string, len(kept))
+
+	for _, row := range conflicts {
+		for _, c := range row.Columns {
+			if !kept[row.RefID][c.Column] {
+				continue
+			}
+			if keep[row.RefID] == nil {
+				keep[row.RefID] = make(map[string]string)
+			}
+			keep[row.RefID][c.Column] = c.LiveHash
+		}
+	}
+
+	return keep
+}
+
+// ApplyResolutions rewrites the seed files for every column resolved in the
+// database's favour and marked writable.
+//
+// entitiesDir is where the declared files live; Resolution.File is relative to
+// it, the way every other path in the domain is. It returns the files it
+// changed, so the caller can say which ones to look at in a diff.
+func ApplyResolutions(entitiesDir string, resolutions []Resolution) ([]string, error) {
+	var changed []string
+	seen := make(map[string]bool)
+
+	for _, r := range resolutions {
+		if !r.UpdateFile {
+			continue
+		}
+
+		path := filepath.Join(entitiesDir, r.File)
+		if err := SetEntityColumn(path, r.RefID, r.Column, r.Value); err != nil {
+			return changed, err
+		}
+
+		if !seen[r.File] {
+			seen[r.File] = true
+			changed = append(changed, r.File)
+		}
+	}
+
+	sort.Strings(changed)
+	return changed, nil
 }
 
 // ConflictError renders a plan's conflicts into one error wrapping

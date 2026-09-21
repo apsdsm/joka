@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 
+	"github.com/apsdsm/joka/internal/domains/entity/app"
+	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	"github.com/apsdsm/joka/internal/domains/entity/infra"
 	"github.com/apsdsm/joka/internal/meta"
 )
@@ -39,4 +42,36 @@ func materializeState(ctx context.Context, db *sql.DB, stateFile, profile, jokaV
 	doc.Stamp(jokaVersion)
 
 	return infra.WriteStateFile(infra.StateFilePath(stateFile, profile), doc)
+}
+
+// reloadFiles re-reads the declared files joka just rewrote, so the hash and
+// the values it is about to record are the ones now on disk.
+func reloadFiles(entitiesDir string, declared []*domain.EntityFile, rewritten []string) error {
+	changed := make(map[string]bool, len(rewritten))
+	for _, path := range rewritten {
+		changed[path] = true
+	}
+
+	for _, file := range declared {
+		if !changed[file.Path] {
+			continue
+		}
+
+		full := filepath.Join(entitiesDir, file.Path)
+
+		hash, err := app.HashFileContent(full)
+		if err != nil {
+			return err
+		}
+
+		reparsed, err := app.ParseEntityAction{Path: full}.Execute()
+		if err != nil {
+			return err
+		}
+
+		file.ContentHash = hash
+		file.Entities = reparsed.Entities
+	}
+
+	return nil
 }

@@ -350,6 +350,8 @@ conflict: applying the file would discard a change joka did not make.
   --on-conflict=fail   report them, write nothing, exit non-zero (default)
   --on-conflict=file   the file wins; write over the database's values
   --on-conflict=db     the database wins; leave the column and stop reporting it
+  --on-conflict=ask    show each one and ask, updating the seed files to match
+                       the database where you say it is right
 
 The default makes this a drift gate, the same role 'migrate verify' plays for
 schema. A column listed under an entity's _once: is not compared at all — joka
@@ -383,7 +385,7 @@ Use --dry-run to print the plan without applying anything.`,
 	}
 	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
 	entitySyncCmd.Flags().String("on-conflict", "fail",
-		"What to do when the database changed since joka last wrote: fail, file or db")
+		"What to do when the database changed since joka last wrote: fail, file, db or ask")
 
 	entityStatusCmd := &cobra.Command{
 		Use:   "status",

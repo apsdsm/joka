@@ -201,10 +201,54 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return fail(app.ConflictError(plan.Conflicts))
 	}
 
-	if !jsonOut {
+	// Under --on-conflict=ask the operator decides per column, and the seed
+	// files are rewritten for the ones the database wins. Keep is then built
+	// from the answers rather than the policy.
+	keep := app.KeepFromConflicts(plan.Conflicts, r.OnConflict)
+	var rewritten []string
+
+	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictAsk {
+		if jsonOut || r.AutoConfirm {
+			return fail(fmt.Errorf(
+				"--on-conflict=ask needs someone to ask: use fail, file or db with --auto or --output json"))
+		}
+
 		printPlan(plan)
 
+		resolutions, ok := askConflicts(plan.Conflicts)
+		if !ok {
+			color.Yellow("Entity sync cancelled. Nothing was changed.")
+			return nil
+		}
+
+		keep = app.KeepFromResolutions(plan.Conflicts, resolutions)
+
+		// The files are rewritten before the database is touched. If the write
+		// fails, nothing has been applied and the seeds are still what they
+		// were, which is the recoverable order.
+		rewritten, err = app.ApplyResolutions(r.EntitiesDir, resolutions)
+		if err != nil {
+			return fail(err)
+		}
+
+		// A rewritten file's content hash moved, and the copy in memory is the
+		// one joka is about to record. Left stale, the next run would report
+		// the file modified because of an edit joka made itself.
+		if err := reloadFiles(r.EntitiesDir, all, rewritten); err != nil {
+			return fail(err)
+		}
+	}
+
+	if !jsonOut {
+		if r.OnConflict != app.ConflictAsk {
+			printPlan(plan)
+		}
+
 		fmt.Println()
+
+		for _, path := range rewritten {
+			color.Cyan("  Updated the seed file to match the database: %s", path)
+		}
 
 		if !r.AutoConfirm {
 			if !shared.Confirm("Proceed with entity sync? (only 'yes' will confirm): ") {
@@ -227,7 +271,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Secrets:  r.Secrets,
 		Declared: all,
 		Dirty:    dirty,
-		Keep:     app.KeepFromConflicts(plan.Conflicts, r.OnConflict),
+		Keep:     keep,
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
@@ -249,6 +293,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			"files": orEmpty(result.Files), "moved": result.Moved,
 			"undeclared":      undeclaredJSON(result.Undeclared),
 			"forgotten_files": orEmpty(result.ForgottenFiles),
+			"rewritten_files": orEmpty(rewritten),
 		})
 		return nil
 	}

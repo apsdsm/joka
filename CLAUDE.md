@@ -765,9 +765,37 @@ all, and it is the finding `--force` was added for and never fixed.
 | `fail` (default) | report, write nothing, exit non-zero — the drift gate, as `migrate verify` is for schema |
 | `file` | the declaration wins; write over the database's values |
 | `db` | the database wins; leave the column and record what it holds as the new baseline |
+| `ask` | show each one and decide, rewriting the seed files where the database wins |
 
-`db` does not rewrite the YAML — that is `entity resolve`, which is not built. It only stops joka
-fighting the database, by conceding the baseline so the same difference is not reported again.
+`db` does not rewrite the YAML. Keeping the database's value and updating the declaration to match
+are different decisions, and `ask` is where the second one is made.
+
+### `ask`, and writing back to the seed files
+
+This is what the model is for. Seeds drift in a dozen places, and the useful question when they do is
+"the database says this, did you mean that?" — with joka updating the seed file when the answer is
+yes, so the declaration stays true instead of slowly becoming fiction.
+
+- **The bulk question comes first** (`f` / `d` / `r` / `q`). A drifted database usually drifted in one
+  direction for one reason, and making someone answer forty times to say so is how a useful prompt
+  becomes a thing people pipe `yes` into.
+- **Files are rewritten before the database is touched.** If the write fails, nothing has been applied
+  and the seeds are still what they were — the recoverable order.
+- **`app.SetEntityColumn` edits the parsed `yaml.Node` tree**, not a decoded value, so comments, key
+  order, quoting style and `_has:` nesting all survive. These are files a person maintains; a
+  write-back that reformatted them would make the diff unreadable and the feature unusable. It does
+  not preserve indentation *width* — yaml.v3 re-encodes at a fixed indent, so a four-space file comes
+  back with two.
+- **`retypeScalar` keeps the author's typing** where the new value still fits it. A zip code declared
+  as `"01234"` must not come back as the integer `1234`, and an integer must not come back quoted.
+- **A templated column can be kept without being rewritten** (`app.Writable`). Writing a literal over
+  `{{ lookup|… }}` would replace the indirection with whatever it resolved to this time, and nothing
+  would say so; a regenerated or secret column has no value to write at all. Those are conceded to
+  the database — the baseline moves, the declaration does not.
+- **The rewritten files are re-read before the apply.** Their content hash moved, and the copy in
+  memory is what joka is about to record; left stale, the next run would report the file modified
+  because of an edit joka made itself.
+- `ask` needs someone to ask, so it is refused under `--output json` and `--auto`.
 
 `ApplySetAction` takes the decision as `Keep` (`_id` → column → live hash) rather than a policy
 enum, so the applier has one concept — "these columns are the database's" — and the same field
