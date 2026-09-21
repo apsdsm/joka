@@ -3,6 +3,7 @@ package entity
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -19,7 +20,13 @@ import (
 //
 // Returns nil, false when the operator backed out.
 func askConflicts(conflicts []app.RowConflict) ([]app.Resolution, bool) {
-	in := bufio.NewReader(os.Stdin)
+	return askConflictsFrom(os.Stdin, conflicts)
+}
+
+// askConflictsFrom is askConflicts with the answers coming from anywhere, so
+// the decision logic can be tested without a terminal.
+func askConflictsFrom(answers io.Reader, conflicts []app.RowConflict) ([]app.Resolution, bool) {
+	in := bufio.NewReader(answers)
 
 	columns := 0
 	for _, row := range conflicts {
