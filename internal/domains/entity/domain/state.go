@@ -101,9 +101,25 @@ func (s *State) TrackFile(path, contentHash string) {
 	s.Files[path] = FileState{ContentHash: contentHash}
 }
 
-// ForgetFile drops a file's record.
+// ForgetFile drops a file's record and every row tracked against it, rows with
+// no _id included. The rows in the database are untouched — this is what
+// `entity forget` does, and the whole point of it is that the data stays.
 func (s *State) ForgetFile(path string) {
 	delete(s.Files, path)
+
+	for refID, e := range s.Entities {
+		if e.File == path {
+			delete(s.Entities, refID)
+		}
+	}
+
+	kept := s.Unkeyed[:0]
+	for _, row := range s.Unkeyed {
+		if row.EntityFile != path {
+			kept = append(kept, row)
+		}
+	}
+	s.Unkeyed = kept
 }
 
 // FileHash returns a file's recorded content hash and whether joka has synced

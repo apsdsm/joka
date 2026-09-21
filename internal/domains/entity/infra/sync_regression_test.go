@@ -40,7 +40,7 @@ func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.ApplySetAction{DB: txAdapter, Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
+	if _, err := (app.ApplySetAction{DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db), Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("initial sync of %s: %v", rel, err)
 	}
@@ -105,7 +105,7 @@ func applyModified(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.ApplySetAction{DB: txAdapter, Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
+	if _, err := (app.ApplySetAction{DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db), Declared: []*domain.EntityFile{file}, Dirty: map[string]bool{file.Path: true}}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("update sync of %s: %v", rel, err)
 	}

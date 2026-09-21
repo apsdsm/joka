@@ -59,14 +59,17 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	synced, err := dbAdapter.IsEntitySynced(ctx, r.FilePath)
+	// Read for the preview only. The action loads its own copy inside the
+	// transaction, which is what it writes back.
+	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
 	if err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
 		}
 		return err
 	}
-	if !synced {
+
+	if _, synced := state.FileHash(r.FilePath); !synced {
 		err = fmt.Errorf("entity file %q has never been synced; use 'entity sync' first", r.FilePath)
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
@@ -74,14 +77,7 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	// Get tracked rows to build preview.
-	tracked, err := dbAdapter.GetTrackedRows(ctx, r.FilePath)
-	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
-	}
+	tracked := state.RowsInFile(r.FilePath)
 
 	trackedRefIDs := make(map[string]int64)
 	trackedTables := make(map[string]string) // ref_id -> table
@@ -221,6 +217,7 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 
 	result, err := app.UpdateEntityAction{
 		DB:          txAdapter,
+		Backend:     infra.NewPostgresTxStateBackend(tx, r.DB),
 		Secrets:     r.Secrets,
 		FilePath:    r.FilePath,
 		FullPath:    fullPath,

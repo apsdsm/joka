@@ -96,10 +96,10 @@ func TestForgetEntityAction(t *testing.T) {
 		if len(plan.Rows) != 1 {
 			t.Errorf("expected the plan to report the row it removed, got %d", len(plan.Rows))
 		}
-		if len(db.entityRows) != 0 {
-			t.Errorf("expected joka_entity_rows cleared, got %d rows", len(db.entityRows))
+		if len(db.trackedRows()) != 0 {
+			t.Errorf("expected joka_entity_rows cleared, got %d rows", len(db.trackedRows()))
 		}
-		if db.synced["a.yaml"] {
+		if db.isTracked("a.yaml") {
 			t.Error("expected the joka_entities record removed")
 		}
 	})
@@ -133,7 +133,7 @@ func TestForgetEntityAction(t *testing.T) {
 		if plan == nil {
 			t.Fatal("expected the plan returned alongside the refusal so the caller can show the rows")
 		}
-		if len(db.entityRows) != 1 || !db.synced["a.yaml"] {
+		if len(db.trackedRows()) != 1 || !db.isTracked("a.yaml") {
 			t.Error("expected the refusal to leave the tracking untouched")
 		}
 	})
@@ -152,7 +152,7 @@ func TestForgetEntityAction(t *testing.T) {
 		if plan.Live != 1 {
 			t.Errorf("expected the plan to still report the live row, got %d", plan.Live)
 		}
-		if db.synced["a.yaml"] {
+		if db.isTracked("a.yaml") {
 			t.Error("expected the tracking removed")
 		}
 		if len(db.deletedRows) != 0 {
@@ -182,7 +182,7 @@ func TestForgetEntityAction(t *testing.T) {
 		if len(plan.Rows) != 0 {
 			t.Errorf("expected no rows in the plan, got %d", len(plan.Rows))
 		}
-		if db.synced["a.yaml"] {
+		if db.isTracked("a.yaml") {
 			t.Error("expected the joka_entities record removed")
 		}
 	})

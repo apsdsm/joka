@@ -27,7 +27,7 @@ func applyAll(t *testing.T, db *mockDBAdapter, files ...*domain.EntityFile) *App
 		dirty[f.Path] = true
 	}
 
-	result, err := ApplySetAction{DB: db, Declared: files, Dirty: dirty}.Execute(context.Background())
+	result, err := ApplySetAction{DB: db, Backend: db.backend(), Declared: files, Dirty: dirty}.Execute(context.Background())
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -37,7 +37,7 @@ func applyAll(t *testing.T, db *mockDBAdapter, files ...*domain.EntityFile) *App
 // trackedByRef indexes the mock's tracking.
 func trackedByRef(db *mockDBAdapter) map[string]domain.TrackedRow {
 	out := make(map[string]domain.TrackedRow)
-	for _, row := range db.entityRows {
+	for _, row := range db.trackedRows() {
 		out[row.RefID] = row
 	}
 	return out
@@ -58,8 +58,8 @@ func TestApplySetInsertsANewSet(t *testing.T) {
 	if len(db.insertedRows) != 2 {
 		t.Errorf("expected 2 rows inserted, got %d", len(db.insertedRows))
 	}
-	if len(db.entityRows) != 2 {
-		t.Errorf("expected 2 rows tracked, got %d", len(db.entityRows))
+	if len(db.trackedRows()) != 2 {
+		t.Errorf("expected 2 rows tracked, got %d", len(db.trackedRows()))
 	}
 }
 
@@ -186,8 +186,8 @@ func TestApplySetRenamingAFileLeavesNothingBehind(t *testing.T) {
 	if len(result.ForgottenFiles) != 1 || result.ForgottenFiles[0] != "old.yaml" {
 		t.Fatalf("expected the old path's record cleared, got %+v", result.ForgottenFiles)
 	}
-	if db.synced["old.yaml"] {
-		t.Error("expected the old joka_entities record gone")
+	if db.isTracked("old.yaml") {
+		t.Error("expected the old file's record gone")
 	}
 	if trackedByRef(db)["alpha"].EntityFile != "new.yaml" {
 		t.Error("expected the row re-pointed at the new path")
@@ -227,6 +227,7 @@ func TestApplySetRefusesATableChange(t *testing.T) {
 	// same name, and guessing which was meant would be worse than saying so.
 	_, err := ApplySetAction{
 		DB:       db,
+		Backend:  db.backend(),
 		Declared: []*domain.EntityFile{entityFile("a.yaml", col("widgets", "alpha", map[string]any{"label": "Alpha"}))},
 		Dirty:    map[string]bool{"a.yaml": true},
 	}.Execute(context.Background())
@@ -248,6 +249,7 @@ func TestApplySetSkipsCleanFilesButStillCountsTheirDeclarations(t *testing.T) {
 	// count as declared or it would be reported as undeclared.
 	result, err := ApplySetAction{
 		DB:       db,
+		Backend:  db.backend(),
 		Declared: []*domain.EntityFile{a, b},
 		Dirty:    map[string]bool{"b.yaml": true},
 	}.Execute(context.Background())
@@ -310,6 +312,7 @@ func TestApplySetResolvesAReferenceToAnAlreadyTrackedEntity(t *testing.T) {
 
 	if _, err := (ApplySetAction{
 		DB:       db,
+		Backend:  db.backend(),
 		Declared: []*domain.EntityFile{parent, child},
 		Dirty:    map[string]bool{"02_child.yaml": true},
 	}).Execute(context.Background()); err != nil {
@@ -330,7 +333,7 @@ func TestApplySetRecordsTheFileHash(t *testing.T) {
 
 	applyAll(t, db, file)
 
-	if db.entityHashes["a.yaml"] != file.ContentHash {
-		t.Errorf("expected the hash recorded, got %q", db.entityHashes["a.yaml"])
+	if hash, _ := db.fileHash("a.yaml"); hash != file.ContentHash {
+		t.Errorf("expected the hash recorded, got %q", hash)
 	}
 }

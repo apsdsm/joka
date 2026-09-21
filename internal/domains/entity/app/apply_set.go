@@ -28,7 +28,11 @@ import (
 //	move between files   nothing, same
 //	edit a field         one UPDATE
 type ApplySetAction struct {
-	DB      DBAdapter
+	DB DBAdapter
+	// Backend is where the state document is read and written. It is loaded
+	// inside the caller's transaction and saved at the end of it, so the run
+	// sees its own writes and a rollback takes the document with it.
+	Backend StateBackend
 	Secrets SecretResolver
 	// Declared is every file in the set, in load order. Entities are matched
 	// and written in that order, so a reference to another file's entity
@@ -71,22 +75,17 @@ type EntityMove struct {
 func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 	result := &ApplyResult{}
 
-	tracked, err := a.DB.GetAllTrackedRows(ctx)
+	state, err := a.Backend.Load(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	byRef := make(map[string]domain.TrackedRow, len(tracked))
-	for _, row := range tracked {
-		byRef[row.RefID] = row
 	}
 
 	// Every tracked row's primary key is available to {{ ref.id }} from the
 	// start, so a reference resolves whether its target is being written this
 	// run or was written some previous one.
-	refMap := make(map[string]int64, len(tracked))
-	for _, row := range tracked {
-		refMap[row.RefID] = row.RowPK
+	refMap := make(map[string]int64, len(state.Entities))
+	for refID, tracked := range state.Entities {
+		refMap[refID] = tracked.PKValue
 	}
 
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
@@ -104,29 +103,23 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 		}
 
 		for i, e := range entities {
-			row, isTracked := byRef[e.RefID]
+			row, isTracked := state.Row(e.RefID)
 
 			if !isTracked {
 				pk, err := a.insert(ctx, e, refMap, now)
 				if err != nil {
 					return nil, err
 				}
-				if err := a.DB.RecordEntityRow(ctx, domain.TrackedRow{
-					EntityFile:     file.Path,
-					TableName:      e.Table,
-					RowPK:          pk,
-					PKColumn:       e.PKColumn,
-					RefID:          e.RefID,
-					InsertionOrder: i,
-				}); err != nil {
-					return nil, err
-				}
+
+				state.Track(e.RefID, domain.EntityState{
+					Table:    e.Table,
+					PKColumn: e.PKColumn,
+					PKValue:  pk,
+					File:     file.Path,
+					Order:    i,
+				})
 
 				refMap[e.RefID] = pk
-				byRef[e.RefID] = domain.TrackedRow{
-					EntityFile: file.Path, TableName: e.Table, RowPK: pk,
-					PKColumn: e.PKColumn, RefID: e.RefID, InsertionOrder: i,
-				}
 				result.Inserted = append(result.Inserted, e.RefID)
 				continue
 			}
@@ -134,47 +127,48 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			// An _id names one row. If the entity now targets a different
 			// table it is not that row any more, and guessing which of the two
 			// the author meant would be worse than saying so.
-			if row.TableName != e.Table {
+			if row.Table != e.Table {
 				return nil, fmt.Errorf("%w: _id %q is tracked as a row in %q but %s now declares it in %q; "+
 					"use 'joka entity forget' to release the _id, or a different _id for the new row",
-					domain.ErrEntityTableChanged, e.RefID, row.TableName, file.Path, e.Table)
+					domain.ErrEntityTableChanged, e.RefID, row.Table, file.Path, e.Table)
 			}
 
 			if err := a.update(ctx, e, row, refMap, now); err != nil {
 				return nil, err
 			}
-			refMap[e.RefID] = row.RowPK
+			refMap[e.RefID] = row.PKValue
 			result.Updated = append(result.Updated, e.RefID)
 
-			if row.EntityFile != file.Path || row.InsertionOrder != i {
-				if err := a.DB.RetrackEntityRow(ctx, e.RefID, file.Path, i); err != nil {
-					return nil, err
-				}
-				if row.EntityFile != file.Path {
+			if row.File != file.Path || row.Order != i {
+				if row.File != file.Path {
 					result.Moved = append(result.Moved, EntityMove{
-						RefID: e.RefID, From: row.EntityFile, To: file.Path,
+						RefID: e.RefID, From: row.File, To: file.Path,
 					})
 				}
+				row.File = file.Path
+				row.Order = i
+				state.Track(e.RefID, row)
 			}
 		}
 
-		if err := a.recordFile(ctx, file); err != nil {
-			return nil, err
-		}
+		state.TrackFile(file.Path, file.ContentHash)
 		result.Files = append(result.Files, file.Path)
 	}
 
-	for _, row := range tracked {
+	// Read after the writes rather than before: everything written this run is
+	// declared by definition, so the answer is the same, and taking it from the
+	// one document means it cannot disagree with what is about to be saved.
+	for _, row := range state.AllRows() {
 		if !declared[row.RefID] {
 			result.Undeclared = append(result.Undeclared, row)
 		}
 	}
 
-	forgotten, err := a.forgetEmptyFiles(ctx, result)
-	if err != nil {
+	result.ForgottenFiles = a.forgetEmptyFiles(state, result.Moved)
+
+	if err := a.Backend.Save(ctx, state); err != nil {
 		return nil, err
 	}
-	result.ForgottenFiles = forgotten
 
 	return result, nil
 }
@@ -197,7 +191,7 @@ func (a ApplySetAction) insert(ctx context.Context, e domain.Entity, refMap map[
 // update rewrites every column of the tracked row. All columns are written, not
 // just changed ones, so a non-deterministic template produces a fresh value on
 // every sync of a file that changed.
-func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.TrackedRow, refMap map[string]int64, now string) error {
+func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.EntityState, refMap map[string]int64, now string) error {
 	columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
 	if err != nil {
 		return fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
@@ -208,67 +202,48 @@ func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.
 		pkColumn = "id"
 	}
 
-	if err := a.DB.UpdateRow(ctx, e.Table, pkColumn, row.RowPK, columns); err != nil {
+	if err := a.DB.UpdateRow(ctx, e.Table, pkColumn, row.PKValue, columns); err != nil {
 		return fmt.Errorf("updating %s (_id %s): %w", e.Table, e.RefID, err)
 	}
 
 	return nil
 }
 
-func (a ApplySetAction) recordFile(ctx context.Context, file *domain.EntityFile) error {
-	synced, err := a.DB.IsEntitySynced(ctx, file.Path)
-	if err != nil {
-		return err
-	}
-
-	if synced {
-		return a.DB.UpdateEntitySynced(ctx, file.Path, file.ContentHash)
-	}
-	return a.DB.RecordEntitySyncedWithHash(ctx, file.Path, file.ContentHash)
-}
-
-// forgetEmptyFiles drops the joka_entities record of a file that is no longer
-// declared and no longer tracks any row — every entity it held moved somewhere
-// else. Without this a rename leaves a permanent ghost entry behind, which
-// nothing but a manual forget would ever clear.
-func (a ApplySetAction) forgetEmptyFiles(ctx context.Context, result *ApplyResult) ([]string, error) {
-	if len(result.Moved) == 0 {
-		return nil, nil
+// forgetEmptyFiles drops the record of a file that is no longer declared and no
+// longer tracks any row — every entity it held moved somewhere else. Without
+// this a rename leaves a permanent ghost entry behind, which nothing but a
+// manual forget would ever clear.
+//
+// It reads the state after the run's writes, so "no longer tracks any row" is
+// asked of the document about to be saved rather than of a second query.
+func (a ApplySetAction) forgetEmptyFiles(state *domain.State, moved []EntityMove) []string {
+	if len(moved) == 0 {
+		return nil
 	}
 
 	sources := make(map[string]bool)
-	for _, move := range result.Moved {
+	for _, move := range moved {
 		sources[move.From] = true
 	}
 	for _, file := range a.Declared {
 		delete(sources, file.Path)
 	}
 	if len(sources) == 0 {
-		return nil, nil
+		return nil
 	}
 
-	remaining, err := a.DB.GetAllTrackedRows(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, row := range remaining {
+	for _, row := range state.AllRows() {
 		delete(sources, row.EntityFile)
 	}
 
 	forgotten := make([]string, 0, len(sources))
 	for path := range sources {
-		if err := a.DB.DeleteEntityRecord(ctx, path); err != nil {
-			return nil, err
-		}
+		state.ForgetFile(path)
 		forgotten = append(forgotten, path)
 	}
 
-	sortStrings(forgotten)
-	return forgotten, nil
-}
-
-func sortStrings(s []string) {
-	sort.Strings(s)
+	sort.Strings(forgotten)
+	return forgotten
 }
 
 // flattenEntities returns the entity graph in depth-first pre-order (parent

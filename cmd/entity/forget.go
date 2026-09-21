@@ -121,6 +121,23 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 		forgotten = append(forgotten, applied)
 	}
 
+	// Every target edits the one document, so the whole run lands as a single
+	// write. Forgetting three orphans used to be six statements with no
+	// transaction around them.
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fail(fmt.Errorf("starting transaction: %w", err))
+	}
+
+	if err := infra.NewPostgresTxStateBackend(tx, r.DB).Save(ctx, state); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return fail(err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fail(fmt.Errorf("committing transaction: %w", err))
+	}
+
 	if jsonOut {
 		shared.PrintJSON(map[string]any{"status": "ok", "forgotten": forgotten})
 		return nil

@@ -112,10 +112,15 @@ func (a ForgetEntityAction) Plan(ctx context.Context) (*ForgetPlan, error) {
 	return plan, nil
 }
 
-// Execute drops the tracking. It returns the plan it acted on so the caller can
-// report what was removed, and returns that plan alongside ErrRowsStillLive
-// when rows are live and Force is not set — the caller is expected to show the
-// rows from the plan rather than pack them into the error.
+// Execute drops the file and its rows from the state. It returns the plan it
+// acted on so the caller can report what was removed, and returns that plan
+// alongside ErrRowsStillLive when rows are live and Force is not set — the
+// caller is expected to show the rows from the plan rather than pack them into
+// the error.
+//
+// It writes nothing itself. The state is the caller's, so forgetting several
+// files edits one document and the caller saves it once; a multi-file forget is
+// then one write rather than two statements per file.
 func (a ForgetEntityAction) Execute(ctx context.Context) (*ForgetPlan, error) {
 	plan, err := a.Plan(ctx)
 	if err != nil {
@@ -127,13 +132,7 @@ func (a ForgetEntityAction) Execute(ctx context.Context) (*ForgetPlan, error) {
 			domain.ErrRowsStillLive, plan.Live, len(plan.Rows), a.FilePath)
 	}
 
-	if err := a.DB.DeleteTrackedRows(ctx, a.FilePath); err != nil {
-		return plan, fmt.Errorf("removing row tracking for %s: %w", a.FilePath, err)
-	}
-
-	if err := a.DB.DeleteEntityRecord(ctx, a.FilePath); err != nil {
-		return plan, fmt.Errorf("removing the tracking record for %s: %w", a.FilePath, err)
-	}
+	a.State.ForgetFile(a.FilePath)
 
 	return plan, nil
 }

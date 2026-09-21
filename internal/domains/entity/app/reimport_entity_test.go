@@ -20,6 +20,7 @@ func TestReimportEntityAction(t *testing.T) {
     name: Admin
     _has:
       - _is: profiles
+        _id: admin_profile
         user_id: "{{ admin.id }}"
         bio: "Bio"
 `
@@ -27,15 +28,14 @@ func TestReimportEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["admin.yaml"] = true
-		db.entityHashes["admin.yaml"] = "old_hash"
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "admin.yaml", TableName: "users", RowPK: 1, PKColumn: "id", InsertionOrder: 0},
-			{EntityFile: "admin.yaml", TableName: "profiles", RowPK: 2, PKColumn: "id", InsertionOrder: 1},
-		}
+		db.trackHash("admin.yaml", "old_hash",
+			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
+			domain.TrackedRow{TableName: "profiles", RowPK: 2, PKColumn: "id", RefID: "admin_profile", InsertionOrder: 1},
+		)
 
 		err := (ReimportEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "admin.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new_hash",
@@ -54,16 +54,21 @@ func TestReimportEntityAction(t *testing.T) {
 			t.Errorf("expected second deletion from 'users', got %q", db.deletedRows[1].Table)
 		}
 
-		if len(db.deletedTracking) != 1 || db.deletedTracking[0] != "admin.yaml" {
-			t.Errorf("expected DeleteTrackedRows for admin.yaml, got %v", db.deletedTracking)
-		}
-
 		if len(db.insertedRows) != 2 {
 			t.Errorf("expected 2 re-inserts, got %d", len(db.insertedRows))
 		}
 
-		if db.entityHashes["admin.yaml"] != "new_hash" {
-			t.Errorf("expected updated hash 'new_hash', got %q", db.entityHashes["admin.yaml"])
+		// The tracking points at the rows just inserted, not the ones deleted.
+		rows := db.trackedRows()
+		if len(rows) != 2 {
+			t.Fatalf("expected 2 tracked rows after the reimport, got %d", len(rows))
+		}
+		if rows[0].RowPK != 1 || rows[1].RowPK != 2 {
+			t.Errorf("expected the tracking re-pointed at the new rows, got %+v", rows)
+		}
+
+		if hash, _ := db.fileHash("admin.yaml"); hash != "new_hash" {
+			t.Errorf("expected updated hash 'new_hash', got %q", hash)
 		}
 	})
 
@@ -72,6 +77,7 @@ func TestReimportEntityAction(t *testing.T) {
 
 		err := (ReimportEntityAction{
 			DB:       db,
+			Backend:  db.backend(),
 			FilePath: "unknown.yaml",
 			FullPath: "/tmp/unknown.yaml",
 		}).Execute(context.Background())
@@ -89,15 +95,14 @@ func TestReimportEntityAction(t *testing.T) {
 		fullPath := filepath.Join(dir, "fk.yaml")
 		os.WriteFile(fullPath, []byte("entities:\n  - _is: users\n    name: A\n"), 0644)
 
-		db := &fkErrorDBAdapter{}
-		db.synced = map[string]bool{"fk.yaml": true}
-		db.entityHashes = map[string]string{"fk.yaml": "hash"}
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "fk.yaml", TableName: "users", RowPK: 1, PKColumn: "id", InsertionOrder: 0},
-		}
+		db := &fkErrorDBAdapter{mockDBAdapter: *newMockDBAdapter()}
+		db.track("fk.yaml",
+			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "a", InsertionOrder: 0},
+		)
 
 		err := (ReimportEntityAction{
 			DB:       db,
+			Backend:  db.backend(),
 			FilePath: "fk.yaml",
 			FullPath: fullPath,
 		}).Execute(context.Background())
@@ -114,17 +119,18 @@ func TestReimportEntityAction(t *testing.T) {
 		dir := t.TempDir()
 		yamlContent := `entities:
   - _is: users
+    _id: admin
     name: Admin
 `
 		fullPath := filepath.Join(dir, "empty.yaml")
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["empty.yaml"] = true
-		db.entityHashes["empty.yaml"] = "old"
+		db.trackHash("empty.yaml", "old")
 
 		err := (ReimportEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "empty.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new",
@@ -137,8 +143,8 @@ func TestReimportEntityAction(t *testing.T) {
 			t.Errorf("expected 1 insert, got %d", len(db.insertedRows))
 		}
 
-		if db.entityHashes["empty.yaml"] != "new" {
-			t.Errorf("expected hash 'new', got %q", db.entityHashes["empty.yaml"])
+		if hash, _ := db.fileHash("empty.yaml"); hash != "new" {
+			t.Errorf("expected hash 'new', got %q", hash)
 		}
 	})
 }

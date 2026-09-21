@@ -593,6 +593,26 @@ caller saves the document it loaded.
 Only the database backend can write the document in the same transaction as the rows it describes,
 which is why it is the default and the only one implemented.
 
+### Who loads and who saves
+
+- **Read-only commands** (`joka status`, `entity status`, `entity diff`) load once on the raw
+  connection and pass the value to the actions. The actions take a `*domain.State`, not a backend, so
+  they cannot write and cannot create a table — which is what keeps `joka status` read-only.
+- **Writing commands** load *twice*: once outside the transaction for the preview, and once inside it
+  in the action that writes. `entity sync` previews with `PlanSyncAction` on the outer read and
+  applies with `ApplySetAction` on the inner one. Making the apply consume the previewed plan instead
+  is `proposal_entity_convergence_20260918.md` D10, and is not done.
+- **`entity forget` is the exception**: every target edits the one document and the command saves it
+  once inside a transaction, so forgetting three orphans is one write rather than six statements with
+  nothing around them.
+- **`app.DBAdapter` carries no tracking at all** — seven methods, all of them operations on the
+  seeded tables (`InsertRow`, `UpdateRow`, `DeleteRow`, `GetRow`, `TableExists`, `RowExists`,
+  `LookupValue`). Reading or writing what joka tracked goes through the backend, so there is one
+  implementation of that SQL rather than two.
+- **Reimport and update require an `_id` on every re-inserted row** (`ErrEntitySetInvalid`). The
+  PostgreSQL adapter's `RecordEntityRow` used to enforce that and the actions now do, which means the
+  unit tests see the same refusal the database gave.
+
 ## Identity matching (`ApplySetAction`)
 
 `entity sync` matches a declared entity to its tracked row on `_id`, across the whole set. This

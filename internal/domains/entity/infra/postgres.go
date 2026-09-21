@@ -491,24 +491,6 @@ func (p *PostgresDBAdapter) RowExists(ctx context.Context, table, pkColumn strin
 	return true, nil
 }
 
-// GetAllTrackedRows returns every row in joka_entity_rows, ordered by file and
-// insertion order.
-//
-// Identity-keyed matching is a property of the whole set — an entity can move
-// between files, so the row it corresponds to may be tracked against a file
-// other than the one now declaring it. Reading per file cannot see that.
-func (p *PostgresDBAdapter) GetAllTrackedRows(ctx context.Context) ([]domain.TrackedRow, error) {
-	rows, err := p.db.QueryContext(ctx,
-		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
-		 FROM joka_entity_rows ORDER BY entity_file, insertion_order`)
-	if err != nil {
-		return nil, fmt.Errorf("querying tracked rows: %w", err)
-	}
-	defer rows.Close()
-
-	return scanTrackedRows(rows)
-}
-
 // scanTrackedRows reads a result set of the standard tracked-row columns.
 func scanTrackedRows(rows *sql.Rows) ([]domain.TrackedRow, error) {
 	var out []domain.TrackedRow
@@ -528,16 +510,3 @@ func scanTrackedRows(rows *sql.Rows) ([]domain.TrackedRow, error) {
 	return out, rows.Err()
 }
 
-// RetrackEntityRow re-points a tracked row at the file and position now
-// declaring it. Used when an entity moves between files or shifts position:
-// the row it identifies is unchanged, only the record of where it was declared.
-func (p *PostgresDBAdapter) RetrackEntityRow(ctx context.Context, refID, entityFile string, insertionOrder int) error {
-	_, err := p.db.ExecContext(ctx,
-		`UPDATE joka_entity_rows SET entity_file = $1, insertion_order = $2 WHERE ref_id = $3`,
-		entityFile, insertionOrder, refID,
-	)
-	if err != nil {
-		return fmt.Errorf("re-pointing the tracking for %q: %w", refID, err)
-	}
-	return nil
-}

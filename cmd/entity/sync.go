@@ -214,6 +214,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	result, err := app.ApplySetAction{
 		DB:       txAdapter,
+		Backend:  infra.NewPostgresTxStateBackend(tx, r.DB),
 		Secrets:  r.Secrets,
 		Declared: all,
 		Dirty:    dirty,

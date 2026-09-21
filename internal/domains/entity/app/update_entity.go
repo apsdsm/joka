@@ -25,7 +25,10 @@ type UpdateEntityEntry struct {
 // their PKs are loaded into the reference map so new children can reference
 // them via {{ parent.id }}.
 type UpdateEntityAction struct {
-	DB          DBAdapter
+	DB DBAdapter
+	// Backend is loaded inside the caller's transaction and saved at the end of
+	// it, so a rollback takes the tracking with the rows.
+	Backend     StateBackend
 	Secrets     SecretResolver
 	FilePath    string // relative path (tracking key)
 	FullPath    string // absolute path for parsing
@@ -35,19 +38,16 @@ type UpdateEntityAction struct {
 // Execute performs the update. The caller is expected to wrap this in a
 // transaction.
 func (a UpdateEntityAction) Execute(ctx context.Context) (*UpdateEntityResult, error) {
-	synced, err := a.DB.IsEntitySynced(ctx, a.FilePath)
+	state, err := a.Backend.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !synced {
+
+	if _, synced := state.FileHash(a.FilePath); !synced {
 		return nil, fmt.Errorf("%w: %s", domain.ErrEntityNotSynced, a.FilePath)
 	}
 
-	// Get tracked rows and build skip map (ref_id -> existing PK).
-	tracked, err := a.DB.GetTrackedRows(ctx, a.FilePath)
-	if err != nil {
-		return nil, err
-	}
+	tracked := state.RowsInFile(a.FilePath)
 
 	skipRefIDs := make(map[string]int64)
 	for _, row := range tracked {
@@ -96,15 +96,23 @@ func (a UpdateEntityAction) Execute(ctx context.Context) (*UpdateEntityResult, e
 		return nil, err
 	}
 
-	// Record new tracked rows.
 	for _, row := range action.TrackedRows {
-		if err := a.DB.RecordEntityRow(ctx, row); err != nil {
-			return nil, err
+		if row.RefID == "" {
+			return nil, fmt.Errorf("%w: cannot track %s row %d from %s",
+				domain.ErrEntitySetInvalid, row.TableName, row.RowPK, a.FilePath)
 		}
+		state.Track(row.RefID, domain.EntityState{
+			Table:    row.TableName,
+			PKColumn: row.PKColumn,
+			PKValue:  row.RowPK,
+			File:     a.FilePath,
+			Order:    row.InsertionOrder,
+		})
 	}
 
-	// Update the content hash.
-	if err := a.DB.UpdateEntitySynced(ctx, a.FilePath, a.ContentHash); err != nil {
+	state.TrackFile(a.FilePath, a.ContentHash)
+
+	if err := a.Backend.Save(ctx, state); err != nil {
 		return nil, err
 	}
 

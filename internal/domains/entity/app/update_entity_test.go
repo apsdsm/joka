@@ -12,12 +12,14 @@ import (
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 )
 
-// failingRecordRowAdapter returns an error on RecordEntityRow.
-type failingRecordRowAdapter struct {
-	mockDBAdapter
-}
+// failingStateBackend loads normally and fails to save, which is how a write to
+// the tracking now goes wrong: there is one save at the end rather than a
+// record call per row.
+type failingStateBackend struct{ state *domain.State }
 
-func (f *failingRecordRowAdapter) RecordEntityRow(_ context.Context, _ domain.TrackedRow) error {
+func (b failingStateBackend) Load(context.Context) (*domain.State, error) { return b.state, nil }
+
+func (b failingStateBackend) Save(context.Context, *domain.State) error {
 	return fmt.Errorf("record row failed")
 }
 
@@ -42,15 +44,14 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["admin.yaml"] = true
-		db.entityHashes["admin.yaml"] = "old_hash"
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "admin.yaml", TableName: "users", RowPK: 42, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
-			{EntityFile: "admin.yaml", TableName: "api_keys", RowPK: 87, PKColumn: "id", RefID: "existing_key", InsertionOrder: 1},
-		}
+		db.trackHash("admin.yaml", "old_hash",
+			domain.TrackedRow{TableName: "users", RowPK: 42, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
+			domain.TrackedRow{TableName: "api_keys", RowPK: 87, PKColumn: "id", RefID: "existing_key", InsertionOrder: 1},
+		)
 
 		result, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "admin.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new_hash",
@@ -85,8 +86,8 @@ func TestUpdateEntityAction(t *testing.T) {
 		}
 
 		// Hash should be updated.
-		if db.entityHashes["admin.yaml"] != "new_hash" {
-			t.Errorf("expected hash 'new_hash', got %q", db.entityHashes["admin.yaml"])
+		if hash, _ := db.fileHash("admin.yaml"); hash != "new_hash" {
+			t.Errorf("expected hash 'new_hash', got %q", hash)
 		}
 	})
 
@@ -95,6 +96,7 @@ func TestUpdateEntityAction(t *testing.T) {
 
 		_, err := (UpdateEntityAction{
 			DB:       db,
+			Backend:  db.backend(),
 			FilePath: "unknown.yaml",
 			FullPath: "/tmp/unknown.yaml",
 		}).Execute(context.Background())
@@ -117,11 +119,11 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["no_id.yaml"] = true
-		db.entityHashes["no_id.yaml"] = "hash"
+		db.trackHash("no_id.yaml", "hash")
 
 		_, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "no_id.yaml",
 			FullPath:    fullPath,
 			ContentHash: "hash",
@@ -151,14 +153,13 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["order.yaml"] = true
-		db.entityHashes["order.yaml"] = "old"
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "order.yaml", TableName: "users", RowPK: 10, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
-		}
+		db.trackHash("order.yaml", "old",
+			domain.TrackedRow{TableName: "users", RowPK: 10, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
+		)
 
 		result, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "order.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new",
@@ -172,10 +173,11 @@ func TestUpdateEntityAction(t *testing.T) {
 		}
 
 		// The new row should have insertion_order = 1 (continuing from max 0).
-		if len(db.entityRows) != 2 {
-			t.Fatalf("expected 2 tracked rows total, got %d", len(db.entityRows))
+		rows := db.trackedRows()
+		if len(rows) != 2 {
+			t.Fatalf("expected 2 tracked rows total, got %d", len(rows))
 		}
-		newRow := db.entityRows[1]
+		newRow := rows[1]
 		if newRow.InsertionOrder != 1 {
 			t.Errorf("expected InsertionOrder 1, got %d", newRow.InsertionOrder)
 		}
@@ -195,14 +197,13 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["all_tracked.yaml"] = true
-		db.entityHashes["all_tracked.yaml"] = "old"
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "all_tracked.yaml", TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
-		}
+		db.trackHash("all_tracked.yaml", "old",
+			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
+		)
 
 		result, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "all_tracked.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new",
@@ -237,15 +238,14 @@ func TestUpdateEntityAction(t *testing.T) {
 		fullPath := filepath.Join(dir, "insert_fail.yaml")
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
-		db := &failingDBAdapter{}
-		db.synced = map[string]bool{"insert_fail.yaml": true}
-		db.entityHashes = map[string]string{"insert_fail.yaml": "hash"}
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "insert_fail.yaml", TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
-		}
+		db := &failingDBAdapter{mockDBAdapter: *newMockDBAdapter()}
+		db.trackHash("insert_fail.yaml", "hash",
+			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
+		)
 
 		_, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "insert_fail.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new",
@@ -273,11 +273,11 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["dup.yaml"] = true
-		db.entityHashes["dup.yaml"] = "hash"
+		db.trackHash("dup.yaml", "hash")
 
 		_, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "dup.yaml",
 			FullPath:    fullPath,
 			ContentHash: "hash",
@@ -297,11 +297,11 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte("not: [valid: yaml: {{{"), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["bad.yaml"] = true
-		db.entityHashes["bad.yaml"] = "hash"
+		db.trackHash("bad.yaml", "hash")
 
 		_, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "bad.yaml",
 			FullPath:    fullPath,
 			ContentHash: "hash",
@@ -329,11 +329,11 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["child_no_id.yaml"] = true
-		db.entityHashes["child_no_id.yaml"] = "hash"
+		db.trackHash("child_no_id.yaml", "hash")
 
 		_, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "child_no_id.yaml",
 			FullPath:    fullPath,
 			ContentHash: "hash",
@@ -347,7 +347,7 @@ func TestUpdateEntityAction(t *testing.T) {
 		}
 	})
 
-	t.Run("it propagates RecordEntityRow errors", func(t *testing.T) {
+	t.Run("it propagates a failure to save the tracking", func(t *testing.T) {
 		dir := t.TempDir()
 		yamlContent := `entities:
   - _is: users
@@ -362,15 +362,14 @@ func TestUpdateEntityAction(t *testing.T) {
 		fullPath := filepath.Join(dir, "record_fail.yaml")
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
-		db := &failingRecordRowAdapter{}
-		db.synced = map[string]bool{"record_fail.yaml": true}
-		db.entityHashes = map[string]string{"record_fail.yaml": "hash"}
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "record_fail.yaml", TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
-		}
+		db := newMockDBAdapter()
+		db.trackHash("record_fail.yaml", "hash",
+			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "admin", InsertionOrder: 0},
+		)
 
 		_, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     failingStateBackend{state: db.state},
 			FilePath:    "record_fail.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new",
@@ -380,7 +379,7 @@ func TestUpdateEntityAction(t *testing.T) {
 		}
 
 		if !strings.Contains(err.Error(), "record row failed") {
-			t.Errorf("expected record row error, got: %v", err)
+			t.Errorf("expected the save error, got: %v", err)
 		}
 	})
 
@@ -405,14 +404,13 @@ func TestUpdateEntityAction(t *testing.T) {
 		os.WriteFile(fullPath, []byte(yamlContent), 0644)
 
 		db := newMockDBAdapter()
-		db.synced["nested.yaml"] = true
-		db.entityHashes["nested.yaml"] = "old"
-		db.entityRows = []domain.TrackedRow{
-			{EntityFile: "nested.yaml", TableName: "users", RowPK: 5, PKColumn: "id", RefID: "existing_user", InsertionOrder: 0},
-		}
+		db.trackHash("nested.yaml", "old",
+			domain.TrackedRow{TableName: "users", RowPK: 5, PKColumn: "id", RefID: "existing_user", InsertionOrder: 0},
+		)
 
 		result, err := (UpdateEntityAction{
 			DB:          db,
+			Backend:     db.backend(),
 			FilePath:    "nested.yaml",
 			FullPath:    fullPath,
 			ContentHash: "new",
