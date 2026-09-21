@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/migration"
@@ -115,23 +116,35 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("migrate up: %w", err)
 	}
 
-	// 4. Data sync.
-	if !jsonOut {
-		color.Cyan("\n[4/5] Syncing template data...")
-	}
-	if err := (template.RunDataSyncCommand{
-		DB:                r.DB,
-		TemplatesDir:      r.TemplatesDir,
-		Tables:            r.Tables,
-		AutoConfirm:       true,
-		IgnoreForeignKeys: r.IgnoreForeignKeys,
-		OutputFormat:      "text",
-		SkipLock:          true,
-	}).Execute(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("data sync: %w", err))
+	// 4. Data sync — skipped when the project has no templates.
+	//
+	// `joka data sync` on its own treats a missing templates directory as an
+	// error, and should: you asked for it and it is not there. Reset is not
+	// asking for it, it is re-running whatever the project has, and a project
+	// with no templates has nothing to run. Without this, reset is unusable
+	// for any project that seeds only entities.
+	if _, err := os.Stat(r.TemplatesDir); err != nil {
+		if !jsonOut {
+			color.Cyan("\n[4/5] No templates directory (%s) — skipping template data.", r.TemplatesDir)
 		}
-		return fmt.Errorf("data sync: %w", err)
+	} else {
+		if !jsonOut {
+			color.Cyan("\n[4/5] Syncing template data...")
+		}
+		if err := (template.RunDataSyncCommand{
+			DB:                r.DB,
+			TemplatesDir:      r.TemplatesDir,
+			Tables:            r.Tables,
+			AutoConfirm:       true,
+			IgnoreForeignKeys: r.IgnoreForeignKeys,
+			OutputFormat:      "text",
+			SkipLock:          true,
+		}).Execute(ctx); err != nil {
+			if jsonOut {
+				return shared.PrintErrorJSON(fmt.Errorf("data sync: %w", err))
+			}
+			return fmt.Errorf("data sync: %w", err)
+		}
 	}
 
 	// 5. Entity sync.
