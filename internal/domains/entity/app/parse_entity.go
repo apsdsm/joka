@@ -80,11 +80,16 @@ func parseEntity(raw map[string]any) (domain.Entity, error) {
 	columns := make(map[string]any, len(raw))
 
 	for k, v := range raw {
-		if k == "_is" || k == "_id" || k == "_has" || k == "_pk" {
+		if k == "_is" || k == "_id" || k == "_has" || k == "_pk" || k == "_once" {
 			continue
 		}
 
 		columns[k] = v
+	}
+
+	once, err := parseOnce(raw, table, columns)
+	if err != nil {
+		return domain.Entity{}, err
 	}
 
 	var children []domain.Entity
@@ -116,5 +121,43 @@ func parseEntity(raw map[string]any) (domain.Entity, error) {
 		PKColumn: pkColumn,
 		Columns:  columns,
 		Children: children,
+		Once:     once,
 	}, nil
+}
+
+// parseOnce reads the _once list: the columns joka seeds and then leaves to the
+// database.
+//
+// The columns themselves stay where every other column is, so a reader sees the
+// whole row in one place and a template in a _once column resolves the same way
+// as anywhere else. _once only annotates them.
+//
+// A name that the entity does not declare is refused. There is no way to seed a
+// column that is not there, so it is a typo, and silently ignoring it would
+// leave the author believing a column was protected when it was not.
+func parseOnce(raw map[string]any, table string, columns map[string]any) ([]string, error) {
+	value, ok := raw["_once"]
+	if !ok {
+		return nil, nil
+	}
+
+	list, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("_once must be a list of column names (%s)", table)
+	}
+
+	out := make([]string, 0, len(list))
+
+	for _, item := range list {
+		name, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("_once entries must be column names (%s)", table)
+		}
+		if _, declared := columns[name]; !declared {
+			return nil, fmt.Errorf("_once names %q, which %s does not declare", name, table)
+		}
+		out = append(out, name)
+	}
+
+	return out, nil
 }

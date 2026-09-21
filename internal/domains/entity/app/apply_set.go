@@ -152,7 +152,7 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			// applied a moment ago.
 			row.File = file.Path
 			row.Order = i
-			row.Columns = BaselineOf(applied)
+			row.Columns = baselineAfterUpdate(row.Columns, applied, e)
 			state.Track(e.RefID, row)
 		}
 
@@ -208,11 +208,54 @@ func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.
 		pkColumn = "id"
 	}
 
-	if err := a.DB.UpdateRow(ctx, e.Table, pkColumn, row.PKValue, columns); err != nil {
+	// A _once column was seeded when the row was inserted and belongs to the
+	// database from then on. Writing it here is what made a password reset
+	// revert on the next sync of a modified file.
+	writable := withoutOnce(columns, e)
+
+	if err := a.DB.UpdateRow(ctx, e.Table, pkColumn, row.PKValue, writable); err != nil {
 		return nil, fmt.Errorf("updating %s (_id %s): %w", e.Table, e.RefID, err)
 	}
 
-	return columns, nil
+	return writable, nil
+}
+
+// baselineAfterUpdate records what the update just wrote, and carries forward
+// the _once columns' hashes. joka applied those when it inserted the row, and
+// that is still the last thing it applied to them — dropping them would lose a
+// fact the baseline is there to hold.
+func baselineAfterUpdate(previous map[string]string, applied map[string]any, e domain.Entity) map[string]string {
+	out := BaselineOf(applied)
+	if len(e.Once) == 0 {
+		return out
+	}
+
+	if out == nil {
+		out = make(map[string]string, len(e.Once))
+	}
+	for _, name := range e.Once {
+		if hash, recorded := previous[name]; recorded {
+			out[name] = hash
+		}
+	}
+	return out
+}
+
+// withoutOnce drops the columns the database owns from a resolved row. It
+// returns the map unchanged when the entity declares no _once, which is almost
+// every entity.
+func withoutOnce(columns map[string]any, e domain.Entity) map[string]any {
+	if len(e.Once) == 0 {
+		return columns
+	}
+
+	out := make(map[string]any, len(columns))
+	for name, value := range columns {
+		if !e.IsOnce(name) {
+			out[name] = value
+		}
+	}
+	return out
 }
 
 // forgetEmptyFiles drops the record of a file that is no longer declared and no

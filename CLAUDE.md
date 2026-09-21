@@ -290,6 +290,33 @@ entities:
 - `_id` (optional) — Reference handle for this entity's auto-generated PK
 - `_pk` (optional) — Primary key column name, defaults to `"id"`. Used for the `RETURNING` clause when inserting
 - `_has` (optional) — List of child entities, inserted after the parent
+- `_once` (optional) — List of column names joka seeds on insert and never writes again
+
+```yaml
+- _is: users
+  _id: admin
+  email: admin@example.com
+  password_hash: "{{ argon2id|admin123 }}"
+  _once:
+    - password_hash
+```
+
+A seed row has three kinds of column: one joka owns, one joka seeds and then lets go of, and one
+joka never touches because the file does not declare it. `_once` is the middle kind, and it exists
+because a user resetting their password is not a difference to resolve — it is a column the
+application owns from then on. Without it every sync of a modified file rewrites the password back,
+which is the problem that made `entity sync` skip already-synced files in the first place.
+
+- **The column stays where every other column is**; `_once` only annotates it. A reader sees the
+  whole row in one place, and a template in a `_once` column resolves the same way as anywhere else.
+- **Naming a column the entity does not declare is refused.** There is nothing to seed, so it is a
+  typo, and ignoring it would leave the author believing a column was protected when it was not.
+- **The baseline keeps the insert-time hash.** joka applied the column once, and that is still the
+  last thing it applied to it, so `baselineAfterUpdate` carries the entry forward rather than
+  dropping it.
+- **It is not a difference.** `ResolveRowChanges` skips it, so the sync preview and `entity diff`
+  never show a change sync would not make. `entity diff` reports the columns once per file in
+  `SeededColumns`, the same way it reports `RegeneratedColumns`.
 
 **Template expressions** (resolved at insert time):
 - `{{ now }}` — Current UTC timestamp (`2006-01-02 15:04:05`)
@@ -479,7 +506,8 @@ miserable. `EntitySetError` renders them into one error wrapping `domain.ErrEnti
 
 ### Reserved keys
 
-`_is` (table), `_id` (identity), `_pk` (primary key column, defaults to `id`), `_has` (children).
+`_is` (table), `_id` (identity), `_pk` (primary key column, defaults to `id`), `_has` (children),
+`_once` (columns seeded on insert and owned by the database after).
 
 `_key` was added and removed in the same session. It named a column that identifies a row in the
 database independently of its primary key, for adopting a row joka did not insert. It was never

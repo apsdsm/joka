@@ -67,6 +67,13 @@ type EntityDiff struct {
 	// are a property of the file, not a difference from the database.
 	RegeneratedColumns []string `json:"regenerated_columns"`
 
+	// SeededColumns are the columns declared `_once`: joka set them when it
+	// inserted the row and the database owns them from then on. Like
+	// RegeneratedColumns they are a property of the file rather than a
+	// difference from the database — sync will not write them, so whatever the
+	// row holds is not something joka is about to change.
+	SeededColumns []string `json:"seeded_columns"`
+
 	// MissingRows counts tracked rows that are no longer in the database.
 	MissingRows int `json:"missing_rows"`
 
@@ -322,6 +329,17 @@ func (a DiffEntityAction) buildLines(ctx context.Context, diff *EntityDiff, decl
 		diff.RegeneratedColumns = append(diff.RegeneratedColumns, col)
 	}
 	sort.Strings(diff.RegeneratedColumns)
+
+	seeded := make(map[string]struct{})
+	for _, e := range declared {
+		for _, col := range e.Once {
+			seeded[col] = struct{}{}
+		}
+	}
+	for col := range seeded {
+		diff.SeededColumns = append(diff.SeededColumns, col)
+	}
+	sort.Strings(diff.SeededColumns)
 
 	return nil
 }

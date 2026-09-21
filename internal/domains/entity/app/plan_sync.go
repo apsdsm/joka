@@ -290,6 +290,13 @@ func ResolveRowChanges(
 	for _, k := range cols {
 		raw := e.Columns[k]
 
+		// A _once column was seeded when the row was inserted and the database
+		// owns it now. Sync will not write it, so it is not a change — showing
+		// one would promise an update that never comes.
+		if e.IsOnce(k) {
+			continue
+		}
+
 		if isNonDeterministicTemplate(raw) {
 			changes = append(changes, ColumnChange{Column: k, Regenerated: true})
 			continue

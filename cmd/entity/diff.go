@@ -186,6 +186,11 @@ func renderDiffSummary(w io.Writer, d *app.EntityDiff) {
 			strings.Join(d.RegeneratedColumns, ", "))
 	}
 
+	if len(d.SeededColumns) > 0 {
+		dim.Fprintf(w, "  seeded once and owned by the database since: %s\n",
+			strings.Join(d.SeededColumns, ", "))
+	}
+
 	if d.MissingRows > 0 {
 		color.New(color.FgRed).Fprintf(w, "  %d tracked %s not in the database\n",
 			d.MissingRows, isAreRows(d.MissingRows))

@@ -11,6 +11,28 @@ type Entity struct {
 	PKColumn string
 	Columns  map[string]any
 	Children []Entity
+
+	// Once names the columns joka sets when it inserts the row and never
+	// writes again (from _once). A seed row has three kinds of column: one
+	// joka owns, one joka seeds and then lets go of, and one joka never
+	// touches because the file does not declare it. This is the middle kind.
+	//
+	// It exists because a user resetting their password is not a difference to
+	// resolve, it is a column the application owns from then on. Without it
+	// every sync of a modified file rewrites the password back, which is the
+	// problem that made entity sync skip already-synced files in the first
+	// place.
+	Once []string
+}
+
+// IsOnce reports whether a column is seeded once and then left alone.
+func (e Entity) IsOnce(column string) bool {
+	for _, name := range e.Once {
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // EntityFile groups the entities parsed from a single YAML file. Path is the
