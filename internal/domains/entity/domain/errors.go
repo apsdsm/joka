@@ -54,6 +54,14 @@ var (
 	// different thing wearing the same name.
 	ErrEntityTableChanged = errors.New("_id now declares a different table")
 
+	// ErrEntityConflict means the database moved out from under the
+	// declaration: a column joka wrote holds a value joka did not write, so
+	// applying the file would discard a change it cannot account for. Which
+	// side wins is --on-conflict; refusing is the default, because a sync that
+	// silently overwrote it would be the failure this whole model exists to
+	// prevent.
+	ErrEntityConflict = errors.New("the database changed since joka last wrote")
+
 	// ErrStateAmbiguous means the tracking in the database cannot be read as a
 	// state document because one _id is claimed by more than one tracked row.
 	// Tracking version 2's unique index makes this unreachable going forward;

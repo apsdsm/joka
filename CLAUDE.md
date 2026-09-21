@@ -608,7 +608,7 @@ type State struct {
 - **`EntityState.Columns` is the baseline**: the SHA-256 of every value joka last applied, keyed by
   column. It is the third point a merge needs — with the declaration and the live row it says which
   side moved, where two points can only say that they differ. Recorded on every insert and on every
-  update, because the row was just rewritten. Nothing reads it yet.
+  update, because the row was just rewritten.
 - **It stores hashes, not values**, for three reasons in order of weight. Secrets: `resolveColumns`
   turns `{{ asm.… }}` into the actual secret before inserting, and the planner goes out of its way
   never to materialize one — storing values would undo that and put Secrets Manager plaintext into
@@ -670,6 +670,50 @@ which is why it is the default and the only one implemented.
 - **Reimport and update require an `_id` on every re-inserted row** (`ErrEntitySetInvalid`). The
   PostgreSQL adapter's `RecordEntityRow` used to enforce that and the actions now do, which means the
   unit tests see the same refusal the database gave.
+
+## Convergence (`entity sync`)
+
+The seed files are the desired state. Every declared entity is compared against the database,
+whether or not its file changed — that is what makes a row deleted or edited out of band visible at
+all, and it is the finding `--force` was added for and never fixed.
+
+`app.ClassifyColumn` compares three points:
+
+| declared vs baseline | live vs baseline | verdict |
+|---|---|---|
+| same | same | unchanged |
+| changed | same | **push** — only the file moved |
+| same | changed | **conflict** — the database moved |
+| changed | changed | **conflict** — both moved |
+
+- **A nil baseline reads as push, not conflict.** The absence of a record is not evidence that the
+  database moved, and treating it as one would make the first sync after the version 3 upgrade a
+  wall of conflicts on a database where nothing is wrong. Push is what joka did before the baseline
+  existed, so an un-baselined row behaves as it always has and gets a baseline on the way through.
+- **`HashValue` canonicalises JSON**, the way `valuesEqual` does. PostgreSQL renders `jsonb` in its
+  own key order with a space after each colon, so hashing raw text made every JSON column's baseline
+  differ from the value it was taken from.
+- **The content hash no longer gates the comparison.** It decides which files get their hash
+  rewritten, and it is the only signal joka has for a **non-deterministic column** — `{{ now }}`,
+  `{{ argon2id|… }}`, `asm.*` — whose value joka cannot predict, so it cannot tell drift from
+  regeneration. Those are written only when the file changed; without that rule every boot would
+  rewrite every `created_at`.
+- **`--force` is gone.** It existed because the hash was the gate.
+
+### `--on-conflict`
+
+| | |
+|---|---|
+| `fail` (default) | report, write nothing, exit non-zero — the drift gate, as `migrate verify` is for schema |
+| `file` | the declaration wins; write over the database's values |
+| `db` | the database wins; leave the column and record what it holds as the new baseline |
+
+`db` does not rewrite the YAML — that is `entity resolve`, which is not built. It only stops joka
+fighting the database, by conceding the baseline so the same difference is not reported again.
+
+`ApplySetAction` takes the decision as `Keep` (`_id` → column → live hash) rather than a policy
+enum, so the applier has one concept — "these columns are the database's" — and the same field
+carries a per-column answer when the interactive resolve lands.
 
 ## Identity matching (`ApplySetAction`)
 

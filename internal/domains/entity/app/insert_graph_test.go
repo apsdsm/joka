@@ -125,15 +125,39 @@ func (m *mockDBAdapter) RowExists(_ context.Context, table, _ string, pkValue in
 	return ok, nil
 }
 
+// InsertRow records the call and makes the row live, so a test that goes on to
+// compare against the database sees what the insert put there.
 func (m *mockDBAdapter) InsertRow(_ context.Context, table string, columns map[string]any, _ string) (int64, error) {
 	m.insertedRows = append(m.insertedRows, mockInsertCall{Table: table, Columns: columns})
+
 	id := m.nextID
 	m.nextID++
+
+	live := make(map[string]any, len(columns))
+	for k, v := range columns {
+		live[k] = v
+	}
+	m.currentRows[fmt.Sprintf("%s|%d", table, id)] = live
+
 	return id, nil
 }
 
+// UpdateRow records the call and applies it to the live row. Without this the
+// mock would leave the database disagreeing with the baseline joka just
+// recorded, and every three-way comparison after an apply would read as drift.
 func (m *mockDBAdapter) UpdateRow(_ context.Context, table, pkColumn string, pkValue int64, columns map[string]any) error {
 	m.updatedRows = append(m.updatedRows, mockUpdateCall{Table: table, PKColumn: pkColumn, PKValue: pkValue, Columns: columns})
+
+	key := fmt.Sprintf("%s|%d", table, pkValue)
+	live, ok := m.currentRows[key]
+	if !ok {
+		live = make(map[string]any, len(columns))
+		m.currentRows[key] = live
+	}
+	for k, v := range columns {
+		live[k] = v
+	}
+
 	return nil
 }
 

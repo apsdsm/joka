@@ -15,6 +15,7 @@ import (
 	"github.com/apsdsm/joka/config"
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/connection"
+	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/apsdsm/joka/internal/meta"
 	"github.com/apsdsm/joka/internal/secrets"
@@ -332,25 +333,34 @@ func main() {
 		Short: "Sync entity YAML files to the database",
 		Long: `Sync entity YAML files to the database.
 
-New files have their entity graph inserted. Files whose content changed since
-the last sync (shown as [modified] by 'entity status') are reconciled in place:
-each entity is updated by primary key against the tracked row at the same
-depth-first position, so existing PKs are preserved (no delete, no FK conflict).
-Unchanged files are skipped.
+The seed files are the desired state. Every declared entity is compared against
+the database, whether or not its file changed: an entity with no tracked row is
+inserted, and a tracked one has each declared column compared three ways —
+against the file, against the database, and against what joka last wrote there.
 
-If a modified file changed structurally — a different number of entities than
-tracked, an entity's table changed, or an _id that disagrees with the tracked
-row at that position — sync refuses to guess and recommends 'entity reimport'.
+A column only the file moved is written. A column the database moved is a
+conflict: applying the file would discard a change joka did not make.
 
-Use --dry-run to print the planned inserts and before/after field changes
-without applying anything.
+  --on-conflict=fail   report them, write nothing, exit non-zero (default)
+  --on-conflict=file   the file wins; write over the database's values
+  --on-conflict=db     the database wins; leave the column and stop reporting it
 
-Use --force to re-apply every tracked file's row updates regardless of its
-stored hash. This is the escape hatch when change detection is in doubt.`,
+The default makes this a drift gate, the same role 'migrate verify' plays for
+schema. A column listed under an entity's _once: is not compared at all — joka
+seeds it on insert and the database owns it after, which is how a password
+survives a re-sync.
+
+Use --dry-run to print the plan without applying anything.`,
 		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
-			force, _ := c.Flags().GetBool("force")
+
+			onConflict, _ := c.Flags().GetString("on-conflict")
+			policy, err := entityapp.ParseConflictPolicy(onConflict)
+			if err != nil {
+				return err
+			}
+
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
 				Secrets:      secrets.New(cfg.Secrets),
@@ -358,12 +368,13 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
-				Force:        force,
+				OnConflict:   policy,
 			}.Execute(c.Context())
 		},
 	}
 	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
-	entitySyncCmd.Flags().Bool("force", false, "Re-apply updates for every tracked file regardless of hash")
+	entitySyncCmd.Flags().String("on-conflict", "fail",
+		"What to do when the database changed since joka last wrote: fail, file or db")
 
 	entityStatusCmd := &cobra.Command{
 		Use:   "status",

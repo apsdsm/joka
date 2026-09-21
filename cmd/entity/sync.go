@@ -29,11 +29,9 @@ type RunEntitySyncCommand struct {
 	// DryRun computes and prints the plan (inserts + before/after updates)
 	// without applying anything or acquiring the advisory lock.
 	DryRun bool
-	// Force treats every tracked file as modified (re-applies its row updates)
-	// regardless of whether its stored hash matches the current file. Genuinely
-	// new files are still inserted as usual. The escape hatch for when change
-	// detection is in doubt.
-	Force bool
+	// OnConflict decides what happens when the database moved out from under
+	// the declaration. Defaults to refusing.
+	OnConflict app.ConflictPolicy
 }
 
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
@@ -44,10 +42,6 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			return shared.PrintErrorJSON(err)
 		}
 		return err
-	}
-
-	if r.Force && !jsonOut {
-		color.Yellow("Forced re-sync: every tracked file will be re-applied regardless of its stored hash.")
 	}
 
 	if !r.SkipLock && !r.DryRun {
@@ -113,17 +107,15 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 		stored, tracked := state.FileHash(rel)
 
-		// --force re-applies a tracked file whatever its stored hash says. It
-		// does not make an untracked file anything other than new.
+		// The hash no longer decides what gets reconciled — every declared
+		// entity is compared against the database. It decides which files get
+		// their content hash rewritten, and it is the only signal joka has for
+		// a non-deterministic column.
 		switch app.FileStatusFor(tracked, stored, hash) {
 		case domain.StatusNew:
 			pending = append(pending, file)
 		case domain.StatusModified:
 			modified = append(modified, file)
-		default:
-			if r.Force {
-				modified = append(modified, file)
-			}
 		}
 	}
 
@@ -170,7 +162,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	// Nothing to write, but tracked entities no file declares any more. Report
 	// and stop: there is no transaction to open.
-	if len(pending) == 0 && len(modified) == 0 {
+	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 {
 		if jsonOut {
 			shared.PrintJSON(map[string]any{
 				"status": "ok", "inserted": []string{}, "updated": []string{},
@@ -190,6 +182,17 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		printPlan(plan)
 		color.Yellow("\nDry run — no changes applied.")
 		return nil
+	}
+
+	// A conflict is the database holding a value joka did not write. Applying
+	// the declaration over it would discard a change joka cannot account for,
+	// so by default nothing is written and the run exits non-zero — which is
+	// what makes entity sync a drift gate in CI.
+	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictFail {
+		if !jsonOut {
+			printPlan(plan)
+		}
+		return fail(app.ConflictError(plan.Conflicts))
 	}
 
 	if !jsonOut {
@@ -218,6 +221,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Secrets:  r.Secrets,
 		Declared: all,
 		Dirty:    dirty,
+		Keep:     app.KeepFromConflicts(plan.Conflicts, r.OnConflict),
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
@@ -230,7 +234,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	if jsonOut {
 		shared.PrintJSON(map[string]any{
-			"status": "ok", "forced": r.Force, "plan": planJSON(plan),
+			"status": "ok", "on_conflict": string(r.OnConflict), "plan": planJSON(plan),
 			"inserted": orEmpty(result.Inserted), "updated": orEmpty(result.Updated),
 			"files": orEmpty(result.Files), "moved": result.Moved,
 			"undeclared":      undeclaredJSON(result.Undeclared),
@@ -364,6 +368,35 @@ func printPlan(plan *app.SyncPlan) {
 			}
 		}
 	}
+
+	printConflicts(plan.Conflicts)
+}
+
+// printConflicts shows the rows the database moved, with the value it holds
+// against the value the file declares, so the reader can pick a side without
+// running a second command.
+func printConflicts(conflicts []app.RowConflict) {
+	if len(conflicts) == 0 {
+		return
+	}
+
+	red := color.New(color.FgRed)
+	green := color.New(color.FgGreen)
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Changed in the database since joka last wrote:")
+	color.Unset()
+
+	for _, row := range conflicts {
+		color.Yellow("  ! %s  %s %s %d  (%s)", row.RefID, row.Table, row.PKColumn, row.PKValue, row.File)
+
+		for _, c := range row.Columns {
+			fmt.Printf("        %s:\n", c.Column)
+			red.Printf("          database %s\n", c.Before)
+			green.Printf("          file     %s\n", c.After)
+		}
+	}
 }
 
 // planJSON converts a SyncPlan into plain maps/slices for JSON output.
@@ -398,7 +431,21 @@ func planJSON(plan *app.SyncPlan) map[string]any {
 		updates = append(updates, map[string]any{"file": f.Path, "rows": rows})
 	}
 
-	return map[string]any{"inserts": inserts, "updates": updates}
+	conflicts := make([]map[string]any, 0, len(plan.Conflicts))
+	for _, row := range plan.Conflicts {
+		columns := make([]map[string]any, 0, len(row.Columns))
+		for _, c := range row.Columns {
+			columns = append(columns, map[string]any{
+				"column": c.Column, "database": c.Before, "file": c.After,
+			})
+		}
+		conflicts = append(conflicts, map[string]any{
+			"file": row.File, "ref_id": row.RefID, "table": row.Table,
+			"pk_column": row.PKColumn, "pk_value": row.PKValue, "columns": columns,
+		})
+	}
+
+	return map[string]any{"inserts": inserts, "updates": updates, "conflicts": conflicts}
 }
 
 // reportUndeclared prints the tracked entities no file declares any more.

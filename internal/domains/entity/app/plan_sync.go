@@ -18,9 +18,24 @@ import (
 type SyncPlan struct {
 	Inserts []FileInsertPlan
 	Updates []FileUpdatePlan
+	// Conflicts are the rows where the database moved. Applying the
+	// declaration would discard a change joka did not make, so what happens to
+	// them is the caller's decision — see OnConflict.
+	Conflicts []RowConflict
 	// Undeclared are tracked rows no file declares any more. Nothing would be
 	// deleted on their account; they are here so a dry run reports them.
 	Undeclared []domain.TrackedRow
+}
+
+// RowConflict is one tracked row whose database values moved out from under the
+// declaration.
+type RowConflict struct {
+	File     string         `json:"file"`
+	RefID    string         `json:"ref_id"`
+	Table    string         `json:"table"`
+	PKColumn string         `json:"pk_column"`
+	PKValue  int64          `json:"pk_value"`
+	Columns  []ColumnChange `json:"columns"`
 }
 
 // FileInsertPlan is the set of rows a new (untracked) file would insert.
@@ -78,11 +93,42 @@ type ColumnChange struct {
 	After       string `json:"after,omitempty"`
 	Regenerated bool   `json:"regenerated,omitempty"`
 	Deferred    bool   `json:"deferred,omitempty"`
+
+	// Verdict is what the three-way comparison concluded: push when only the
+	// declaration moved, conflict when the database moved and writing the
+	// declared value would discard a change joka did not make.
+	Verdict ColumnVerdict `json:"verdict,omitempty"`
 }
 
-// HasChanges reports whether the plan would actually do anything.
+// IsConflict reports whether applying this change would discard something.
+func (c ColumnChange) IsConflict() bool { return c.Verdict == VerdictConflict }
+
+// HasChanges reports whether the plan has anything to do or say.
 func (p *SyncPlan) HasChanges() bool {
-	return len(p.Inserts) > 0 || len(p.Updates) > 0 || len(p.Undeclared) > 0
+	return len(p.Inserts) > 0 || len(p.Updates) > 0 ||
+		len(p.Conflicts) > 0 || len(p.Undeclared) > 0
+}
+
+// ConflictedColumns counts the columns across every conflicted row.
+func (p *SyncPlan) ConflictedColumns() int {
+	n := 0
+	for _, row := range p.Conflicts {
+		n += len(row.Columns)
+	}
+	return n
+}
+
+// splitByVerdict separates the columns sync would write from the ones where the
+// database moved.
+func splitByVerdict(changes []ColumnChange) (pushes, conflicts []ColumnChange) {
+	for _, c := range changes {
+		if c.IsConflict() {
+			conflicts = append(conflicts, c)
+			continue
+		}
+		pushes = append(pushes, c)
+	}
+	return pushes, conflicts
 }
 
 // PlanSyncAction computes a SyncPlan from the same declared set ApplySetAction
@@ -97,7 +143,14 @@ type PlanSyncAction struct {
 	State *domain.State
 	// Declared is every file in the set, in load order.
 	Declared []*domain.EntityFile
-	// Dirty names the files that would be written.
+	// Dirty names the files whose content changed since the last sync.
+	//
+	// It no longer decides what gets compared: every declared entity is
+	// compared against the database, which is what makes a row deleted or
+	// edited out of band visible at all. It survives for the one kind of
+	// column where the declaration moving is joka's only signal — a
+	// non-deterministic template, whose value joka cannot predict and so
+	// cannot tell drift from regeneration.
 	Dirty map[string]bool
 }
 
@@ -117,10 +170,6 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 		entities := flattenEntities(file.Entities, nil)
 		for _, e := range entities {
 			declared[e.RefID] = true
-		}
-
-		if !a.Dirty[file.Path] {
-			continue
 		}
 
 		fp := FileInsertPlan{Path: file.Path}
@@ -152,13 +201,22 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 				continue
 			}
 
-			changes, err := ResolveRowChanges(ctx, a.DB, e, row.PKColumn, row.PKValue, refMap, now)
+			changes, err := ResolveRowChanges(ctx, a.DB, e, row, refMap, now, a.Dirty[file.Path])
 			if err != nil {
 				return nil, fmt.Errorf("%s: previewing %s (_id %s): %w", file.Path, e.Table, e.RefID, err)
 			}
-			if len(changes) > 0 {
+
+			pushes, conflicts := splitByVerdict(changes)
+
+			if len(pushes) > 0 {
 				fup.Rows = append(fup.Rows, RowUpdatePlan{
-					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.PKValue, Changes: changes,
+					Table: e.Table, PKColumn: row.PKColumn, PKValue: row.PKValue, Changes: pushes,
+				})
+			}
+			if len(conflicts) > 0 {
+				plan.Conflicts = append(plan.Conflicts, RowConflict{
+					File: file.Path, RefID: e.RefID, Table: e.Table,
+					PKColumn: row.PKColumn, PKValue: row.PKValue, Columns: conflicts,
 				})
 			}
 		}
@@ -258,14 +316,26 @@ func sortedKeys(m map[string]any) []string {
 }
 
 // ResolveRowChanges compares one entity's declared columns against the row it
-// is tracked against, and returns only the columns that would change.
+// is tracked against, and returns only the columns that differ, each carrying
+// the verdict of a three-way comparison against the baseline.
 //
-// It reads the live row, so the row must exist. Non-deterministic templates
-// (argon2id, now, asm.* secrets) are reported as Regenerated rather than
-// compared, because they produce a new value on every sync and a hash-vs-hash
-// diff would say nothing. A lookup whose target row does not exist yet is
-// reported as Deferred rather than failing: the row may be inserted earlier in
-// the same sync, which applies inserts before updates.
+// It reads the live row, so the row must exist.
+//
+// Three kinds of column are reported without a verdict, because there is no
+// three-way comparison to make:
+//
+//   - `_once` columns are skipped entirely. The database owns them; sync will
+//     not write them, so showing a change would promise an update that never
+//     comes.
+//   - A non-deterministic template (argon2id, now, asm.* secrets) produces a
+//     new value every time, so joka cannot say what the column "should" hold
+//     and cannot tell drift from regeneration. Its only signal is the
+//     declaration moving, which is what fileChanged carries. Reported as
+//     Regenerated, and only when the file changed — otherwise rewriting it on
+//     every run would churn every {{ now }} column on every boot.
+//   - A lookup whose target row does not exist yet is reported as Deferred
+//     rather than failing: the row may be inserted earlier in the same sync,
+//     which applies inserts before updates.
 //
 // Shared by the sync preview (`entity sync --dry-run`) and `entity diff`, so
 // the two can never disagree about what a column change is.
@@ -273,14 +343,19 @@ func ResolveRowChanges(
 	ctx context.Context,
 	db DBAdapter,
 	e domain.Entity,
-	pkColumn string,
-	pkValue int64,
+	row domain.EntityState,
 	refMap map[string]int64,
 	now string,
+	fileChanged bool,
 ) ([]ColumnChange, error) {
 	cols := sortedKeys(e.Columns)
 
-	current, err := db.GetRow(ctx, e.Table, cols, pkColumn, pkValue)
+	pkColumn := row.PKColumn
+	if pkColumn == "" {
+		pkColumn = "id"
+	}
+
+	current, err := db.GetRow(ctx, e.Table, cols, pkColumn, row.PKValue)
 	if err != nil {
 		return nil, err
 	}
@@ -290,36 +365,41 @@ func ResolveRowChanges(
 	for _, k := range cols {
 		raw := e.Columns[k]
 
-		// A _once column was seeded when the row was inserted and the database
-		// owns it now. Sync will not write it, so it is not a change — showing
-		// one would promise an update that never comes.
 		if e.IsOnce(k) {
 			continue
 		}
 
 		if isNonDeterministicTemplate(raw) {
-			changes = append(changes, ColumnChange{Column: k, Regenerated: true})
+			if fileChanged {
+				changes = append(changes, ColumnChange{Column: k, Regenerated: true, Verdict: VerdictPush})
+			}
 			continue
 		}
 
 		after, err := resolveColumnValue(ctx, raw, refMap, now, db)
 		if err != nil {
 			if errors.Is(err, domain.ErrLookupNotFound) {
-				changes = append(changes, ColumnChange{Column: k, Before: normalizeValue(current[k]), Deferred: true})
+				changes = append(changes, ColumnChange{
+					Column: k, Before: normalizeValue(current[k]), Deferred: true, Verdict: VerdictPush,
+				})
 				continue
 			}
 			return nil, fmt.Errorf("%s.%s: %w", e.Table, k, err)
 		}
 
-		before := normalizeValue(current[k])
-		afterStr := normalizeValue(after)
-		if !valuesEqual(before, afterStr) {
-			// Show both sides in the same canonical form when they are JSON,
-			// so the difference is visible instead of being buried in a
-			// disagreement about key order.
-			before, afterStr = alignForDisplay(before, afterStr)
-			changes = append(changes, ColumnChange{Column: k, Before: before, After: afterStr})
+		baseline, hasBaseline := row.Baseline(k)
+		verdict := ClassifyColumn(after, current[k], baseline, hasBaseline)
+		if verdict == VerdictUnchanged {
+			continue
 		}
+
+		// Show both sides in the same canonical form when they are JSON, so
+		// the difference is visible instead of being buried in a disagreement
+		// about key order.
+		before, afterStr := alignForDisplay(normalizeValue(current[k]), normalizeValue(after))
+		changes = append(changes, ColumnChange{
+			Column: k, Before: before, After: afterStr, Verdict: verdict,
+		})
 	}
 
 	return changes, nil

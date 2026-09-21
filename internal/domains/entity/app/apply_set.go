@@ -38,11 +38,21 @@ type ApplySetAction struct {
 	// and written in that order, so a reference to another file's entity
 	// resolves when that file sorts first — the same rule as within a file.
 	Declared []*domain.EntityFile
-	// Dirty names the files whose content changed since the last sync. Only
-	// these are written. The rest still contribute their declarations, which is
-	// what makes an _id claimed elsewhere and an entity declared nowhere both
-	// visible.
+	// Dirty names the files whose content changed since the last sync. It no
+	// longer decides what gets written — every declared entity is reconciled —
+	// but a non-deterministic column has no comparison to make, so the
+	// declaration moving is the only signal joka has for it.
 	Dirty map[string]bool
+	// Keep names the columns the database owns for this run, per _id, mapped
+	// to the hash of the value it holds. The apply leaves them alone and
+	// records that hash as the new baseline, which is what "the database is
+	// right" means: joka stops trying to write the column and starts treating
+	// what is there as what it last applied.
+	//
+	// Empty under --on-conflict=file, where the declaration wins and every
+	// column is written. Never reached under --on-conflict=fail, which refuses
+	// before a transaction is opened.
+	Keep map[string]map[string]string
 }
 
 // ApplyResult reports what the run did.
@@ -134,7 +144,9 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 					domain.ErrEntityTableChanged, e.RefID, row.Table, file.Path, e.Table)
 			}
 
-			applied, err := a.update(ctx, e, row, refMap, now)
+			kept := a.Keep[e.RefID]
+
+			applied, err := a.update(ctx, e, row, refMap, now, kept)
 			if err != nil {
 				return nil, err
 			}
@@ -152,7 +164,7 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			// applied a moment ago.
 			row.File = file.Path
 			row.Order = i
-			row.Columns = baselineAfterUpdate(row.Columns, applied, e)
+			row.Columns = baselineAfterUpdate(row.Columns, applied, e, kept)
 			state.Track(e.RefID, row)
 		}
 
@@ -197,7 +209,14 @@ func (a ApplySetAction) insert(ctx context.Context, e domain.Entity, refMap map[
 // update rewrites every column of the tracked row. All columns are written, not
 // just changed ones, so a non-deterministic template produces a fresh value on
 // every sync of a file that changed.
-func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.EntityState, refMap map[string]int64, now string) (map[string]any, error) {
+func (a ApplySetAction) update(
+	ctx context.Context,
+	e domain.Entity,
+	row domain.EntityState,
+	refMap map[string]int64,
+	now string,
+	kept map[string]string,
+) (map[string]any, error) {
 	columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
 	if err != nil {
 		return nil, fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
@@ -210,8 +229,9 @@ func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.
 
 	// A _once column was seeded when the row was inserted and belongs to the
 	// database from then on. Writing it here is what made a password reset
-	// revert on the next sync of a modified file.
-	writable := withoutOnce(columns, e)
+	// revert on the next sync of a modified file. A kept column is the same
+	// thing decided for this run rather than declared in the file.
+	writable := writableColumns(columns, e, kept)
 
 	if err := a.DB.UpdateRow(ctx, e.Table, pkColumn, row.PKValue, writable); err != nil {
 		return nil, fmt.Errorf("updating %s (_id %s): %w", e.Table, e.RefID, err)
@@ -220,40 +240,59 @@ func (a ApplySetAction) update(ctx context.Context, e domain.Entity, row domain.
 	return writable, nil
 }
 
-// baselineAfterUpdate records what the update just wrote, and carries forward
-// the _once columns' hashes. joka applied those when it inserted the row, and
-// that is still the last thing it applied to them — dropping them would lose a
-// fact the baseline is there to hold.
-func baselineAfterUpdate(previous map[string]string, applied map[string]any, e domain.Entity) map[string]string {
-	out := BaselineOf(applied)
-	if len(e.Once) == 0 {
-		return out
+// baselineAfterUpdate records what the update just wrote, plus the two kinds of
+// column it deliberately did not.
+//
+// A _once column keeps its insert-time hash: joka applied it once, and that is
+// still the last thing it applied to it. A kept column takes the hash of what
+// the database holds, which is what conceding a conflict means — joka stops
+// trying to write the column and starts treating what is there as its baseline,
+// so the same difference is not reported again on the next run.
+func baselineAfterUpdate(
+	previous map[string]string,
+	applied map[string]any,
+	e domain.Entity,
+	kept map[string]string,
+) map[string]string {
+	if len(e.Once) == 0 && len(kept) == 0 {
+		return BaselineOf(applied)
 	}
 
+	out := BaselineOf(applied)
 	if out == nil {
-		out = make(map[string]string, len(e.Once))
+		out = make(map[string]string, len(e.Once)+len(kept))
 	}
+
 	for _, name := range e.Once {
 		if hash, recorded := previous[name]; recorded {
 			out[name] = hash
 		}
 	}
+	for name, hash := range kept {
+		out[name] = hash
+	}
+
 	return out
 }
 
-// withoutOnce drops the columns the database owns from a resolved row. It
-// returns the map unchanged when the entity declares no _once, which is almost
+// writableColumns drops the columns this run must not write: the ones the file
+// declares `_once`, and the ones a conflict was resolved in the database's
+// favour. It returns the map unchanged when there are neither, which is almost
 // every entity.
-func withoutOnce(columns map[string]any, e domain.Entity) map[string]any {
-	if len(e.Once) == 0 {
+func writableColumns(columns map[string]any, e domain.Entity, kept map[string]string) map[string]any {
+	if len(e.Once) == 0 && len(kept) == 0 {
 		return columns
 	}
 
 	out := make(map[string]any, len(columns))
 	for name, value := range columns {
-		if !e.IsOnce(name) {
-			out[name] = value
+		if e.IsOnce(name) {
+			continue
 		}
+		if _, held := kept[name]; held {
+			continue
+		}
+		out[name] = value
 	}
 	return out
 }

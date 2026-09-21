@@ -728,7 +728,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`; must be the last applied migration) |
 | `--ignore-foreign-keys` | | `false` | Defer FK constraint checks during data sync truncate |
 | `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`) |
-| `--force` | | `false` | Re-apply tracked files even when unchanged (`entity sync`) |
+| `--on-conflict` | | `fail` | What to do when the database changed since joka last wrote: `fail`, `file` or `db` (`entity sync`) |
 
 ## How It Works
 
