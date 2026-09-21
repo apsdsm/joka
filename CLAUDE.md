@@ -356,7 +356,13 @@ which is the problem that made `entity sync` skip already-synced files in the fi
 - Uses SHA-256 content hashing stored in `joka_entities.content_hash`
 
 **Entity reimport** (`joka entity reimport <file>`):
-- Deletes previously inserted rows in reverse insertion order (children first, then parents)
+- Deletes the rows it still declares, in reverse insertion order (children first, then parents)
+- **Leaves a row the file no longer declares**, and reports it. `entity sync` refuses to delete an
+  undeclared entity because a seed file edited by mistake must not take data with it; reimport
+  deleting it silently — while the output said only "tracked rows to delete: N" — was the same
+  mistake with a different command name on it. `--prune` says to mean it.
+- Reads and validates the **whole set**, not just the named file: an `_id` is unique across the set,
+  and an entity can be tracked against a file other than the one declaring it.
 - Re-inserts the entity graph from the YAML file
 - Aborts on FK constraint violations from external references
 - Updates the content hash and row tracking after successful reimport

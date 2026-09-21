@@ -465,8 +465,10 @@ Use --dry-run to print the plan without applying anything.`,
 		Args:        cobra.ExactArgs(1),
 		Annotations: mutates,
 		RunE: func(c *cobra.Command, args []string) error {
+			prune, _ := c.Flags().GetBool("prune")
 			return entity.RunEntityReimportCommand{
 				DB:           dbConn,
+				Prune:        prune,
 				Secrets:      secrets.New(cfg.Secrets),
 				EntitiesDir:  entitiesDir,
 				FilePath:     args[0],
@@ -478,6 +480,9 @@ Use --dry-run to print the plan without applying anything.`,
 			}.Execute(c.Context())
 		},
 	}
+
+	entityReimportCmd.Flags().Bool("prune", false,
+		"Also delete tracked rows the file no longer declares")
 
 	entityUpdateCmd := &cobra.Command{
 		Use:         "update [file]",

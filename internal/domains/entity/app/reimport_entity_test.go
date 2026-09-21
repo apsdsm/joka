@@ -33,7 +33,7 @@ func TestReimportEntityAction(t *testing.T) {
 			domain.TrackedRow{TableName: "profiles", RowPK: 2, PKColumn: "id", RefID: "admin_profile", InsertionOrder: 1},
 		)
 
-		err := (ReimportEntityAction{
+		_, err := (ReimportEntityAction{
 			DB:          db,
 			Backend:     db.backend(),
 			FilePath:    "admin.yaml",
@@ -75,7 +75,7 @@ func TestReimportEntityAction(t *testing.T) {
 	t.Run("it returns ErrEntityNotSynced when file was never synced", func(t *testing.T) {
 		db := newMockDBAdapter()
 
-		err := (ReimportEntityAction{
+		_, err := (ReimportEntityAction{
 			DB:       db,
 			Backend:  db.backend(),
 			FilePath: "unknown.yaml",
@@ -93,14 +93,14 @@ func TestReimportEntityAction(t *testing.T) {
 	t.Run("it returns ErrForeignKeyConflict when child rows exist", func(t *testing.T) {
 		dir := t.TempDir()
 		fullPath := filepath.Join(dir, "fk.yaml")
-		os.WriteFile(fullPath, []byte("entities:\n  - _is: users\n    name: A\n"), 0644)
+		os.WriteFile(fullPath, []byte("entities:\n  - _is: users\n    _id: a\n    name: A\n"), 0644)
 
 		db := &fkErrorDBAdapter{mockDBAdapter: *newMockDBAdapter()}
 		db.track("fk.yaml",
 			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "a", InsertionOrder: 0},
 		)
 
-		err := (ReimportEntityAction{
+		_, err := (ReimportEntityAction{
 			DB:       db,
 			Backend:  db.backend(),
 			FilePath: "fk.yaml",
@@ -128,7 +128,7 @@ func TestReimportEntityAction(t *testing.T) {
 		db := newMockDBAdapter()
 		db.trackHash("empty.yaml", "old")
 
-		err := (ReimportEntityAction{
+		_, err := (ReimportEntityAction{
 			DB:          db,
 			Backend:     db.backend(),
 			FilePath:    "empty.yaml",
@@ -156,4 +156,61 @@ type fkErrorDBAdapter struct {
 
 func (f *fkErrorDBAdapter) DeleteRow(_ context.Context, table, pkColumn string, pkValue int64) error {
 	return fmt.Errorf("%w: table %s, %s=%d", domain.ErrForeignKeyConflict, table, pkColumn, pkValue)
+}
+
+func TestReimportLeavesUndeclaredRows(t *testing.T) {
+	dir := t.TempDir()
+	fullPath := filepath.Join(dir, "a.yaml")
+	os.WriteFile(fullPath, []byte("entities:\n  - _is: users\n    _id: kept\n    name: Kept\n"), 0644)
+
+	db := newMockDBAdapter()
+	db.trackHash("a.yaml", "old",
+		domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "kept", InsertionOrder: 0},
+		domain.TrackedRow{TableName: "users", RowPK: 2, PKColumn: "id", RefID: "dropped", InsertionOrder: 1},
+	)
+
+	t.Run("it does not delete a row the file stopped declaring", func(t *testing.T) {
+		// entity sync refuses to delete an undeclared entity because a seed file
+		// edited by mistake must not take data with it. Reimport deleting it
+		// silently was the same mistake with a different command name on it.
+		undeclared, err := (ReimportEntityAction{
+			DB: db, Backend: db.backend(),
+			FilePath: "a.yaml", FullPath: fullPath, ContentHash: "new",
+		}).Execute(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(undeclared) != 1 || undeclared[0].RefID != "dropped" {
+			t.Fatalf("expected the undeclared row reported, got %+v", undeclared)
+		}
+		for _, d := range db.deletedRows {
+			if d.PKValue == 2 {
+				t.Error("expected the undeclared row left in the database")
+			}
+		}
+	})
+
+	t.Run("--prune deletes it", func(t *testing.T) {
+		db := newMockDBAdapter()
+		db.trackHash("a.yaml", "old",
+			domain.TrackedRow{TableName: "users", RowPK: 1, PKColumn: "id", RefID: "kept", InsertionOrder: 0},
+			domain.TrackedRow{TableName: "users", RowPK: 2, PKColumn: "id", RefID: "dropped", InsertionOrder: 1},
+		)
+
+		undeclared, err := (ReimportEntityAction{
+			DB: db, Backend: db.backend(), Prune: true,
+			FilePath: "a.yaml", FullPath: fullPath, ContentHash: "new",
+		}).Execute(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(undeclared) != 0 {
+			t.Errorf("expected nothing left behind, got %+v", undeclared)
+		}
+		if _, still := db.state.Row("dropped"); still {
+			t.Error("expected the tracking dropped too")
+		}
+	})
 }

@@ -1,3 +1,4 @@
+| `--prune` | | `false` | Also delete tracked rows the file no longer declares (`entity reimport`) |
 # Joka
 
 Joka is a database migration and data management tool for PostgreSQL. It tracks and applies SQL migrations, captures schema snapshots, syncs seed data from files to database tables, and seeds entity graphs with parent-child relationships.

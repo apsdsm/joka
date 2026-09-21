@@ -23,6 +23,9 @@ type RunEntityReimportCommand struct {
 	FilePath     string // relative path argument
 	AutoConfirm  bool
 	OutputFormat string
+	// Prune deletes rows the file no longer declares. Without it they are
+	// left in the database and reported.
+	Prune bool
 	// StateFile overrides where the state file is written; empty means the
 	// default beside the working directory.
 	StateFile string
@@ -43,7 +46,6 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 		return err
 	}
 	defer lockAdapter.Release(ctx) //nolint:errcheck
-
 
 	if err := infra.NewPostgresStateBackend(r.DB).EnsureStateTable(ctx); err != nil {
 		if jsonOut {
@@ -106,7 +108,12 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 		fmt.Println("Entity reimport:")
 		color.Unset()
 		color.Cyan("  File: %s", r.FilePath)
-		color.Cyan("  Tracked rows to delete: %d", len(tracked))
+		color.Cyan("  Tracked rows: %d", len(tracked))
+		if r.Prune {
+			color.Yellow("  --prune: rows the file no longer declares will be deleted too")
+		} else {
+			fmt.Println("  Rows the file no longer declares are left alone (--prune deletes them)")
+		}
 		fmt.Println()
 
 		if !r.AutoConfirm {
@@ -127,13 +134,14 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
 
-	err = app.ReimportEntityAction{
+	undeclared, err := app.ReimportEntityAction{
 		DB:          txAdapter,
 		Backend:     infra.NewPostgresTxStateBackend(tx, r.DB),
 		Secrets:     r.Secrets,
 		FilePath:    r.FilePath,
 		FullPath:    fullPath,
 		ContentHash: contentHash,
+		Prune:       r.Prune,
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
@@ -155,10 +163,14 @@ func (r RunEntityReimportCommand) Execute(ctx context.Context) error {
 	}
 
 	if jsonOut {
-		shared.PrintJSON(map[string]any{"status": "ok", "file": r.FilePath, "rows_deleted": len(tracked)})
+		shared.PrintJSON(map[string]any{
+			"status": "ok", "file": r.FilePath, "rows": len(tracked),
+			"undeclared": undeclaredJSON(undeclared),
+		})
 		return nil
 	}
 
 	color.Green("\nEntity reimport complete: %s", r.FilePath)
+	reportUndeclared(undeclared)
 	return nil
 }
