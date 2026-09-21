@@ -169,7 +169,7 @@ func TestResolveRowChangesSkipsSeededColumns(t *testing.T) {
 
 	row := domain.EntityState{Table: "users", PKColumn: "id", PKValue: 1}
 
-	changes, err := ResolveRowChanges(context.Background(), db, e, row, map[string]int64{}, "now", true)
+	changes, err := ResolveRowChanges(context.Background(), db, e, row, map[string]int64{}, "now", true, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

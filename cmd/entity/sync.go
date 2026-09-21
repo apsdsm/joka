@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
@@ -35,6 +37,9 @@ type RunEntitySyncCommand struct {
 	// DryRun computes and prints the plan (inserts + before/after updates)
 	// without applying anything or acquiring the advisory lock.
 	DryRun bool
+	// Decayed declares the seeded data in the database stale and rewrites every
+	// declared column. See app.PlanSyncAction.Decayed.
+	Decayed bool
 	// OnConflict decides what happens when the database moved out from under
 	// the declaration. Defaults to refusing.
 	OnConflict app.ConflictPolicy
@@ -148,6 +153,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		State:    state,
 		Declared: all,
 		Dirty:    dirty,
+		Decayed:  r.Decayed,
 	}.Execute(ctx)
 	if err != nil {
 		return fail(err)
@@ -177,8 +183,11 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}
 
 	// Nothing to write, but tracked entities no file declares any more. Report
-	// and stop: there is no transaction to open.
-	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 {
+	// and stop: there is no transaction to open. An adoption is excluded: it
+	// writes no row when every column agrees, but the tracking it records is a
+	// write, and skipping it would claim the row again on every later run.
+	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 &&
+		len(plan.Adopted) == 0 {
 		if jsonOut {
 			shared.PrintJSON(map[string]any{
 				"status": "ok", "inserted": []string{}, "updated": []string{},
@@ -307,6 +316,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Dirty:    dirty,
 		Keep:     keep,
 		Recreate: plan.Recreate,
+		Adopted:  plan.Adopted,
 		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
@@ -326,7 +336,8 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		shared.PrintJSON(map[string]any{
 			"status": "ok", "on_conflict": string(r.OnConflict), "plan": planJSON(plan),
 			"inserted": orEmpty(result.Inserted), "updated": orEmpty(result.Updated),
-			"files": orEmpty(result.Files), "moved": result.Moved,
+			"adopted": orEmpty(result.Adopted),
+			"files":   orEmpty(result.Files), "moved": result.Moved,
 			"undeclared":      undeclaredJSON(result.Undeclared),
 			"forgotten_files": orEmpty(result.ForgottenFiles),
 			"rewritten_files": orEmpty(rewritten),
@@ -348,9 +359,13 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		color.Cyan("  Cleared tracking for %s (every entity it held moved elsewhere)", path)
 	}
 
+	for _, refID := range result.Adopted {
+		color.Yellow("  Claimed: %s (a row joka did not insert)", refID)
+	}
+
 	fmt.Println()
-	color.Green("Entity sync complete. %d inserted, %d updated across %d files.",
-		len(result.Inserted), len(result.Updated), len(result.Files))
+	color.Green("Entity sync complete. %d inserted, %d updated, %d claimed, across %d files.",
+		len(result.Inserted), len(result.Updated), len(result.Adopted), len(result.Files))
 
 	// Nothing is deleted on an undeclared entity's account: a seed file edited
 	// by mistake should not take data with it.
@@ -425,6 +440,8 @@ func printPlan(plan *app.SyncPlan) {
 		}
 	}
 
+	printAdoptions(plan.Adopted)
+
 	for _, f := range plan.Updates {
 		fmt.Println()
 		color.Set(color.Bold)
@@ -453,6 +470,16 @@ func printPlan(plan *app.SyncPlan) {
 					green.Printf("          + (lookup, resolved at apply time)\n")
 					continue
 				}
+				// A column being written whose value is not changing. Under
+				// --decayed every declared column is written whatever it
+				// holds, so most of them are this, and printing the same
+				// string twice under a - and a + reads as a difference that
+				// is not there.
+				if c.Before == c.After {
+					fmt.Printf("        %s: (rewritten, unchanged)\n", c.Column)
+					continue
+				}
+
 				fmt.Printf("        %s:\n", c.Column)
 				red.Printf("          - %s\n", c.Before)
 				green.Printf("          + %s\n", c.After)
@@ -610,4 +637,36 @@ func refreshHashes(
 	}
 
 	return materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion)
+}
+
+// printAdoptions names the rows joka found in the database and is about to
+// claim, and what it matched each one on.
+//
+// It is printed rather than counted because a claim is a consequential thing to
+// do quietly: the rows were put there by something other than joka, and the
+// update listed below this will write the declaration over them. Someone
+// reading "18 rows adopted" has to be able to check that `xid` is the column
+// they would have matched on themselves.
+func printAdoptions(adopted map[string]app.Adoption) {
+	if len(adopted) == 0 {
+		return
+	}
+
+	refIDs := make([]string, 0, len(adopted))
+	for refID := range adopted {
+		refIDs = append(refIDs, refID)
+	}
+	sort.Strings(refIDs)
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Already in the database, and not tracked by joka — these rows will be claimed:")
+	color.Unset()
+
+	for _, refID := range refIDs {
+		a := adopted[refID]
+		color.Yellow("  = %s  %s %s %d  (%s, matched on %s)",
+			refID, a.Row.Table, a.Row.PKColumn, a.Row.PKValue, a.File,
+			strings.Join(a.MatchedOn, ", "))
+	}
 }

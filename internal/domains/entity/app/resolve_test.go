@@ -20,6 +20,10 @@ type lookupMock struct {
 
 func (l *lookupMock) DeleteRow(context.Context, string, string, int64) error { panic("unused") }
 func (l *lookupMock) TableExists(context.Context, string) (bool, error)      { panic("unused") }
+func (l *lookupMock) UniqueKeys(context.Context, string) ([][]string, error) { panic("unused") }
+func (l *lookupMock) FindByUniqueKey(context.Context, string, string, map[string]any) (int64, error) {
+	panic("unused")
+}
 func (l *lookupMock) RowExists(context.Context, string, string, int64) (bool, error) {
 	panic("unused")
 }

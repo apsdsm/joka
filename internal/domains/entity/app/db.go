@@ -55,4 +55,19 @@ type DBAdapter interface {
 	// {{ lookup|table,return_col,where_col=value }} template expressions to
 	// resolve foreign keys against data seeded outside the entity file.
 	LookupValue(ctx context.Context, table, returnCol, whereCol string, whereVal any) (any, error)
+
+	// FindByUniqueKey returns the primary key of the row whose named columns
+	// hold these values, or ErrRowNotFound. The columns come from UniqueKeys,
+	// so at most one row can match.
+	FindByUniqueKey(ctx context.Context, table, pkColumn string, key map[string]any) (int64, error)
+
+	// UniqueKeys returns the table's unique indexes as column lists, each
+	// usable on its own to identify one row. Adoption uses them to find the row
+	// a declared entity already corresponds to in a database joka does not track
+	// yet.
+	//
+	// The primary key is included — it is a unique index, and an entity that
+	// declares it can be adopted by it. Partial and expression indexes are left
+	// out: neither identifies a row by the values an entity declares.
+	UniqueKeys(ctx context.Context, table string) ([][]string, error)
 }

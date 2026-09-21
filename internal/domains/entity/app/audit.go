@@ -93,3 +93,17 @@ func (a StateAudit) NeedsAttention() bool {
 	}
 	return true
 }
+
+// BlocksWrite reports whether a command that writes should refuse on this
+// verdict.
+//
+// Only a disagreeing identity blocks. A version disagreement is informational:
+// joka loads what it applies from the database, so a file that is ahead or
+// behind does not change what the run does, and refusing would strand anyone
+// whose last sync was interrupted after the commit. A disagreeing identity
+// means the file describes a database this is not, and that is worth stopping
+// for — adoption claims the rows it finds rather than colliding with them, so
+// the wrong database no longer announces itself with a duplicate key.
+func (a StateAudit) BlocksWrite() bool {
+	return a == AuditDifferentDatabase
+}

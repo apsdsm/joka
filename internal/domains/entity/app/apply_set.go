@@ -66,6 +66,11 @@ type ApplySetAction struct {
 	// column is written. Never reached under --on-conflict=fail, which refuses
 	// before a transaction is opened.
 	Keep map[string]map[string]string
+	// Adopted names the _ids the plan found already in the database without
+	// joka tracking them, and the row each was found at. They are written as
+	// updates against that row and the tracking is recorded, so the next run
+	// sees an ordinary tracked entity.
+	Adopted map[string]Adoption
 	// Recreate names the _ids the plan found tracked but no longer in the
 	// database. They are inserted again and the tracking is re-pointed at the
 	// new row, rather than updated against a row that is not there.
@@ -88,6 +93,8 @@ type ApplyResult struct {
 	// Inserted and Updated are the _ids written.
 	Inserted []string `json:"inserted"`
 	Updated  []string `json:"updated"`
+	// Adopted are the _ids claimed from rows joka did not insert.
+	Adopted []string `json:"adopted"`
 	// Moved are entities whose tracking now points at a different file.
 	Moved []EntityMove `json:"moved"`
 	// Files are the paths written.
@@ -144,6 +151,25 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			// re-pointing it at a new row is the same entity continuing.
 			if isTracked && a.Recreate[e.RefID] {
 				isTracked = false
+			}
+
+			// An entity the plan found already in the database is treated as
+			// tracked from here on, against the row that was found. Its
+			// baseline is nil, so every declared column reads as push and the
+			// declaration is written over the row joka is claiming.
+			if !isTracked {
+				if adopted, found := a.Adopted[e.RefID]; found {
+					row, isTracked = adopted.Row, true
+					result.Adopted = append(result.Adopted, e.RefID)
+
+					// Recorded here rather than left to retrack below, which
+					// early-returns when the file and position already match —
+					// and they do, because adopt built the row from this
+					// entity's own file and position. An adoption whose columns
+					// all agree writes nothing else, so this would be the run
+					// that claimed a row and recorded nothing about it.
+					state.Track(e.RefID, row)
+				}
 			}
 
 			if !isTracked {

@@ -537,8 +537,8 @@ now, which is how they could write a set sync would refuse and, since the state 
 `_key` was added and removed in the same session. It named a column that identifies a row in the
 database independently of its primary key, for adopting a row joka did not insert. It was never
 wired to anything, and shipping an inert reserved key invites someone to write it and expect a
-behaviour that is not there. If adoption is wanted later, build it on the unique constraints already
-in the schema — 17 of the 18 tables jjc2 seeds declare `UNIQUE (xid)` — rather than on a new key.
+behaviour that is not there. Adoption was built later on the unique constraints already in the
+schema instead — see **Adoption** under Convergence — so `_key` is not coming back.
 
 `_pk` is a candidate for the same treatment: it is used 0 times across jjc2's 294 entities, every
 seeded table has `PRIMARY KEY (id)`, and joka could read the column from `pg_index` instead of being
@@ -549,9 +549,10 @@ told. Not done.
 1. ~~Validation: `_id` mandatory and unique.~~ Done.
 2. ~~Re-key `joka_entity_rows` on `ref_id`.~~ Done — see **Tracking upgrades** below.
 3. ~~Identity matching in sync.~~ Done — see **Identity matching** below.
-4. `entity diff --undeclared` and `entity forget --undeclared`, to act in bulk on the entities sync
+4. ~~Adopting a row joka did not insert.~~ Done — see **Adoption** under Convergence.
+5. `entity diff --undeclared` and `entity forget --undeclared`, to act in bulk on the entities sync
    already reports as declared nowhere.
-5. Infer the primary key column and retire `_pk`.
+6. Infer the primary key column and retire `_pk`.
 
 ## Tracking upgrades
 
@@ -792,6 +793,62 @@ all, and it is the finding `--force` was added for and never fixed.
   what the database already holds — still gets its hash recorded (`refreshHashes`), or it reads as
   modified forever.
 - **`--force` is gone.** It existed because the hash was the gate.
+
+### Adoption: claiming a row joka did not insert
+
+An entity with no tracked row may still be in the database — someone seeded it before joka, or
+before joka tracked rows by `_id`. `app.adopt` looks for it and claims it instead of inserting a
+second copy on top.
+
+Without this, the first sync any existing joka user ran under the `_id` model died on whatever
+unique constraint the existing row occupied. tic_main's died on `api_keys_xid_key`, and there was no
+way forward short of dropping the data.
+
+- **The row is found by a unique index, read from `pg_index`.** Not by a new reserved key: 17 of the
+  18 tables jjc2 seeds already declare `UNIQUE (xid)`, so the schema has already said what identifies
+  a row and `_key` would have been a second, weaker copy of that. `UniqueKeys` returns them narrowest
+  first, because a single-column natural key is a better statement of "the same row" than a wide
+  composite that happens to match. Partial and expression indexes are excluded — neither identifies
+  a row by the values an entity declares.
+- **Only literal declared values match.** A template resolves to something joka cannot predict
+  (`{{ now }}`) or to a primary key that may not exist yet (`{{ ref.id }}`), so a key containing one
+  cannot identify an existing row and that index is skipped. Matching on the declared values in
+  general would be worse: the case adoption exists for is the row that is there and *differs*, so a
+  match on everything would miss exactly the rows it is meant to find.
+- **No unique index means an insert**, as before. On a fresh database that is correct, and on a table
+  with no unique constraint joka cannot do better than it ever could.
+- **An adopted row gets a nil baseline, which reads as push**, so the declaration is written over
+  whatever it holds and the plan lists every column it changes. The seed files are the desired state;
+  a row joka is being told to own ends up saying what they say. Nothing new implements that — it
+  falls out of the three-way comparison.
+- **An adoption counts as a change even when every column agrees.** Nothing is written to the row,
+  but joka takes ownership of it, and `HasChanges` and the no-transaction early return both have to
+  say so or the next run adopts it again.
+- **The adopted primary key goes into the plan's `refMap`.** Every parent-child seed on a database
+  being claimed for the first time needs it; without it the plan dies with "not found in reference
+  map".
+- **The claim is printed, not counted.** The rows were put there by something other than joka and are
+  about to be written over, so the plan names each one and the column it matched on.
+
+Adoption is what makes the `state_identity` marker load-bearing rather than informational.
+Before it, a sync against the wrong database announced itself with a duplicate key; now it would
+claim the rows it found. `refuseWrongDatabase` in `main.go` runs on the same annotation as the
+upgrade gate and refuses every writing command when the state file's identity disagrees with
+`joka_meta` (`StateAudit.BlocksWrite`, `domain.ErrWrongDatabase`). Only the identity refuses — a
+version disagreement does not change what a run does, because joka loads what it applies from the
+database. `drop` and `reset` skip it, the same way they skip the upgrade.
+
+### `--decayed`
+
+Treats the seeded data in the database as stale: every declared column of every declared entity is
+written, whatever is there, and nothing is reported as a conflict. For the database whose seeds
+rotted — hand-edited over a year, or restored from something older than the files — where the answer
+is not to resolve the differences one at a time but to declare the files authoritative.
+
+`--on-conflict` has no bearing on it, because under decay there is nothing to have an opinion about.
+`_once` is still honoured: it names a column the application owns after seeding, and a stale-seed
+sweep is not a reason to reset every password. A column being written whose value is not changing
+prints as `(rewritten, unchanged)` rather than as a diff of a string against itself.
 
 ### `--on-conflict`
 

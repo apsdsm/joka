@@ -384,7 +384,7 @@ func (a DiffEntityAction) compareValues(ctx context.Context, line *DiffLine, ent
 		row = domain.EntityState{Table: entity.Table, PKColumn: line.PKColumn, PKValue: line.PKValue}
 	}
 
-	changes, err := ResolveRowChanges(ctx, a.DB, entity, row, refMap, now, true)
+	changes, err := ResolveRowChanges(ctx, a.DB, entity, row, refMap, now, true, false)
 	if err != nil {
 		// A value comparison that fails is worth reporting against the line
 		// rather than failing the whole diff — the structural picture is the

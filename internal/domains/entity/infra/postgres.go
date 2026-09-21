@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/lib/pq"
@@ -314,4 +315,84 @@ func (p *PostgresDBAdapter) RowExists(ctx context.Context, table, pkColumn strin
 		return false, fmt.Errorf("checking for %s.%s = %d: %w", table, pkColumn, pkValue, err)
 	}
 	return true, nil
+}
+
+// UniqueKeys returns the table's unique indexes as column lists, ordered so the
+// narrowest comes first.
+//
+// Narrowest first because adoption takes the first key the entity fully
+// declares, and a single-column natural key (jjc2 and tic_main both use
+// `UNIQUE (xid)`) is a better statement of "this is the same row" than a wide
+// composite that happens to match.
+//
+// Partial indexes (indpred) and expression indexes (indexprs) are excluded:
+// neither identifies a row by the values an entity declares, so matching on one
+// would be matching on something other than what it says.
+func (p *PostgresDBAdapter) UniqueKeys(ctx context.Context, table string) ([][]string, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT array_agg(a.attname ORDER BY k.ord)
+		FROM pg_index i
+		JOIN pg_class t ON t.oid = i.indrelid
+		JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+		WHERE t.relname = $1
+		  AND t.relnamespace = current_schema()::regnamespace
+		  AND i.indisunique
+		  AND i.indpred IS NULL
+		  AND i.indexprs IS NULL
+		GROUP BY i.indexrelid
+		ORDER BY count(*), min(a.attname)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("reading unique keys of %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	var keys [][]string
+
+	for rows.Next() {
+		var columns pq.StringArray
+		if err := rows.Scan(&columns); err != nil {
+			return nil, fmt.Errorf("scanning unique keys of %s: %w", table, err)
+		}
+		keys = append(keys, []string(columns))
+	}
+
+	return keys, rows.Err()
+}
+
+// FindByUniqueKey returns the primary key of the row whose named columns hold
+// these values, or ErrRowNotFound.
+func (p *PostgresDBAdapter) FindByUniqueKey(
+	ctx context.Context,
+	table, pkColumn string,
+	key map[string]any,
+) (int64, error) {
+	names := make([]string, 0, len(key))
+	for name := range key {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	where := make([]string, 0, len(names))
+	args := make([]any, 0, len(names))
+
+	for i, name := range names {
+		where = append(where, fmt.Sprintf(`"%s" = $%d`, name, i+1))
+		args = append(args, key[name])
+	}
+
+	query := fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE %s LIMIT 1`,
+		pkColumn, table, strings.Join(where, " AND "))
+
+	var pk int64
+
+	err := p.db.QueryRowContext(ctx, query, args...).Scan(&pk)
+	if err == sql.ErrNoRows {
+		return 0, domain.ErrRowNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("finding %s by its unique key: %w", table, err)
+	}
+
+	return pk, nil
 }

@@ -16,6 +16,8 @@ import (
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/connection"
 	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
+	"github.com/apsdsm/joka/internal/domains/entity/domain"
+	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/apsdsm/joka/internal/meta"
 	"github.com/apsdsm/joka/internal/secrets"
@@ -132,6 +134,10 @@ func main() {
 			// read-only command must leave a bare database bare — that is what
 			// makes a missing tracking table reportable.
 			if c.Annotations[annotationMutates] == "true" && c.Annotations[annotationWipes] != "true" {
+				if err := refuseWrongDatabase(c, stateFile, profile, dbConn); err != nil {
+					return err
+				}
+
 				applied, err := upgrade.Run(c.Context(), dbConn, version)
 				if err != nil {
 					return err
@@ -376,9 +382,13 @@ func main() {
 		Long: `Sync entity YAML files to the database.
 
 The seed files are the desired state. Every declared entity is compared against
-the database, whether or not its file changed: an entity with no tracked row is
-inserted, and a tracked one has each declared column compared three ways —
-against the file, against the database, and against what joka last wrote there.
+the database, whether or not its file changed. A tracked entity has each declared
+column compared three ways — against the file, against the database, and against
+what joka last wrote there.
+
+An entity joka does not track is looked for by a unique key its declaration
+fills in. Found, the row is claimed and the declaration written over it, which is
+reported before it happens. Not found, it is inserted.
 
 A column only the file moved is written. A column the database moved is a
 conflict: applying the file would discard a change joka did not make.
@@ -394,10 +404,15 @@ schema. A column listed under an entity's _once: is not compared at all — joka
 seeds it on insert and the database owns it after, which is how a password
 survives a re-sync.
 
+Use --decayed when the database's copy of the seeded data has rotted and the
+files are the only version worth keeping: every declared column is rewritten and
+nothing is reported as a conflict. _once is still honoured.
+
 Use --dry-run to print the plan without applying anything.`,
 		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
+			decayed, _ := c.Flags().GetBool("decayed")
 
 			onConflict, _ := c.Flags().GetString("on-conflict")
 			policy, err := entityapp.ParseConflictPolicy(onConflict)
@@ -412,6 +427,7 @@ Use --dry-run to print the plan without applying anything.`,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
+				Decayed:      decayed,
 				OnConflict:   policy,
 				Profile:      profile,
 				StateFile:    stateFile,
@@ -422,6 +438,8 @@ Use --dry-run to print the plan without applying anything.`,
 	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
 	entitySyncCmd.Flags().String("on-conflict", "fail",
 		"What to do when the database changed since joka last wrote: fail, file, db or ask")
+	entitySyncCmd.Flags().Bool("decayed", false,
+		"Treat the seeded data in the database as stale: rewrite every declared column, and report no conflicts")
 
 	entityStatusCmd := &cobra.Command{
 		Use:   "status",
@@ -620,4 +638,51 @@ func loadEnv(envFile string) error {
 	}
 	godotenv.Load(envFile)
 	return nil
+}
+
+// refuseWrongDatabase stops a command that writes when the state file beside
+// the working directory describes a database this is not.
+//
+// The check is here rather than in entity sync because every writing command
+// has the same exposure: `migrate up` against a database nobody meant to touch
+// is as bad as a sync against one. It runs on the same annotation as the
+// upgrade gate, so `drop` and `reset` skip it — they destroy the tracking, and
+// being unable to reset a database because its state file is stale is the wrong
+// way round.
+//
+// Only a disagreeing identity refuses. See StateAudit.BlocksWrite.
+func refuseWrongDatabase(c *cobra.Command, stateFile, profile string, db *sql.DB) error {
+	path := entityinfra.StateFilePath(stateFile, profile)
+
+	doc, hasFile, err := entityinfra.ReadStateFile(path)
+	if err != nil {
+		return err
+	}
+
+	metaState, err := meta.Read(c.Context(), db)
+	if err != nil {
+		return err
+	}
+
+	audit := entityapp.AuditState(hasFile, doc.Identity, doc.Version,
+		metaState.StateIdentity, metaState.StateVersion)
+	if !audit.BlocksWrite() {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s names %s, and this database is %s. Nothing was written.\n"+
+		"  If the connection is right, the state file is stale: remove it, or point --statefile "+
+		"somewhere else. 'joka status' shows both.",
+		domain.ErrWrongDatabase, path,
+		identityOrNone(doc.Identity), identityOrNone(metaState.StateIdentity))
+}
+
+// identityOrNone renders a state identity for the refusal above. An empty one
+// is a database joka has never written state to, which reads better as a phrase
+// than as an empty pair of quotes.
+func identityOrNone(identity string) string {
+	if identity == "" {
+		return "a database joka has never written state to"
+	}
+	return identity
 }

@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
@@ -17,6 +19,11 @@ type mockDBAdapter struct {
 	updatedRows   []mockUpdateCall
 	currentRows   map[string]map[string]any // key: "table|pkValue" -> column values
 	missingTables map[string]bool           // tables the mock reports as dropped
+
+	// uniqueKeys are the unique indexes per table, narrowest first, as
+	// UniqueKeys returns them. Empty means a table adoption cannot search, which
+	// is the default so existing fixtures keep inserting.
+	uniqueKeys map[string][][]string
 
 	// state is the tracking, and the only record of it: the adapter carries no
 	// tracking methods any more. A fixture sets it up with track, a test reads
@@ -464,4 +471,56 @@ func TestInsertGraphAction(t *testing.T) {
 			t.Fatal("expected error, got nil")
 		}
 	})
+}
+
+// UniqueKeys returns the unique indexes the fixture declared for the table.
+func (m *mockDBAdapter) UniqueKeys(_ context.Context, table string) ([][]string, error) {
+	return m.uniqueKeys[table], nil
+}
+
+// FindByUniqueKey scans currentRows for the one whose named columns all match.
+//
+// It compares through HashValue rather than ==, because the mock's rows hold
+// whatever a test wrote into them and a declared 1 is an int against a stored
+// int64 often enough to matter.
+func (m *mockDBAdapter) FindByUniqueKey(
+	_ context.Context,
+	table, _ string,
+	key map[string]any,
+) (int64, error) {
+	for rowKey, row := range m.currentRows {
+		name, pk, ok := splitRowKey(rowKey)
+		if !ok || name != table {
+			continue
+		}
+
+		matches := true
+		for column, want := range key {
+			if HashValue(row[column]) != HashValue(want) {
+				matches = false
+				break
+			}
+		}
+
+		if matches {
+			return pk, nil
+		}
+	}
+
+	return 0, domain.ErrRowNotFound
+}
+
+// splitRowKey takes a currentRows key back apart into its table and primary key.
+func splitRowKey(rowKey string) (string, int64, bool) {
+	sep := strings.LastIndex(rowKey, "|")
+	if sep < 0 {
+		return "", 0, false
+	}
+
+	pk, err := strconv.ParseInt(rowKey[sep+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+
+	return rowKey[:sep], pk, true
 }

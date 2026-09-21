@@ -65,4 +65,14 @@ var (
 	// it is reachable on a database whose upgrade to version 2 is still blocked
 	// on exactly this, which is where it gets resolved.
 	ErrStateAmbiguous = errors.New("tracking cannot be read: an _id is claimed by more than one row")
+
+	// ErrWrongDatabase means the state file beside the working directory
+	// describes a database this is not, so a command that writes refuses.
+	//
+	// It is a refusal rather than a warning because of adoption: an untracked
+	// entity is looked up by its unique key and claimed, so a run against the
+	// wrong database no longer fails loudly on a duplicate key. It takes over
+	// the rows it finds and writes the declaration over them. The identity
+	// marker is what stands between that and a database nobody meant to touch.
+	ErrWrongDatabase = errors.New("the state file describes a different database")
 )

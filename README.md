@@ -731,6 +731,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`) |
 | `--statefile` | | | Path to the state file (default: `joka[.<profile>].state.json` beside the working directory) |
 | `--on-conflict` | | `fail` | What to do when the database changed since joka last wrote: `fail`, `file`, `db` or `ask` (`entity sync`). `db` and `ask` rewrite the seed files where the database wins |
+| `--decayed` | | `false` | Treat the seeded data in the database as stale: rewrite every declared column and report no conflicts (`entity sync`) |
 
 ## How It Works
 

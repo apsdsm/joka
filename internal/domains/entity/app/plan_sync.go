@@ -27,6 +27,11 @@ type SyncPlan struct {
 	// and re-points the tracking, which is the whole job of a tool that makes
 	// the database match the declaration.
 	Recreate map[string]bool
+	// Adopted are declared entities joka does not track that were found in the
+	// database anyway, keyed by _id. They are planned as updates against the row
+	// that was found, with no baseline, so the declaration is written over it.
+	// The apply records the tracking.
+	Adopted map[string]Adoption
 	// Undeclared are tracked rows no file declares any more. Nothing would be
 	// deleted on their account; they are here so a dry run reports them.
 	Undeclared []domain.TrackedRow
@@ -119,9 +124,13 @@ type ColumnChange struct {
 func (c ColumnChange) IsConflict() bool { return c.Verdict == VerdictConflict }
 
 // HasChanges reports whether the plan has anything to do or say.
+//
+// An adoption counts even when every column of the adopted row already agrees.
+// Nothing is written to the row, but joka takes ownership of it, and that has to
+// be recorded or the next run adopts it all over again.
 func (p *SyncPlan) HasChanges() bool {
 	return len(p.Inserts) > 0 || len(p.Updates) > 0 ||
-		len(p.Conflicts) > 0 || len(p.Undeclared) > 0
+		len(p.Conflicts) > 0 || len(p.Undeclared) > 0 || len(p.Adopted) > 0
 }
 
 // ConflictedColumns counts the columns across every conflicted row.
@@ -208,6 +217,19 @@ type PlanSyncAction struct {
 	// non-deterministic template, whose value joka cannot predict and so
 	// cannot tell drift from regeneration.
 	Dirty map[string]bool
+	// Decayed treats what the database holds as not worth comparing against:
+	// every declared column of every declared entity is written, whatever is
+	// there, and nothing is reported as a conflict.
+	//
+	// It is for the database whose seeded data has rotted — edited by hand over
+	// a year, or restored from something older than the seeds — where the answer
+	// is not to resolve the differences one at a time but to declare the files
+	// authoritative and put them back. --on-conflict has no bearing on it,
+	// because under decay there is nothing to have an opinion about.
+	//
+	// _once is still honoured. It names a column the application owns after
+	// seeding, and a stale-seed sweep is not a reason to reset every password.
+	Decayed bool
 }
 
 // Execute builds the plan.
@@ -231,8 +253,36 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 		fp := FileInsertPlan{Path: file.Path}
 		fup := FileUpdatePlan{Path: file.Path}
 
-		for _, e := range entities {
+		for i, e := range entities {
 			row, isTracked := a.State.Row(e.RefID)
+
+			// An entity joka does not track may still already be in the
+			// database — someone seeded it before joka, or before joka tracked
+			// rows by _id. Claim that row rather than inserting a second copy
+			// on top of it, which is what the unique constraint used to stop
+			// with a duplicate key error and no way forward.
+			if !isTracked {
+				adoption, adopted, err := adopt(ctx, a.DB, e, file.Path, i)
+				if err != nil {
+					return nil, fmt.Errorf("%s: looking for an existing %s (_id %s): %w",
+						file.Path, e.Table, e.RefID, err)
+				}
+				if adopted {
+					if plan.Adopted == nil {
+						plan.Adopted = make(map[string]Adoption)
+					}
+					plan.Adopted[e.RefID] = adoption
+
+					// An adopted row has a primary key, so a {{ ref.id }}
+					// pointing at it resolves. Without this a child of an
+					// adopted parent fails the plan with "not found in
+					// reference map" — which is every parent-child seed on a
+					// database joka is claiming for the first time.
+					refMap[e.RefID] = adoption.Row.PKValue
+
+					row, isTracked = adoption.Row, true
+				}
+			}
 
 			if !isTracked {
 				rip, err := a.planInsert(ctx, e, now)
@@ -259,7 +309,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 				continue
 			}
 
-			changes, err := ResolveRowChanges(ctx, a.DB, e, row, refMap, now, a.Dirty[file.Path])
+			changes, err := ResolveRowChanges(ctx, a.DB, e, row, refMap, now, a.Dirty[file.Path], a.Decayed)
 
 			// The row joka tracks is gone. That is not a failure to read it —
 			// it is the state of the database, and the answer is to put the
@@ -419,6 +469,9 @@ func ResolveRowChanges(
 	refMap map[string]int64,
 	now string,
 	fileChanged bool,
+	// decayed treats every declared column as needing to be written, whatever
+	// the database holds. See PlanSyncAction.Decayed.
+	decayed bool,
 ) ([]ColumnChange, error) {
 	cols := sortedKeys(e.Columns)
 
@@ -442,6 +495,15 @@ func ResolveRowChanges(
 		}
 
 		if isNonDeterministicTemplate(raw) {
+			// Under decay the comparison is skipped rather than run: the point
+			// of the sweep is that what the database holds is not to be trusted,
+			// and a regenerated column has no value to show either way.
+			if decayed {
+				changes = append(changes, ColumnChange{
+					Column: k, Regenerated: true, Verdict: VerdictPush,
+				})
+				continue
+			}
 			changes = appendRegenerated(changes, k, current[k], row, fileChanged)
 			continue
 		}
@@ -459,6 +521,15 @@ func ResolveRowChanges(
 
 		baseline, hasBaseline := row.Baseline(k)
 		verdict := ClassifyColumn(after, current[k], baseline, hasBaseline)
+
+		// Decay is the operator saying the database's copy of this data has
+		// rotted and the files are the only version worth having. Every column
+		// is written, and a column the database moved is not a conflict to
+		// resolve — being wrong is the premise of the sweep.
+		if decayed {
+			verdict = VerdictPush
+		}
+
 		if verdict == VerdictUnchanged {
 			continue
 		}
