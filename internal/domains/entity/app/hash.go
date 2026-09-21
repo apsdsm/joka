@@ -18,10 +18,19 @@ import (
 // value back: a three-way merge asks whether a column changed, and both sides
 // it would show are read live.
 //
-// The value is rendered with normalizeValue, the same rendering the plan
-// compares with, so a hash and a diff cannot disagree about what a value is.
+// The value is rendered with normalizeValue and then canonicalised the way
+// valuesEqual canonicalises, so a hash and a diff cannot disagree about what a
+// value is. That matters most for jsonb: PostgreSQL renders it in its own key
+// order with a space after each colon, so the declaration and the live row are
+// textually different for a value nobody has touched. Hashing the raw text
+// would make every JSON column look like drift on every run.
 func HashValue(v any) string {
-	sum := sha256.Sum256([]byte(normalizeValue(v)))
+	s := normalizeValue(v)
+	if canonical, ok := canonicalJSON(s); ok {
+		s = canonical
+	}
+
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
 
