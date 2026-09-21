@@ -28,7 +28,15 @@ import (
 type Report struct {
 	Profile string `json:"profile,omitempty"`
 	// Meta is what the database records about the joka that last wrote it.
-	Meta       meta.State `json:"meta"`
+	Meta meta.State `json:"meta"`
+	// StateAudit compares the state file beside the working directory against
+	// the database's own markers. It is the one check the tracking cannot make
+	// about itself: state inside a database is always self-consistent, so it
+	// can never say this is the wrong database, or the right one restored from
+	// an older dump.
+	StateAudit     string `json:"state_audit"`
+	StateAuditNote string `json:"state_audit_note"`
+	StateFile      string `json:"state_file"`
 	Driver     string     `json:"driver"`
 	Migrations Migrations `json:"migrations"`
 	Entities   Entities   `json:"entities"`

@@ -52,6 +52,13 @@ func RenderText(w io.Writer, r Report) {
 	bold.Fprintf(w, "joka status")
 	fmt.Fprintf(w, "   %s\n", strings.Join(nonEmpty(r.Driver, profileLabel(r.Profile), writtenByLabel(r.Meta)), " · "))
 	dim.Fprintln(w, "declared = the devops folder · tracked = joka_* tables · live = the database")
+
+	// Only when there is something to say. The state file agreeing with the
+	// database is the normal case and does not need a line.
+	if entityapp.StateAudit(r.StateAudit).NeedsAttention() {
+		color.New(color.FgYellow).Fprintf(w, "   %s (%s)\n", r.StateAuditNote, r.StateFile)
+	}
+
 	fmt.Fprintln(w)
 
 	renderMigrations(w, r.Migrations)

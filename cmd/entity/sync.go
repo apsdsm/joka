@@ -23,6 +23,9 @@ type RunEntitySyncCommand struct {
 	EntitiesDir  string
 	AutoConfirm  bool
 	OutputFormat string
+	// Profile and JokaVersion name the state file and stamp it.
+	Profile     string
+	JokaVersion string
 	// SkipLock skips advisory lock acquisition. Used when an outer command
 	// (e.g. `joka reset`) already holds the lock.
 	SkipLock bool
@@ -230,6 +233,10 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	if err := tx.Commit(); err != nil {
 		return fail(fmt.Errorf("committing transaction: %w", err))
+	}
+
+	if err := materializeState(ctx, r.DB, r.Profile, r.JokaVersion); err != nil {
+		color.Yellow("The sync committed, but the state file was not written: %v", err)
 	}
 
 	if jsonOut {

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	entitydomain "github.com/apsdsm/joka/internal/domains/entity/domain"
+	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 	lockdomain "github.com/apsdsm/joka/internal/domains/lock/domain"
 	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/apsdsm/joka/internal/meta"
@@ -73,6 +75,18 @@ func Build(ctx context.Context, in Inputs) (Report, error) {
 		Driver:  in.Driver,
 		Meta:    metaState,
 	}
+
+	statePath := entityinfra.StateFilePath(in.Profile)
+	doc, hasFile, err := entityinfra.ReadStateFile(statePath)
+	if err != nil {
+		return report, err
+	}
+	audit := entityapp.AuditState(hasFile, doc.Identity, doc.Version,
+		metaState.StateIdentity, metaState.StateVersion)
+
+	report.StateFile = statePath
+	report.StateAudit = string(audit)
+	report.StateAuditNote = audit.Describe()
 
 	migrations, err := buildMigrations(ctx, in)
 	if err != nil {

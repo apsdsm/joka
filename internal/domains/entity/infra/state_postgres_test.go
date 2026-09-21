@@ -26,12 +26,12 @@ func bareDB(t *testing.T) *sql.DB {
 		t.Fatalf("getting test db: %v", err)
 	}
 
-	for _, table := range []string{"joka_state", "joka_entity_rows", "joka_entities"} {
+	for _, table := range []string{"joka_state", "joka_meta", "joka_entity_rows", "joka_entities"} {
 		testlib.DropTablePostgres(t, db, table)
 	}
 
 	t.Cleanup(func() {
-		for _, table := range []string{"joka_state", "joka_entity_rows", "joka_entities"} {
+		for _, table := range []string{"joka_state", "joka_meta", "joka_entity_rows", "joka_entities"} {
 			testlib.DropTablePostgres(t, db, table)
 		}
 	})

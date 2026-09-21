@@ -651,6 +651,47 @@ command has reached.
 Only the database backend can write the document in the same transaction as the rows it describes,
 which is why it is the default and the only one implemented.
 
+### The state file
+
+After a write commits, the document is materialized to `joka.state.json` in the directory joka was
+run from — `joka.<profile>.state.json` when `--profile` is set. That is the terraform arrangement:
+state beside the configuration it applies.
+
+**The profile is in the name because one directory syncs several databases.** Without it,
+`--profile dev1` would overwrite the state describing `local`, and the next local sync would find its
+entities untracked and insert a second copy of every one of them.
+
+**It is not there for durability.** The database backend is transactional and a file is not. It is
+there because state that lives inside the database it describes is always self-consistent, so it can
+never report that this is the wrong database, or the right one restored from an older dump. Two
+markers in `joka_meta` make that comparison possible:
+
+| Key | |
+|---|---|
+| `state_identity` | a UUID naming this database, stamped once with `ON CONFLICT DO NOTHING` and never rewritten — it travels with a dump, which is the point |
+| `state_version` | incremented in the same transaction as the write, because a count that could commit without the write it counts is worse than no count |
+
+`app.AuditState` reads the pair against the file's and returns one of six verdicts; `joka status`
+prints the note when it is not `agrees` or `untracked`.
+
+| | |
+|---|---|
+| `agrees` | normal |
+| `untracked` | nothing has written state here |
+| `no_file` | the database has been synced, but not from this directory |
+| `database_behind` | restored from a dump, or rolled back — the tracking cannot see this, because it rolled back too |
+| `file_behind` | a sync ran elsewhere, or did not finish writing |
+| `different_database` | `DATABASE_URL` points somewhere unintended |
+
+**Writing is after the commit and cannot fail the command.** A file cannot join a transaction. The
+database is already consistent; an unwritten file is a finding `joka status` reports, not a reason to
+claim a sync that happened did not. The write goes to a temporary file beside the target and is
+renamed, so a reader never sees half a document.
+
+The database copy is still authoritative — the file is a materialized audit copy.
+`proposal_entity_convergence_20260918.md` D5 has it becoming a journal that is expunged once the file
+is written, which is not done.
+
 ### Who loads and who saves
 
 - **Read-only commands** (`joka status`, `entity status`, `entity diff`) load once on the raw

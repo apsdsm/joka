@@ -30,6 +30,10 @@ type RunResetCommand struct {
 	IgnoreForeignKeys bool
 	AutoConfirm       bool
 	OutputFormat      string
+	// Profile and JokaVersion are passed through to entity sync, which writes
+	// the state file.
+	Profile     string
+	JokaVersion string
 }
 
 func (r RunResetCommand) Execute(ctx context.Context) error {
@@ -140,6 +144,12 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		AutoConfirm:  true,
 		OutputFormat: "text",
 		SkipLock:     true,
+		Profile:      r.Profile,
+		JokaVersion:  r.JokaVersion,
+		// A reset has just dropped and re-seeded everything, so every declared
+		// entity is new and there is nothing for the database to have moved
+		// out from under.
+		OnConflict: entityapp.ConflictFile,
 	}).Execute(ctx); err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(fmt.Errorf("entity sync: %w", err))

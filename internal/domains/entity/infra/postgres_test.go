@@ -33,7 +33,7 @@ func createPostgresEntityTrackingTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
 
-	for _, table := range []string{"joka_state", "joka_entity_rows", "joka_entities"} {
+	for _, table := range []string{"joka_state", "joka_meta", "joka_entity_rows", "joka_entities"} {
 		testlib.DropTablePostgres(t, db, table)
 	}
 

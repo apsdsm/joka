@@ -369,6 +369,8 @@ Use --dry-run to print the plan without applying anything.`,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
 				OnConflict:   policy,
+				Profile:      profile,
+				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
 	}
@@ -438,6 +440,8 @@ Use --dry-run to print the plan without applying anything.`,
 				Force:        forgetForce,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
+				Profile:      profile,
+				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
 	}
@@ -458,6 +462,8 @@ Use --dry-run to print the plan without applying anything.`,
 				FilePath:     args[0],
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
+				Profile:      profile,
+				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
 	}
@@ -475,6 +481,8 @@ Use --dry-run to print the plan without applying anything.`,
 				FilePath:     args[0],
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
+				Profile:      profile,
+				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
 	}
@@ -515,6 +523,8 @@ Use --dry-run to print the plan without applying anything.`,
 				IgnoreForeignKeys: cfg.IgnoreForeignKeys,
 				AutoConfirm:       autoConfirm,
 				OutputFormat:      outputFormat,
+				Profile:           profile,
+				JokaVersion:       version,
 			}.Execute(c.Context())
 		},
 	}

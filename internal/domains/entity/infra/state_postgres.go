@@ -8,6 +8,7 @@ import (
 
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
+	"github.com/apsdsm/joka/internal/meta"
 )
 
 // StateKey is the joka_state row the entity document lives under.
@@ -43,8 +44,15 @@ func NewPostgresTxStateBackend(tx *sql.Tx, conn *sql.DB) *PostgresStateBackend {
 	return &PostgresStateBackend{db: tx, conn: conn}
 }
 
-// EnsureStateTable creates joka_state if it is not already there.
+// EnsureStateTable creates the tables a save writes: joka_state for the
+// document, and joka_meta for the counter that goes with it.
 func (b *PostgresStateBackend) EnsureStateTable(ctx context.Context) error {
+	// Save counts the write in joka_meta, in the same transaction, so the table
+	// has to be there before a command starts writing.
+	if err := meta.EnsureTable(ctx, b.conn); err != nil {
+		return err
+	}
+
 	exists, err := jokadb.TableExists(ctx, b.conn, "joka_state")
 	if err != nil {
 		return err
@@ -90,12 +98,18 @@ func (b *PostgresStateBackend) Load(ctx context.Context) (*domain.State, error) 
 	return b.loadLegacy(ctx)
 }
 
-// Save writes the document back, replacing whatever was there.
+// Save writes the document back, replacing whatever was there, and counts the
+// write in joka_meta.
 //
-// One statement, so a save is atomic on its own and inside the caller's
-// transaction it commits with the rows it describes. The decomposed layout it
-// replaced needed a diff against the recorded state to avoid rewriting rows
-// nothing had touched; a document has nothing to diff.
+// One statement for the document, so a save is atomic on its own and inside the
+// caller's transaction it commits with the rows it describes. The decomposed
+// layout it replaced needed a diff against the recorded state to avoid
+// rewriting rows nothing had touched; a document has nothing to diff.
+//
+// The version counter moves in the same transaction, because a count that could
+// commit without the write it counts would be worse than no counter at all. The
+// database's identity is assigned here too if it does not have one — it is what
+// a state file on disk is checked against.
 func (b *PostgresStateBackend) Save(ctx context.Context, state *domain.State) error {
 	if state.Version == 0 {
 		state.Version = domain.StateVersion
@@ -114,6 +128,15 @@ func (b *PostgresStateBackend) Save(ctx context.Context, state *domain.State) er
 	if err != nil {
 		return fmt.Errorf("saving the state document: %w", err)
 	}
+
+	proposed, err := NewIdentity()
+	if err != nil {
+		return err
+	}
+	if _, err := meta.StampStateWrite(ctx, b.db, proposed); err != nil {
+		return err
+	}
+
 	return nil
 }
 

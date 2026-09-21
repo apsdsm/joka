@@ -62,6 +62,25 @@ const (
 	// nothing branches on it, but "which joka last touched this database" is
 	// the first question worth asking when something looks wrong.
 	KeyJokaVersion = "joka_version"
+
+	// KeyStateIdentity is a UUID naming this database, stamped once and never
+	// rewritten. It is what a state file on disk is checked against: the file
+	// carries the identity of the database it describes, so pointing it at
+	// another one is detectable rather than silently wrong.
+	//
+	// It travels with a dump, which is the point — a restored database is the
+	// same database, at an earlier version.
+	KeyStateIdentity = "state_identity"
+
+	// KeyStateVersion counts the times joka has written the entity state,
+	// incremented in the same transaction as the write.
+	//
+	// State inside the database it describes is always self-consistent, so it
+	// can never report that the database is the wrong one or an older copy of
+	// the right one. This counter is the other half of that comparison: a
+	// state file that says 17 against a database that says 12 is a database
+	// that was restored or rolled back.
+	KeyStateVersion = "state_version"
 )
 
 // ErrTrackingVersionTooNew means the database was written by a joka whose
@@ -76,6 +95,11 @@ type State struct {
 	TrackingVersion int    `json:"tracking_version"`
 	JokaVersion     string `json:"joka_version,omitempty"`
 	UpdatedAt       string `json:"updated_at,omitempty"`
+
+	// StateIdentity names this database; empty before joka has written state
+	// here. StateVersion counts the writes.
+	StateIdentity string `json:"state_identity,omitempty"`
+	StateVersion  int    `json:"state_version,omitempty"`
 }
 
 // Read returns what the database records. It creates nothing, so it is safe for
@@ -119,10 +143,65 @@ func Read(ctx context.Context, db *sql.DB) (State, error) {
 			state.UpdatedAt = updated.Format("2006-01-02 15:04:05")
 		case KeyJokaVersion:
 			state.JokaVersion = value
+		case KeyStateIdentity:
+			state.StateIdentity = value
+		case KeyStateVersion:
+			// Unparseable is treated as zero rather than as an error: the
+			// counter is for comparing against a file, and refusing to read
+			// the whole marker table over it would take out commands that do
+			// not care.
+			n, convErr := strconv.Atoi(value)
+			if convErr == nil {
+				state.StateVersion = n
+			}
 		}
 	}
 
 	return state, rows.Err()
+}
+
+// StampStateWrite records that the entity state was written: it assigns an
+// identity if the database does not have one yet, and returns the version it
+// advanced to.
+//
+// It takes a DBTX rather than a *sql.DB because it belongs in the transaction
+// that wrote the state. A version that could commit without the write it counts
+// would be worse than no counter at all.
+func StampStateWrite(ctx context.Context, tx DBTX, identity string) (int, error) {
+	var current int
+	err := tx.QueryRowContext(ctx,
+		`SELECT value FROM `+Table+` WHERE key = $1`, KeyStateVersion).Scan(&current)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, fmt.Errorf("reading %s: %w", KeyStateVersion, err)
+	}
+
+	next := current + 1
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO `+Table+` (key, value, updated_at)
+		VALUES ($1, $2, CURRENT_TIMESTAMP)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+	`, KeyStateVersion, strconv.Itoa(next)); err != nil {
+		return 0, fmt.Errorf("recording %s: %w", KeyStateVersion, err)
+	}
+
+	// DO NOTHING, not DO UPDATE: an identity is assigned once and never
+	// rewritten, or a state file could never be checked against it.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO `+Table+` (key, value, updated_at)
+		VALUES ($1, $2, CURRENT_TIMESTAMP)
+		ON CONFLICT (key) DO NOTHING
+	`, KeyStateIdentity, identity); err != nil {
+		return 0, fmt.Errorf("recording %s: %w", KeyStateIdentity, err)
+	}
+
+	return next, nil
+}
+
+// DBTX is the subset of *sql.DB and *sql.Tx this package writes through.
+type DBTX interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // Check refuses a database whose bookkeeping is newer than this build
@@ -150,7 +229,7 @@ func Check(ctx context.Context, db *sql.DB) error {
 // joka_meta if it is absent. Called by mutating commands only: a read-only
 // command must leave a bare database bare.
 func Stamp(ctx context.Context, db *sql.DB, jokaVersion string) error {
-	if err := ensureTable(ctx, db); err != nil {
+	if err := EnsureTable(ctx, db); err != nil {
 		return err
 	}
 
@@ -170,7 +249,10 @@ func Stamp(ctx context.Context, db *sql.DB, jokaVersion string) error {
 	return nil
 }
 
-func ensureTable(ctx context.Context, db *sql.DB) error {
+// EnsureTable creates joka_meta if it is absent. Exported because the entity
+// state backend counts its writes there, so the table has to exist by the time
+// a command starts writing.
+func EnsureTable(ctx context.Context, db *sql.DB) error {
 	exists, err := jokadb.TableExists(ctx, db, Table)
 	if err != nil {
 		return err
