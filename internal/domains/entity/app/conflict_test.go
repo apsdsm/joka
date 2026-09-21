@@ -130,8 +130,11 @@ func TestPlanComparesAFileThatDidNotChange(t *testing.T) {
 
 func TestKeepFromConflicts(t *testing.T) {
 	conflicts := []RowConflict{{
-		RefID:   "alpha",
-		Columns: []ColumnChange{{Column: "label", Before: "Edited in the app", After: "Alpha"}},
+		RefID: "alpha",
+		Columns: []ColumnChange{{
+			Column: "label", Before: "Edited in the app", After: "Alpha",
+			LiveHash: HashValue("Edited in the app"),
+		}},
 	}}
 
 	t.Run("only the db policy produces one", func(t *testing.T) {
@@ -227,5 +230,107 @@ func TestConflictError(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected %q in:\n%s", want, err)
 		}
+	}
+}
+
+func TestRegeneratedColumnDriftIsDetected(t *testing.T) {
+	// The correction: a non-deterministic column still gets half a three-way
+	// comparison, and it is the important half. The baseline holds the hash of
+	// what joka actually inserted — a concrete argon2id digest, not the
+	// template — so comparing it against the live value says exactly whether
+	// the database moved.
+	db := newMockDBAdapter()
+
+	file := entityFile("a.yaml", col("users", "admin", map[string]any{
+		"email":         "admin@example.com",
+		"password_hash": "{{ argon2id|admin123 }}",
+	}))
+	applyAll(t, db, file)
+
+	t.Run("an untouched row reports nothing, however often it is synced", func(t *testing.T) {
+		if plan := seeded(t, db, file); plan.HasChanges() {
+			t.Fatalf("expected a clean run, got %+v", plan)
+		}
+	})
+
+	t.Run("a value the application changed is a conflict", func(t *testing.T) {
+		db.currentRows["users|1"]["password_hash"] = "$argon2id$reset-by-the-app"
+
+		plan := seeded(t, db, file)
+		if len(plan.Conflicts) != 1 {
+			t.Fatalf("expected the reset reported, got %+v", plan)
+		}
+
+		c := plan.Conflicts[0].Columns[0]
+		if c.Column != "password_hash" || !c.Regenerated {
+			t.Fatalf("expected the password column flagged as regenerated, got %+v", c)
+		}
+		// Neither side's value is attached: a fresh hash says nothing, and an
+		// asm.* secret must not be printed.
+		if c.Before != "" || c.After != "" {
+			t.Errorf("expected no values carried, got before=%q after=%q", c.Before, c.After)
+		}
+		if c.LiveHash != HashValue("$argon2id$reset-by-the-app") {
+			t.Errorf("expected the live hash carried for conceding, got %q", c.LiveHash)
+		}
+	})
+
+	t.Run("conceding it stops the report without rewriting the column", func(t *testing.T) {
+		plan := seeded(t, db, file)
+
+		if _, err := (ApplySetAction{
+			DB:       db,
+			Backend:  db.backend(),
+			Declared: []*domain.EntityFile{file},
+			Dirty:    map[string]bool{"a.yaml": true},
+			Keep:     KeepFromConflicts(plan.Conflicts, ConflictDB),
+		}).Execute(context.Background()); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+
+		if got := db.currentRows["users|1"]["password_hash"]; got != "$argon2id$reset-by-the-app" {
+			t.Errorf("expected the application's value left alone, got %v", got)
+		}
+		if plan := seeded(t, db, file); len(plan.Conflicts) != 0 {
+			t.Errorf("expected the conflict settled, got %+v", plan.Conflicts)
+		}
+	})
+}
+
+func TestRegeneratedColumnIsRewrittenOnlyWhenTheFileMoved(t *testing.T) {
+	db := newMockDBAdapter()
+
+	build := func(hash string) *domain.EntityFile {
+		f := entityFile("a.yaml", col("events", "first", map[string]any{
+			"label":      "First",
+			"created_at": "{{ now }}",
+		}))
+		f.ContentHash = hash
+		return f
+	}
+
+	applyAll(t, db, build("hash-a"))
+	db.updatedRows = nil
+
+	// An unchanged file leaves it alone: rewriting on every run would churn
+	// every created_at on every boot.
+	if plan := seeded(t, db, build("hash-a")); plan.HasChanges() {
+		t.Fatalf("expected an unchanged file to rewrite nothing, got %+v", plan)
+	}
+
+	// A changed file rewrites it, because the declaration moving is the only
+	// signal joka has that the author meant something different.
+	plan := seeded(t, db, build("hash-b"))
+	if len(plan.Updates) != 1 {
+		t.Fatalf("expected the changed file to queue an update, got %+v", plan.Updates)
+	}
+	found := false
+	for _, c := range plan.Updates[0].Rows[0].Changes {
+		if c.Column == "created_at" && c.Regenerated && c.Verdict == VerdictPush {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected created_at queued as a regenerated push, got %+v", plan.Updates[0].Rows[0].Changes)
 	}
 }

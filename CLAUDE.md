@@ -693,11 +693,25 @@ all, and it is the finding `--force` was added for and never fixed.
 - **`HashValue` canonicalises JSON**, the way `valuesEqual` does. PostgreSQL renders `jsonb` in its
   own key order with a space after each colon, so hashing raw text made every JSON column's baseline
   differ from the value it was taken from.
+- **A non-deterministic column gets half the comparison, and it is the important half.**
+  `{{ now }}`, `{{ argon2id|… }}` and `asm.*` re-resolve to a new value every run, so
+  declared-against-baseline always reads as changed and says nothing. But the baseline holds the
+  hash of what joka **actually inserted** — a concrete timestamp, a concrete argon2id digest — so
+  live-against-baseline says exactly whether the database moved. A password somebody reset is drift
+  joka can see (`appendRegenerated`):
+
+  | live vs baseline | |
+  |---|---|
+  | same | the database holds what joka wrote — rewrite only when the file changed, or every boot churns every `created_at` |
+  | different | the database moved: conflict |
+  | no baseline | nothing to compare against; fall back to the file hash |
+
+  Neither side's value is ever shown for these. A fresh hash tells the reader nothing, and an
+  `asm.*` secret must not be printed — the planner goes out of its way not to resolve one. The
+  conflict names the column and carries `LiveHash` so conceding it can record the right baseline.
 - **The content hash no longer gates the comparison.** It decides which files get their hash
-  rewritten, and it is the only signal joka has for a **non-deterministic column** — `{{ now }}`,
-  `{{ argon2id|… }}`, `asm.*` — whose value joka cannot predict, so it cannot tell drift from
-  regeneration. Those are written only when the file changed; without that rule every boot would
-  rewrite every `created_at`.
+  rewritten, and it carries the "did the author change this" signal for the non-deterministic case
+  above.
 - **`--force` is gone.** It existed because the hash was the gate.
 
 ### `--on-conflict`

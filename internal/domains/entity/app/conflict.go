@@ -56,10 +56,7 @@ func KeepFromConflicts(conflicts []RowConflict, policy ConflictPolicy) map[strin
 	for _, row := range conflicts {
 		columns := make(map[string]string, len(row.Columns))
 		for _, c := range row.Columns {
-			// Before is the live value, rendered the way HashValue renders,
-			// so hashing it here gives the same digest the next comparison
-			// will compute from the row itself.
-			columns[c.Column] = HashValue(c.Before)
+			columns[c.Column] = c.LiveHash
 		}
 		keep[row.RefID] = columns
 	}
@@ -92,6 +89,12 @@ func ConflictError(conflicts []RowConflict) error {
 		fmt.Fprintf(&b, "\n  %s  %s %s %d  (%s)",
 			row.RefID, row.Table, row.PKColumn, row.PKValue, row.File)
 		for _, c := range row.Columns {
+			if c.Regenerated {
+				// A fresh hash tells the reader nothing, and an asm.* secret
+				// must not be printed.
+				fmt.Fprintf(&b, "\n    %s: the database holds a value joka did not write", c.Column)
+				continue
+			}
 			fmt.Fprintf(&b, "\n    %s: database %q, file %q", c.Column, c.Before, c.After)
 		}
 	}

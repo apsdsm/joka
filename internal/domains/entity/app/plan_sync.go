@@ -98,6 +98,15 @@ type ColumnChange struct {
 	// declaration moved, conflict when the database moved and writing the
 	// declared value would discard a change joka did not make.
 	Verdict ColumnVerdict `json:"verdict,omitempty"`
+
+	// LiveHash is the digest of the value the database holds, set whenever the
+	// verdict is a conflict. Conceding the conflict records it as the new
+	// baseline.
+	//
+	// It is carried rather than re-derived from Before, because Before is
+	// canonicalised for display and, for a regenerated or secret column,
+	// deliberately not shown at all.
+	LiveHash string `json:"-"`
 }
 
 // IsConflict reports whether applying this change would discard something.
@@ -321,21 +330,17 @@ func sortedKeys(m map[string]any) []string {
 //
 // It reads the live row, so the row must exist.
 //
-// Three kinds of column are reported without a verdict, because there is no
-// three-way comparison to make:
+// Two kinds of column are handled specially:
 //
 //   - `_once` columns are skipped entirely. The database owns them; sync will
 //     not write them, so showing a change would promise an update that never
 //     comes.
-//   - A non-deterministic template (argon2id, now, asm.* secrets) produces a
-//     new value every time, so joka cannot say what the column "should" hold
-//     and cannot tell drift from regeneration. Its only signal is the
-//     declaration moving, which is what fileChanged carries. Reported as
-//     Regenerated, and only when the file changed — otherwise rewriting it on
-//     every run would churn every {{ now }} column on every boot.
 //   - A lookup whose target row does not exist yet is reported as Deferred
 //     rather than failing: the row may be inserted earlier in the same sync,
 //     which applies inserts before updates.
+//
+// A non-deterministic template (argon2id, now, asm.* secrets) gets half a
+// comparison — see appendRegenerated.
 //
 // Shared by the sync preview (`entity sync --dry-run`) and `entity diff`, so
 // the two can never disagree about what a column change is.
@@ -370,9 +375,7 @@ func ResolveRowChanges(
 		}
 
 		if isNonDeterministicTemplate(raw) {
-			if fileChanged {
-				changes = append(changes, ColumnChange{Column: k, Regenerated: true, Verdict: VerdictPush})
-			}
+			changes = appendRegenerated(changes, k, current[k], row, fileChanged)
 			continue
 		}
 
@@ -398,11 +401,52 @@ func ResolveRowChanges(
 		// about key order.
 		before, afterStr := alignForDisplay(normalizeValue(current[k]), normalizeValue(after))
 		changes = append(changes, ColumnChange{
-			Column: k, Before: before, After: afterStr, Verdict: verdict,
+			Column: k, Before: before, After: afterStr,
+			Verdict: verdict, LiveHash: HashValue(current[k]),
 		})
 	}
 
 	return changes, nil
+}
+
+// appendRegenerated compares a column whose declaration re-resolves to a new
+// value on every run — {{ now }}, {{ argon2id|… }}, an asm.* secret.
+//
+// Half the three-way comparison still works, and it is the important half.
+// The baseline holds the hash of what joka actually inserted — a concrete
+// timestamp, a concrete argon2id digest — not the template, so comparing it
+// against the live value says exactly whether the database moved. A password
+// somebody reset is drift joka can see.
+//
+// What says nothing is declared-against-baseline: re-resolving the template
+// produces a different value whether or not the author touched the file, so it
+// always reads as changed. The declaration moving is the file hash, which is
+// what fileChanged carries.
+//
+//	live == baseline  → the database holds what joka wrote. Rewrite it only
+//	                    when the declaration moved, or every boot would churn
+//	                    every created_at.
+//	live != baseline  → the database moved. Conflict.
+//	no baseline       → nothing to compare against; fall back to the file hash.
+//
+// Neither side's value is ever attached. A fresh hash tells the reader nothing,
+// and an asm.* secret must not be printed — the planner goes out of its way not
+// to resolve one.
+func appendRegenerated(changes []ColumnChange, column string, live any, row domain.EntityState, fileChanged bool) []ColumnChange {
+	liveHash := HashValue(live)
+
+	if baseline, recorded := row.Baseline(column); recorded && liveHash != baseline {
+		return append(changes, ColumnChange{
+			Column: column, Regenerated: true,
+			Verdict: VerdictConflict, LiveHash: liveHash,
+		})
+	}
+
+	if !fileChanged {
+		return changes
+	}
+
+	return append(changes, ColumnChange{Column: column, Regenerated: true, Verdict: VerdictPush})
 }
 
 // valuesEqual reports whether a declared value and the value in the database

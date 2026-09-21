@@ -392,6 +392,13 @@ func printConflicts(conflicts []app.RowConflict) {
 		color.Yellow("  ! %s  %s %s %d  (%s)", row.RefID, row.Table, row.PKColumn, row.PKValue, row.File)
 
 		for _, c := range row.Columns {
+			if c.Regenerated {
+				// A fresh hash tells the reader nothing, and an asm.* secret
+				// must not be printed.
+				fmt.Printf("        %s:\n", c.Column)
+				red.Printf("          the database holds a value joka did not write\n")
+				continue
+			}
 			fmt.Printf("        %s:\n", c.Column)
 			red.Printf("          database %s\n", c.Before)
 			green.Printf("          file     %s\n", c.After)
