@@ -145,10 +145,29 @@ func main() {
 
 			return nil
 		},
-		PersistentPostRun: func(c *cobra.Command, args []string) {
-			if dbConn != nil {
-				dbConn.Close()
+		PersistentPostRunE: func(c *cobra.Command, args []string) error {
+			if dbConn == nil {
+				return nil
 			}
+			defer dbConn.Close()
+
+			// A wiping command skips the upgrade gate on the way in, and the
+			// stamp lives inside it, so `drop` and `reset` would otherwise leave
+			// a database this build just wrote with no marker on it. The next
+			// mutating command would read that as pre-marker and announce an
+			// upgrade of bookkeeping it had itself written a second ago.
+			//
+			// Stamping here rather than there is deliberate: what the database
+			// holds afterwards is what this build writes, and that is only true
+			// once the command has finished. Cobra runs PersistentPostRunE only
+			// on success, so a failed reset leaves the marker alone.
+			if c.Annotations[annotationWipes] == "true" {
+				if err := meta.Stamp(c.Context(), dbConn, version); err != nil {
+					return err
+				}
+			}
+
+			return nil
 		},
 	}
 
@@ -366,7 +385,7 @@ conflict: applying the file would discard a change joka did not make.
 
   --on-conflict=fail   report them, write nothing, exit non-zero (default)
   --on-conflict=file   the file wins; write over the database's values
-  --on-conflict=db     the database wins; leave the column and stop reporting it
+  --on-conflict=db     the database wins; keep its values and rewrite the seed files
   --on-conflict=ask    show each one and ask, updating the seed files to match
                        the database where you say it is right
 

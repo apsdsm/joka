@@ -94,7 +94,6 @@ type EntityDiff struct {
 	// also the position sync would start writing to the wrong row; it has not
 	// meant that since `0c4e64d`.
 	PositionalBreak int `json:"positional_break"`
-
 }
 
 // DiffLine is one row of the alignment: a declared entity, a tracked row, or
@@ -493,7 +492,6 @@ func unkeyed(declared []domain.Entity, tracked []domain.TrackedRow) (declaredOut
 func positionLabel(pos int, table string) string {
 	return "#" + strconv.Itoa(pos) + " " + table
 }
-
 
 // CountEntities returns the number of entities in a graph, children included.
 // The count is order-independent, so callers that only need a size do not have

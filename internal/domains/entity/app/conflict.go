@@ -80,8 +80,7 @@ func Writable(c ColumnChange) bool {
 }
 
 // KeepFromConflicts turns a plan's conflicts into the Keep map ApplySetAction
-// takes: the columns to leave alone, and the hash of what the database holds
-// there.
+// takes: the columns to leave alone, and the baseline to record for each.
 //
 // Only ConflictDB produces one. Under ConflictFile the declaration wins and
 // every column is written; under ConflictFail the caller has already refused.
@@ -95,7 +94,7 @@ func KeepFromConflicts(conflicts []RowConflict, policy ConflictPolicy) map[strin
 	for _, row := range conflicts {
 		columns := make(map[string]string, len(row.Columns))
 		for _, c := range row.Columns {
-			columns[c.Column] = c.LiveHash
+			columns[c.Column] = adoptedBaseline(c)
 		}
 		keep[row.RefID] = columns
 	}
@@ -133,7 +132,7 @@ func KeepFromResolutions(conflicts []RowConflict, resolutions []Resolution) map[
 			if keep[row.RefID] == nil {
 				keep[row.RefID] = make(map[string]string)
 			}
-			keep[row.RefID][c.Column] = c.LiveHash
+			keep[row.RefID][c.Column] = adoptedBaseline(c)
 		}
 	}
 
@@ -184,7 +183,7 @@ func ConflictError(conflicts []RowConflict) error {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s changed in the database since joka last wrote %s",
+	fmt.Fprintf(&b, "%s in %s",
 		countOf(columns, "column", "columns"), countOf(len(conflicts), "row", "rows"))
 
 	ordered := make([]RowConflict, len(conflicts))
@@ -206,7 +205,100 @@ func ConflictError(conflicts []RowConflict) error {
 	}
 
 	b.WriteString("\n  --on-conflict=file writes the file's values over them;" +
-		" --on-conflict=db keeps the database's and stops reporting them")
+		" --on-conflict=db keeps the database's values and rewrites the seed files to match")
 
 	return fmt.Errorf("%w: %s", domain.ErrEntityConflict, b.String())
+}
+
+// FilesToRewrite names the seed files ApplyResolutions would edit, without
+// editing them. The confirmation prompt has to say which files it is about to
+// change, and it runs before the change.
+func FilesToRewrite(resolutions []Resolution) []string {
+	var files []string
+	seen := make(map[string]bool)
+
+	for _, r := range resolutions {
+		if r.UpdateFile && !seen[r.File] {
+			seen[r.File] = true
+			files = append(files, r.File)
+		}
+	}
+
+	sort.Strings(files)
+	return files
+}
+
+// ConflictSummary is ConflictError without the per-column listing: the counts
+// and what to do about them.
+//
+// It exists for the text output, where the plan has already printed every
+// column in a layout an error string cannot match, and repeating them under
+// `Error:` says the same thing twice. ConflictError is still what JSON and any
+// other caller with no plan in front of it gets.
+func ConflictSummary(conflicts []RowConflict) error {
+	if len(conflicts) == 0 {
+		return nil
+	}
+
+	columns := 0
+	for _, row := range conflicts {
+		columns += len(row.Columns)
+	}
+
+	return fmt.Errorf("%w: %s in %s (listed above)."+
+		" --on-conflict=file writes the file's values over them; --on-conflict=db keeps the"+
+		" database's values and rewrites the seed files to match; --on-conflict=ask decides one at a time",
+		domain.ErrEntityConflict,
+		countOf(columns, "column", "columns"), countOf(len(conflicts), "row", "rows"))
+}
+
+// ResolutionsFor renders a non-interactive policy as the per-column answers it
+// stands for, so `--on-conflict=db` and answering `d` to every question are the
+// same run.
+//
+// Only ConflictDB produces any. Conceding a column means two things — leave the
+// database's value alone, and make the declaration say so — and doing only the
+// first does not converge: the file still disagrees with the database, so the
+// same conflict is reported on every run from then on. Under ConflictFile the
+// declaration already wins and there is nothing to record; ConflictFail refuses
+// before this is reached.
+func ResolutionsFor(conflicts []RowConflict, policy ConflictPolicy) []Resolution {
+	if policy != ConflictDB {
+		return nil
+	}
+
+	var out []Resolution
+
+	for _, row := range conflicts {
+		for _, c := range row.Columns {
+			out = append(out, Resolution{
+				File: row.File, RefID: row.RefID, Column: c.Column, Value: c.Before,
+				KeepDatabase: true,
+				// A column whose declaration is an expression is kept without
+				// being rewritten: there is no literal to write it to. It stays
+				// a conflict, which is the honest answer — joka cannot make the
+				// file agree, so it does not pretend the difference is settled.
+				UpdateFile: Writable(c),
+			})
+		}
+	}
+
+	return out
+}
+
+// adoptedBaseline says what a conceded column records as its baseline: nothing
+// when the declaration can be rewritten to match, the database's hash when it
+// cannot.
+//
+// The two cases settle the conflict in different places. A literal is settled
+// in the file, where the reader can see it, and the baseline stays the record
+// of what joka last applied. A template expression has no literal to write, so
+// the only place the concession fits is the baseline — and moving it there is
+// safe for exactly these columns, because joka never writes them on the
+// strength of a value comparison in the first place.
+func adoptedBaseline(c ColumnChange) string {
+	if Writable(c) {
+		return ""
+	}
+	return c.LiveHash
 }

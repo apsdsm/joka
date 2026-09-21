@@ -481,6 +481,13 @@ something can still be run to clear it.
   commands with the `joka:mutates` annotation and the root `PersistentPreRunE` stamps on that. A
   read-only command must leave a bare database bare, which is what makes a missing tracking table
   reportable — `TestStatusIsReadOnly` and `TestReadCreatesNothing` both guard it.
+- **A wiping command stamps on the way out, not the way in.** `drop` and `reset` carry
+  `joka:wipes` and skip the upgrade gate, and the stamp lives inside it, so they used to leave a
+  database this build had just written with no marker on it — and the next mutating command read
+  that as pre-marker and announced an upgrade of bookkeeping it had itself written a second ago.
+  The root `PersistentPostRunE` stamps on the annotation instead. What the database holds afterwards
+  is what this build writes, and that is only true once the command has finished; cobra runs
+  `PersistentPostRunE` only on success, so a failed reset leaves the marker alone.
 - **An unparseable version is treated as too new.** joka writes a decimal string, so anything else
   came from something this build does not understand.
 - `joka status` reports the marker in its header (`written by joka 0.14.0`) and in JSON under `meta`.
@@ -781,7 +788,9 @@ all, and it is the finding `--force` was added for and never fixed.
   conflict names the column and carries `LiveHash` so conceding it can record the right baseline.
 - **The content hash no longer gates the comparison.** It decides which files get their hash
   rewritten, and it carries the "did the author change this" signal for the non-deterministic case
-  above.
+  above. A file that is modified with nothing to apply — an edit that makes the declaration match
+  what the database already holds — still gets its hash recorded (`refreshHashes`), or it reads as
+  modified forever.
 - **`--force` is gone.** It existed because the hash was the gate.
 
 ### `--on-conflict`
@@ -790,11 +799,17 @@ all, and it is the finding `--force` was added for and never fixed.
 |---|---|
 | `fail` (default) | report, write nothing, exit non-zero — the drift gate, as `migrate verify` is for schema |
 | `file` | the declaration wins; write over the database's values |
-| `db` | the database wins; leave the column and record what it holds as the new baseline |
+| `db` | the database wins; leave the column and rewrite the declaration to match |
 | `ask` | show each one and decide, rewriting the seed files where the database wins |
 
-`db` does not rewrite the YAML. Keeping the database's value and updating the declaration to match
-are different decisions, and `ask` is where the second one is made.
+`db` and answering `d` to every question are the same run — `app.ResolutionsFor` renders the policy
+as the answers it stands for. It did not rewrite the YAML at first, on the reasoning that keeping
+the database's value and updating the declaration are different decisions. They are not separable:
+without the rewrite the file still disagrees with the database, so the concession had to be recorded
+by moving the baseline to the live value, and that reads as "joka applied this" — the next run
+called the difference an ordinary push and wrote the file's value back over the value just conceded.
+Two runs of the same command gave opposite results. Conceding a column means both things or it does
+not converge.
 
 ### `ask`, and writing back to the seed files
 
@@ -805,8 +820,10 @@ yes, so the declaration stays true instead of slowly becoming fiction.
 - **The bulk question comes first** (`f` / `d` / `r` / `q`). A drifted database usually drifted in one
   direction for one reason, and making someone answer forty times to say so is how a useful prompt
   becomes a thing people pipe `yes` into.
-- **Files are rewritten before the database is touched.** If the write fails, nothing has been applied
-  and the seeds are still what they were — the recoverable order.
+- **Files are rewritten after the confirmation and before the database is touched.** After, because a
+  cancel that has already edited the files on disk is not a cancel — the prompt named the files it
+  was about to change and then the operator said no. Before, because if the write fails nothing has
+  been applied and the seeds are still what they were.
 - **`app.SetEntityColumn` edits the parsed `yaml.Node` tree**, not a decoded value, so comments, key
   order, quoting style and `_has:` nesting all survive. These are files a person maintains; a
   write-back that reformatted them would make the diff unreadable and the feature unusable. It does
@@ -817,15 +834,34 @@ yes, so the declaration stays true instead of slowly becoming fiction.
 - **A templated column can be kept without being rewritten** (`app.Writable`). Writing a literal over
   `{{ lookup|… }}` would replace the indirection with whatever it resolved to this time, and nothing
   would say so; a regenerated or secret column has no value to write at all. Those are conceded to
-  the database — the baseline moves, the declaration does not.
+  the database — the baseline moves, the declaration does not. That is safe for exactly these
+  columns and no others: joka never writes them on the strength of a value comparison, so a baseline
+  equal to the live value cannot turn into a push next run.
 - **The rewritten files are re-read before the apply.** Their content hash moved, and the copy in
   memory is what joka is about to record; left stale, the next run would report the file modified
   because of an edit joka made itself.
 - `ask` needs someone to ask, so it is refused under `--output json` and `--auto`.
+- **A file joka rewrote is dirty, and its hash is refreshed with the rest.** Left stale, the state
+  keeps the hash of the content from before joka's own edit, so the file reads as modified on every
+  run from then on — and a non-deterministic column in it is regenerated every time, because the
+  file hash is the only signal joka has for those.
+- **One reader for stdin** (`shared.Stdin`). A `bufio.Reader` reads ahead, so a second reader over
+  `os.Stdin` finds the bytes the first one already pulled into its buffer. One command asking two
+  questions is exactly that case, and the symptom was the confirmation prompt silently taking an
+  empty answer and cancelling a run the operator had just agreed to.
 
-`ApplySetAction` takes the decision as `Keep` (`_id` → column → live hash) rather than a policy
-enum, so the applier has one concept — "these columns are the database's" — and the same field
-carries the per-column answers `ask` produces.
+`ApplySetAction` takes the decision as `Keep` (`_id` → column → the baseline to record) rather
+than a policy enum, so the applier has one concept — "these columns are the database's" — and the
+same field carries the per-column answers `ask` produces. The empty string means keep the baseline
+the row had: the declaration was rewritten, so the difference is gone from the file and what joka
+last applied has not moved. A hash means adopt it, which only a column that could not be rewritten
+ever asks for.
+
+**A partial update merges into the baseline, it does not replace it.** The baseline records every
+column joka has applied, not the last statement it ran. An update writes only the columns that
+differ, so replacing dropped the baseline of every column that happened to agree — and a column with
+no baseline is pushed over silently the next time the database moves it, which is the case the
+baseline exists to catch. `TestAnUpdateKeepsTheBaselineOfTheColumnsItDidNotWrite` guards it.
 
 ### The apply executes the plan
 

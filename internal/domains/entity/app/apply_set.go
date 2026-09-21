@@ -43,11 +43,24 @@ type ApplySetAction struct {
 	// but a non-deterministic column has no comparison to make, so the
 	// declaration moving is the only signal joka has for it.
 	Dirty map[string]bool
-	// Keep names the columns the database owns for this run, per _id, mapped
-	// to the hash of the value it holds. The apply leaves them alone and
-	// records that hash as the new baseline, which is what "the database is
-	// right" means: joka stops trying to write the column and starts treating
-	// what is there as what it last applied.
+	// Keep names the columns the database owns for this run, per _id, mapped to
+	// the baseline to record for each.
+	//
+	// The apply leaves every one of them alone. What differs is where the
+	// concession is recorded. A column whose declaration was rewritten to match
+	// maps to the empty string and keeps the baseline it had: joka did not write
+	// it, so what it last applied has not moved, and the file no longer disagrees
+	// anyway. A column whose declaration could not be rewritten — a template
+	// expression, whose value joka cannot put in a file — maps to the hash of
+	// what the database holds, and takes it as its new baseline. There is no file
+	// edit that can settle that one, so recording it here is the only way the
+	// operator's answer survives the run; otherwise the same difference is
+	// reported forever.
+	//
+	// Taking the live hash for every conceded column, which is what this did at
+	// first, is what made two runs of --on-conflict=db give opposite results: the
+	// second run read live == baseline as an ordinary push and wrote the file's
+	// value over the value just conceded.
 	//
 	// Empty under --on-conflict=file, where the declaration wins and every
 	// column is written. Never reached under --on-conflict=fail, which refuses
@@ -189,7 +202,7 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			// the baseline they had.
 			row.File = file.Path
 			row.Order = i
-			row.Columns = baselineAfterUpdate(row.Columns, applied, e, a.Keep[e.RefID])
+			row.Columns = baselineAfterUpdate(row.Columns, applied, a.Keep[e.RefID])
 			state.Track(e.RefID, row)
 		}
 
@@ -300,36 +313,47 @@ func (a ApplySetAction) retrack(
 	state.Track(e.RefID, row)
 }
 
-// baselineAfterUpdate records what the update just wrote, plus the two kinds of
-// column it deliberately did not.
+// baselineAfterUpdate merges what the update just wrote into the baseline the
+// row already had.
 //
-// A _once column keeps its insert-time hash: joka applied it once, and that is
-// still the last thing it applied to it. A kept column takes the hash of what
-// the database holds, which is what conceding a conflict means — joka stops
-// trying to write the column and starts treating what is there as its baseline,
-// so the same difference is not reported again on the next run.
+// It merges rather than replaces because the baseline is the record of every
+// column joka has applied, not of the last statement it ran. An update writes
+// only the columns that differ, so replacing dropped the baseline of every
+// column that happened to agree this run — and a column with no baseline is
+// pushed over silently the next time the database moves it, which is the exact
+// case the baseline exists to catch.
+//
+// Merging also covers the two kinds of column an update deliberately skips,
+// with no special case: a _once column and a column conceded to the database
+// are both absent from `applied`, so both keep the hash of what joka last
+// applied to them. For a conceded column that is what keeps the concession
+// stable. Recording the live hash instead reads as "joka applied this", so the
+// next run sees live == baseline, calls it an ordinary push rather than a
+// conflict, and writes the file's value over the value the operator had just
+// said was right. Two runs of the same command gave opposite results.
 func baselineAfterUpdate(
 	previous map[string]string,
 	applied map[string]any,
-	e domain.Entity,
 	kept map[string]string,
 ) map[string]string {
-	if len(e.Once) == 0 && len(kept) == 0 {
-		return BaselineOf(applied)
+	out := make(map[string]string, len(previous)+len(applied))
+
+	for name, hash := range previous {
+		out[name] = hash
+	}
+	for name, hash := range BaselineOf(applied) {
+		out[name] = hash
 	}
 
-	out := BaselineOf(applied)
-	if out == nil {
-		out = make(map[string]string, len(e.Once)+len(kept))
-	}
-
-	for _, name := range e.Once {
-		if hash, recorded := previous[name]; recorded {
+	// A conceded column whose declaration could not be rewritten records the
+	// database's hash. See Keep's doc comment: there is no file edit that can
+	// settle it, so this is the only place the concession fits. An empty hash
+	// means the declaration was rewritten instead, and the previous baseline
+	// above is already right.
+	for name, hash := range kept {
+		if hash != "" {
 			out[name] = hash
 		}
-	}
-	for name, hash := range kept {
-		out[name] = hash
 	}
 
 	return out

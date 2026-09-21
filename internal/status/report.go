@@ -34,15 +34,15 @@ type Report struct {
 	// about itself: state inside a database is always self-consistent, so it
 	// can never say this is the wrong database, or the right one restored from
 	// an older dump.
-	StateAudit     string `json:"state_audit"`
-	StateAuditNote string `json:"state_audit_note"`
-	StateFile      string `json:"state_file"`
-	Driver     string     `json:"driver"`
-	Migrations Migrations `json:"migrations"`
-	Entities   Entities   `json:"entities"`
-	Templates  Templates  `json:"templates"`
-	Lock       *Lock      `json:"lock"`
-	Actions    []Action   `json:"actions"`
+	StateAudit     string     `json:"state_audit"`
+	StateAuditNote string     `json:"state_audit_note"`
+	StateFile      string     `json:"state_file"`
+	Driver         string     `json:"driver"`
+	Migrations     Migrations `json:"migrations"`
+	Entities       Entities   `json:"entities"`
+	Templates      Templates  `json:"templates"`
+	Lock           *Lock      `json:"lock"`
+	Actions        []Action   `json:"actions"`
 }
 
 // Migration status values. These describe the declared-vs-tracked edge for a

@@ -318,8 +318,14 @@ func TestKeepFromResolutions(t *testing.T) {
 	if _, held := keep["admin"]["name"]; held {
 		t.Error("expected the column the file won left out")
 	}
-	if keep["admin"]["email"] != HashValue("moved@example.com") {
-		t.Errorf("expected the conceded column's live hash, got %q", keep["admin"]["email"])
+	// Held, with nothing recorded: the declaration is a literal, so it is
+	// rewritten to the database's value and the baseline still describes what
+	// joka last applied.
+	if _, held := keep["admin"]["email"]; !held {
+		t.Error("expected the conceded column held")
+	}
+	if keep["admin"]["email"] != "" {
+		t.Errorf("expected no baseline recorded for a rewritable column, got %q", keep["admin"]["email"])
 	}
 
 	if got := KeepFromResolutions(conflicts, nil); got != nil {

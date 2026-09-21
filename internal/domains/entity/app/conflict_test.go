@@ -147,13 +147,35 @@ func TestKeepFromConflicts(t *testing.T) {
 		}
 	})
 
-	t.Run("it records the hash of what the database holds", func(t *testing.T) {
+	t.Run("a rewritable column records no baseline of its own", func(t *testing.T) {
 		got := KeepFromConflicts(conflicts, ConflictDB)
 
-		// The next comparison computes this digest from the row itself, so it
-		// has to match or the same conflict is reported forever.
-		if got["alpha"]["label"] != HashValue("Edited in the app") {
-			t.Errorf("expected the live value hashed, got %q", got["alpha"]["label"])
+		// The column is held, but with nothing to record: its declaration is
+		// rewritten to the database's value, so the difference is gone from the
+		// file and the baseline still describes what joka last applied.
+		if _, held := got["alpha"]["label"]; !held {
+			t.Error("expected the column held")
+		}
+		if got["alpha"]["label"] != "" {
+			t.Errorf("expected no baseline recorded, got %q", got["alpha"]["label"])
+		}
+	})
+
+	t.Run("a column that cannot be rewritten records the database's hash", func(t *testing.T) {
+		// There is no literal to write a {{ … }} declaration to, so the only
+		// place this concession fits is the baseline. Without it the same
+		// difference is reported on every run from here on.
+		templated := []RowConflict{{
+			RefID: "alpha",
+			Columns: []ColumnChange{{
+				Column: "password_hash", Regenerated: true,
+				LiveHash: HashValue("reset by the user"),
+			}},
+		}}
+
+		got := KeepFromConflicts(templated, ConflictDB)
+		if got["alpha"]["password_hash"] != HashValue("reset by the user") {
+			t.Errorf("expected the live value hashed, got %q", got["alpha"]["password_hash"])
 		}
 	})
 }
@@ -203,15 +225,30 @@ func TestApplyKeepsTheDatabasesValue(t *testing.T) {
 		t.Errorf("expected the other column still written, got %v", written["note"])
 	}
 
-	// Conceding means the database's value becomes the baseline, so the same
-	// difference is not reported again on the next run.
+	// The baseline still says what joka last applied. Recording the database's
+	// value here instead is what made the next run read live == baseline as an
+	// ordinary push and write the file's value back over the concession.
 	alpha, _ := db.state.Row("alpha")
-	if hash, _ := alpha.Baseline("label"); hash != HashValue("Edited in the app") {
-		t.Errorf("expected the database's value recorded as the baseline, got %q", hash)
+	if hash, _ := alpha.Baseline("label"); hash != HashValue("Alpha") {
+		t.Errorf("expected the baseline left at what joka applied, got %q", hash)
 	}
 
-	if plan := seeded(t, db, changed); len(plan.Conflicts) != 0 {
-		t.Errorf("expected the conflict settled, got %+v", plan.Conflicts)
+	// Until the declaration is rewritten the difference is still there, and
+	// still reported. Conceding a literal is not finished until the file says so.
+	if plan := seeded(t, db, changed); len(plan.Conflicts) != 1 {
+		t.Errorf("expected the difference still reported, got %+v", plan.Conflicts)
+	}
+
+	// Rewriting it is what settles it — which is what ApplyResolutions does to
+	// the file on disk under --on-conflict=db and ask.
+	conceded := entityFile("a.yaml", col("fields", "alpha", map[string]any{
+		"label": "Edited in the app",
+		"note":  "edited in the file",
+	}))
+	conceded.ContentHash = "hash-conceded"
+
+	if plan := seeded(t, db, conceded); len(plan.Conflicts) != 0 {
+		t.Errorf("expected the conflict settled once the file agrees, got %+v", plan.Conflicts)
 	}
 }
 
@@ -398,5 +435,100 @@ func TestApplyRecreatesADeletedRow(t *testing.T) {
 	// And the run settles: nothing left to do.
 	if plan := seeded(t, db, file); plan.HasChanges() {
 		t.Errorf("expected the re-creation to settle, got %+v", plan)
+	}
+}
+
+func TestAnUpdateKeepsTheBaselineOfTheColumnsItDidNotWrite(t *testing.T) {
+	// The baseline is the record of every column joka has applied, not of the
+	// last statement it ran. Replacing it with the columns of one update left
+	// every other column with no baseline — and a column with no baseline is
+	// pushed over silently the next time the database moves it, which is the
+	// case the baseline exists to catch.
+	db := newMockDBAdapter()
+
+	file := entityFile("a.yaml", col("fields", "alpha", map[string]any{
+		"label": "Alpha",
+		"code":  "A",
+	}))
+	applyAll(t, db, file)
+
+	edited := entityFile("a.yaml", col("fields", "alpha", map[string]any{
+		"label": "Alpha renamed",
+		"code":  "A",
+	}))
+	edited.ContentHash = "hash-edited"
+	applyPlanned(t, db, map[string]bool{"a.yaml": true}, edited)
+
+	alpha, _ := db.state.Row("alpha")
+	if hash, recorded := alpha.Baseline("code"); !recorded || hash != HashValue("A") {
+		t.Fatalf("expected the untouched column's baseline kept, got %q recorded=%v", hash, recorded)
+	}
+
+	// And it does its job: the database moving that column is a conflict, not a
+	// difference joka assumes it is free to overwrite.
+	db.currentRows["fields|1"] = map[string]any{"label": "Alpha renamed", "code": "B"}
+
+	plan := seeded(t, db, edited)
+	if len(plan.Conflicts) != 1 || plan.Conflicts[0].Columns[0].Column != "code" {
+		t.Errorf("expected the drift on code reported as a conflict, got %+v", plan.Conflicts)
+	}
+}
+
+func TestResolutionsFor(t *testing.T) {
+	conflicts := []RowConflict{{
+		File: "a.yaml", RefID: "admin",
+		Columns: []ColumnChange{
+			{Column: "email", Before: "moved@example.com", After: "admin@example.com",
+				LiveHash: HashValue("moved@example.com")},
+			{Column: "password_hash", Before: "", After: "", Regenerated: true,
+				LiveHash: HashValue("reset by the user")},
+		},
+	}}
+
+	t.Run("only the db policy answers anything", func(t *testing.T) {
+		for _, policy := range []ConflictPolicy{ConflictFile, ConflictFail, ConflictAsk} {
+			if got := ResolutionsFor(conflicts, policy); got != nil {
+				t.Errorf("expected nothing answered under %s, got %+v", policy, got)
+			}
+		}
+	})
+
+	t.Run("db concedes every column and rewrites what it can", func(t *testing.T) {
+		got := ResolutionsFor(conflicts, ConflictDB)
+		if len(got) != 2 {
+			t.Fatalf("expected an answer per column, got %+v", got)
+		}
+
+		for _, r := range got {
+			if !r.KeepDatabase {
+				t.Errorf("expected %s conceded to the database", r.Column)
+			}
+		}
+
+		// Conceding means both leaving the value alone and making the
+		// declaration say so. Doing only the first does not converge: the file
+		// still disagrees, so the same conflict is reported on every run.
+		if !got[0].UpdateFile || got[0].Value != "moved@example.com" {
+			t.Errorf("expected the literal rewritten to the database's value, got %+v", got[0])
+		}
+		// There is no literal to write a regenerated column to.
+		if got[1].UpdateFile {
+			t.Error("expected the regenerated column left in the file")
+		}
+	})
+}
+
+func TestFilesToRewrite(t *testing.T) {
+	// The confirmation prompt names the files it is about to change, and runs
+	// before the change.
+	got := FilesToRewrite([]Resolution{
+		{File: "b.yaml", Column: "x", UpdateFile: true},
+		{File: "a.yaml", Column: "y", UpdateFile: true},
+		{File: "b.yaml", Column: "z", UpdateFile: true},
+		{File: "c.yaml", Column: "w"},
+	})
+
+	if len(got) != 2 || got[0] != "a.yaml" || got[1] != "b.yaml" {
+		t.Errorf("expected a.yaml and b.yaml once each, sorted, got %v", got)
 	}
 }

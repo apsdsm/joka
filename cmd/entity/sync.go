@@ -154,6 +154,16 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}
 
 	if !plan.HasChanges() {
+		// A file can be modified and still have nothing to apply: an edit that
+		// makes the declaration match what the database already holds. Nothing
+		// is written to the database, but the content hash still has to move,
+		// or the file reads as modified on every run from here on.
+		if len(dirty) > 0 {
+			if err := refreshHashes(ctx, r, all, dirty); err != nil {
+				return fail(err)
+			}
+		}
+
 		if jsonOut {
 			shared.PrintJSON(map[string]any{
 				"status": "ok", "inserted": []string{}, "updated": []string{},
@@ -197,15 +207,17 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictFail {
 		if !jsonOut {
 			printPlan(plan)
+			return app.ConflictSummary(plan.Conflicts)
 		}
 		return fail(app.ConflictError(plan.Conflicts))
 	}
 
-	// Under --on-conflict=ask the operator decides per column, and the seed
-	// files are rewritten for the ones the database wins. Keep is then built
-	// from the answers rather than the policy.
+	// A conceded column is left alone in the database and its declaration is
+	// rewritten to match. --on-conflict=db concedes every one of them;
+	// --on-conflict=ask asks per column and builds the same answers from the
+	// replies.
 	keep := app.KeepFromConflicts(plan.Conflicts, r.OnConflict)
-	var rewritten []string
+	resolutions := app.ResolutionsFor(plan.Conflicts, r.OnConflict)
 
 	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictAsk {
 		if jsonOut || r.AutoConfirm {
@@ -215,17 +227,42 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 		printPlan(plan)
 
-		resolutions, ok := askConflicts(plan.Conflicts)
+		var ok bool
+		resolutions, ok = askConflicts(plan.Conflicts)
 		if !ok {
 			color.Yellow("Entity sync cancelled. Nothing was changed.")
 			return nil
 		}
 
 		keep = app.KeepFromResolutions(plan.Conflicts, resolutions)
+	}
 
-		// The files are rewritten before the database is touched. If the write
-		// fails, nothing has been applied and the seeds are still what they
-		// were, which is the recoverable order.
+	if !jsonOut {
+		if r.OnConflict != app.ConflictAsk {
+			printPlan(plan)
+		}
+
+		fmt.Println()
+
+		for _, path := range app.FilesToRewrite(resolutions) {
+			color.Cyan("  Will update the seed file to match the database: %s", path)
+		}
+
+		if !r.AutoConfirm {
+			if !shared.Confirm("Proceed with entity sync? (only 'yes' will confirm): ") {
+				color.Yellow("Entity sync cancelled.")
+				return nil
+			}
+		}
+	}
+
+	// The seed files are rewritten after the confirmation and before the
+	// database is touched. After, because a cancel that has already edited the
+	// files on disk is not a cancel. Before, because if the write fails nothing
+	// has been applied and the seeds are still what they were.
+	var rewritten []string
+
+	if len(resolutions) > 0 {
 		rewritten, err = app.ApplyResolutions(r.EntitiesDir, resolutions)
 		if err != nil {
 			return fail(err)
@@ -237,23 +274,20 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		if err := reloadFiles(r.EntitiesDir, all, rewritten); err != nil {
 			return fail(err)
 		}
-	}
 
-	if !jsonOut {
-		if r.OnConflict != app.ConflictAsk {
-			printPlan(plan)
-		}
-
-		fmt.Println()
-
+		// A file joka has just rewritten is dirty by definition, and its hash has
+		// to be refreshed with the rest. Without this the state keeps the hash
+		// of the content from before joka's own edit, so the file reads as
+		// modified on every later run — and a non-deterministic column in it is
+		// regenerated every time, because the file hash is the only signal joka
+		// has for those.
 		for _, path := range rewritten {
-			color.Cyan("  Updated the seed file to match the database: %s", path)
+			dirty[path] = true
 		}
 
-		if !r.AutoConfirm {
-			if !shared.Confirm("Proceed with entity sync? (only 'yes' will confirm): ") {
-				color.Yellow("Entity sync cancelled.")
-				return nil
+		if !jsonOut {
+			for _, path := range rewritten {
+				color.Cyan("  Updated the seed file to match the database: %s", path)
 			}
 		}
 	}
@@ -533,4 +567,47 @@ func reportUndeclared(rows []domain.TrackedRow) {
 	color.Yellow("  Nothing was deleted. 'joka entity forget <file>' drops the tracking,")
 	color.Yellow("  'joka entity diff <file>' shows what each one points at.")
 	fmt.Println()
+}
+
+// refreshHashes records the content hash of files that changed without
+// changing anything joka applies, and rewrites the state file.
+//
+// It is the no-op case of the same bookkeeping ApplySetAction does: there is no
+// row to write, so there is no transaction's worth of work, but the hash still
+// has to move.
+func refreshHashes(
+	ctx context.Context,
+	r RunEntitySyncCommand,
+	all []*domain.EntityFile,
+	dirty map[string]bool,
+) error {
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+
+	backend := infra.NewPostgresTxStateBackend(tx, r.DB)
+
+	state, err := backend.Load(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+
+	for _, file := range all {
+		if dirty[file.Path] {
+			state.TrackFile(file.Path, file.ContentHash)
+		}
+	}
+
+	if err := backend.Save(ctx, state); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion)
 }

@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
+	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/fatih/color"
 )
@@ -20,13 +20,19 @@ import (
 //
 // Returns nil, false when the operator backed out.
 func askConflicts(conflicts []app.RowConflict) ([]app.Resolution, bool) {
-	return askConflictsFrom(os.Stdin, conflicts)
+	return askConflictsFrom(shared.Stdin, conflicts)
 }
 
 // askConflictsFrom is askConflicts with the answers coming from anywhere, so
 // the decision logic can be tested without a terminal.
 func askConflictsFrom(answers io.Reader, conflicts []app.RowConflict) ([]app.Resolution, bool) {
-	in := bufio.NewReader(answers)
+	// Wrapping a *bufio.Reader in another one reintroduces the bug shared.Stdin
+	// exists to avoid: the outer reader pulls the whole pipe into its own
+	// buffer and the confirmation prompt after this finds nothing left.
+	in, ok := answers.(*bufio.Reader)
+	if !ok {
+		in = bufio.NewReader(answers)
+	}
 
 	columns := 0
 	for _, row := range conflicts {

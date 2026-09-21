@@ -45,7 +45,6 @@ func (r RunEntityUpdateCommand) Execute(ctx context.Context) error {
 	}
 	defer lockAdapter.Release(ctx) //nolint:errcheck
 
-
 	if err := infra.NewPostgresStateBackend(r.DB).EnsureStateTable(ctx); err != nil {
 		if jsonOut {
 			return shared.PrintErrorJSON(err)
