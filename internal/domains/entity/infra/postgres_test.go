@@ -3,11 +3,8 @@ package infra_test
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
 	"testing"
 
-	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	"github.com/apsdsm/joka/internal/domains/entity/infra"
 	"github.com/apsdsm/joka/testlib"
 )
@@ -268,68 +265,6 @@ func TestPostgresEnsureContentHashColumn(t *testing.T) {
 
 		if err := adapter.EnsureContentHashColumn(ctx); err != nil {
 			t.Fatalf("second call (idempotent): %v", err)
-		}
-	})
-}
-
-func TestPostgresDeleteRow(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-
-	db, err := testlib.GetTestPostgresDB()
-	if err != nil {
-		t.Fatalf("getting test db: %v", err)
-	}
-
-	adapter := infra.NewPostgresDBAdapter(db)
-	ctx := context.Background()
-
-	t.Run("it deletes the row by primary key", func(t *testing.T) {
-		tableName := "test_pg_delete_row"
-		createPostgresTestTable(t, db, tableName)
-
-		id, err := adapter.InsertRow(ctx, tableName, map[string]any{"name": "ToDelete", "email": "del@test.com"}, "id")
-		if err != nil {
-			t.Fatalf("InsertRow: %v", err)
-		}
-
-		if err := adapter.DeleteRow(ctx, tableName, "id", id); err != nil {
-			t.Fatalf("DeleteRow: %v", err)
-		}
-
-		var count int
-		db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM "%s" WHERE id = $1`, tableName), id).Scan(&count)
-		if count != 0 {
-			t.Errorf("expected row to be deleted, count=%d", count)
-		}
-	})
-
-	t.Run("it returns ErrForeignKeyConflict when child rows exist", func(t *testing.T) {
-		db.ExecContext(ctx, `CREATE TABLE "test_pg_fk_parent" (id BIGSERIAL PRIMARY KEY, name VARCHAR(100))`)
-		db.ExecContext(ctx, `CREATE TABLE "test_pg_fk_child" (id BIGSERIAL PRIMARY KEY, parent_id BIGINT NOT NULL REFERENCES "test_pg_fk_parent"(id))`)
-		t.Cleanup(func() {
-			testlib.DropTablePostgres(t, db, "test_pg_fk_child")
-			testlib.DropTablePostgres(t, db, "test_pg_fk_parent")
-		})
-
-		parentID, err := adapter.InsertRow(ctx, "test_pg_fk_parent", map[string]any{"name": "Parent"}, "id")
-		if err != nil {
-			t.Fatalf("InsertRow parent: %v", err)
-		}
-
-		_, err = adapter.InsertRow(ctx, "test_pg_fk_child", map[string]any{"parent_id": parentID}, "id")
-		if err != nil {
-			t.Fatalf("InsertRow child: %v", err)
-		}
-
-		err = adapter.DeleteRow(ctx, "test_pg_fk_parent", "id", parentID)
-		if err == nil {
-			t.Fatal("expected FK error, got nil")
-		}
-
-		if !errors.Is(err, domain.ErrForeignKeyConflict) {
-			t.Errorf("expected ErrForeignKeyConflict, got: %v", err)
 		}
 	})
 }

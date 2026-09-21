@@ -114,9 +114,6 @@ func TestForgetEntityAction(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if len(db.deletedRows) != 0 {
-			t.Errorf("expected no row deletions, got %+v", db.deletedRows)
-		}
 	})
 
 	t.Run("it refuses when a tracked row is still in the database", func(t *testing.T) {
@@ -154,9 +151,6 @@ func TestForgetEntityAction(t *testing.T) {
 		}
 		if db.isTracked("a.yaml") {
 			t.Error("expected the tracking removed")
-		}
-		if len(db.deletedRows) != 0 {
-			t.Error("expected --force to forget the tracking, not delete the row")
 		}
 	})
 

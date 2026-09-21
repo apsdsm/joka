@@ -278,23 +278,6 @@ func (p *PostgresDBAdapter) EnsureContentHashColumn(ctx context.Context) error {
 	return err
 }
 
-// DeleteRow deletes a single row from the given table by primary key. Returns
-// ErrForeignKeyConflict if a FK constraint blocks the deletion.
-func (p *PostgresDBAdapter) DeleteRow(ctx context.Context, table, pkColumn string, pkValue int64) error {
-	_, err := p.db.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM "%s" WHERE "%s" = $1`, table, pkColumn),
-		pkValue,
-	)
-	if err != nil {
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23503" {
-			return fmt.Errorf("%w: table %s, %s=%d: %s", domain.ErrForeignKeyConflict, table, pkColumn, pkValue, pqErr.Message)
-		}
-		return fmt.Errorf("deleting from %s: %w", table, err)
-	}
-	return nil
-}
-
 // TableExists reports whether the named table is present in the current schema.
 func (p *PostgresDBAdapter) TableExists(ctx context.Context, table string) (bool, error) {
 	return jokadb.TableExists(ctx, p.conn, table)

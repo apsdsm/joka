@@ -15,7 +15,6 @@ type mockDBAdapter struct {
 	insertedRows  []mockInsertCall
 	nextID        int64
 	lookupData    map[string]any // keyed by "table.returnCol.whereCol=whereVal"
-	deletedRows   []mockDeleteCall
 	updatedRows   []mockUpdateCall
 	currentRows   map[string]map[string]any // key: "table|pkValue" -> column values
 	missingTables map[string]bool           // tables the mock reports as dropped
@@ -35,12 +34,6 @@ type mockDBAdapter struct {
 type mockInsertCall struct {
 	Table   string
 	Columns map[string]any
-}
-
-type mockDeleteCall struct {
-	Table    string
-	PKColumn string
-	PKValue  int64
 }
 
 // mockUpdateCall records the arguments passed to UpdateRow.
@@ -113,11 +106,6 @@ func (m *mockDBAdapter) isTracked(path string) bool {
 
 // trackedRows is every row the mock tracks, in a stable order.
 func (m *mockDBAdapter) trackedRows() []domain.TrackedRow { return m.state.AllRows() }
-
-func (m *mockDBAdapter) DeleteRow(_ context.Context, table, pkColumn string, pkValue int64) error {
-	m.deletedRows = append(m.deletedRows, mockDeleteCall{Table: table, PKColumn: pkColumn, PKValue: pkValue})
-	return nil
-}
 
 // TableExists reports every table as present unless the test marks it missing.
 func (m *mockDBAdapter) TableExists(_ context.Context, table string) (bool, error) {

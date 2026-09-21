@@ -28,11 +28,6 @@ type DBAdapter interface {
 	// field-level changes to [modified] files without deleting the row.
 	UpdateRow(ctx context.Context, table, pkColumn string, pkValue int64, columns map[string]any) error
 
-	// DeleteRow deletes a single row from the given table by primary key.
-	// Returns an error wrapping ErrForeignKeyConflict if a FK constraint
-	// blocks the deletion.
-	DeleteRow(ctx context.Context, table, pkColumn string, pkValue int64) error
-
 	// GetRow reads the given columns from a single row, matched by
 	// pkColumn = pkValue, and returns them as a column→value map. Used by the
 	// sync preview to show the "before" side of an update. Byte-slice values

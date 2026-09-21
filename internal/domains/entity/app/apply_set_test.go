@@ -114,9 +114,6 @@ func TestApplySetAddingAnEntityIsOneInsert(t *testing.T) {
 	if len(result.Updated) != 0 {
 		t.Errorf("expected the unchanged rows left alone, got %+v", result.Updated)
 	}
-	if len(db.deletedRows) != 0 {
-		t.Errorf("expected nothing deleted, got %+v", db.deletedRows)
-	}
 
 	// The row that shifted keeps its primary key, so anything referencing it
 	// stays valid.
@@ -237,9 +234,6 @@ func TestApplySetReportsUndeclaredWithoutDeleting(t *testing.T) {
 		t.Fatalf("expected beta reported undeclared, got %+v", result.Undeclared)
 	}
 	// A seed file edited by mistake must not take data with it.
-	if len(db.deletedRows) != 0 {
-		t.Errorf("expected nothing deleted, got %+v", db.deletedRows)
-	}
 	if _, stillTracked := trackedByRef(db)["beta"]; !stillTracked {
 		t.Error("expected beta's tracking left in place for a human to decide about")
 	}

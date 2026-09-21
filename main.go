@@ -10,7 +10,6 @@ import (
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/shared"
-	"github.com/apsdsm/joka/cmd/status"
 	"github.com/apsdsm/joka/cmd/template"
 	"github.com/apsdsm/joka/config"
 	jokadb "github.com/apsdsm/joka/db"
@@ -207,40 +206,6 @@ func main() {
 			}.Execute(c.Context())
 		},
 	}
-
-	var statusCompact bool
-
-	statusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Report what the devops folder declares, what joka tracks, and what the database contains",
-		RunE: func(c *cobra.Command, _ []string) error {
-			if statusCompact && outputFormat == shared.OutputJSON {
-				return fmt.Errorf("--compact applies to text output; --output json already returns the whole report")
-			}
-
-			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
-			for i, t := range cfg.Tables {
-				tables[i] = templateinfra.TableConfig{
-					Name:     t.Name,
-					Strategy: t.Strategy,
-				}
-			}
-
-			return status.RunStatusCommand{
-				DB:            dbConn,
-				Profile:       profile,
-				MigrationsDir: migrationsDir,
-				TemplatesDir:  templatesDir,
-				EntitiesDir:   entitiesDir,
-				Tables:        tables,
-				StateFile:     stateFile,
-				Compact:       statusCompact,
-				OutputFormat:  outputFormat,
-			}.Execute(c.Context())
-		},
-	}
-
-	statusCmd.Flags().BoolVar(&statusCompact, "compact", false, "Print the report as a single line")
 
 	migrateCmd := &cobra.Command{
 		Use:   "migrate",
@@ -441,18 +406,6 @@ Use --dry-run to print the plan without applying anything.`,
 	entitySyncCmd.Flags().Bool("decayed", false,
 		"Treat the seeded data in the database as stale: rewrite every declared column, and report no conflicts")
 
-	entityStatusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show entity file sync status",
-		RunE: func(c *cobra.Command, _ []string) error {
-			return entity.RunEntityStatusCommand{
-				DB:           dbConn,
-				EntitiesDir:  entitiesDir,
-				OutputFormat: outputFormat,
-			}.Execute(c.Context())
-		},
-	}
-
 	var diffNoValues bool
 
 	entityDiffCmd := &cobra.Command{
@@ -513,51 +466,6 @@ Use --dry-run to print the plan without applying anything.`,
 	entityForgetCmd.Flags().BoolVar(&forgetOrphans, "orphans", false, "Forget every tracked entity file that is no longer on disk")
 	entityForgetCmd.Flags().BoolVar(&forgetForce, "force", false, "Forget the tracking even for rows that are still in the database")
 
-	entityReimportCmd := &cobra.Command{
-		Use:         "reimport [file]",
-		Short:       "Re-sync an entity file (delete old rows, re-insert)",
-		Args:        cobra.ExactArgs(1),
-		Annotations: mutates,
-		RunE: func(c *cobra.Command, args []string) error {
-			prune, _ := c.Flags().GetBool("prune")
-			return entity.RunEntityReimportCommand{
-				DB:           dbConn,
-				Prune:        prune,
-				Secrets:      secrets.New(cfg.Secrets),
-				EntitiesDir:  entitiesDir,
-				FilePath:     args[0],
-				AutoConfirm:  autoConfirm,
-				OutputFormat: outputFormat,
-				Profile:      profile,
-				StateFile:    stateFile,
-				JokaVersion:  version,
-			}.Execute(c.Context())
-		},
-	}
-
-	entityReimportCmd.Flags().Bool("prune", false,
-		"Also delete tracked rows the file no longer declares")
-
-	entityUpdateCmd := &cobra.Command{
-		Use:         "update [file]",
-		Short:       "Add new entities from a file without deleting existing rows",
-		Args:        cobra.ExactArgs(1),
-		Annotations: mutates,
-		RunE: func(c *cobra.Command, args []string) error {
-			return entity.RunEntityUpdateCommand{
-				DB:           dbConn,
-				Secrets:      secrets.New(cfg.Secrets),
-				EntitiesDir:  entitiesDir,
-				FilePath:     args[0],
-				AutoConfirm:  autoConfirm,
-				OutputFormat: outputFormat,
-				Profile:      profile,
-				StateFile:    stateFile,
-				JokaVersion:  version,
-			}.Execute(c.Context())
-		},
-	}
-
 	dropCmd := &cobra.Command{
 		Use:         "drop",
 		Short:       "Drop every table in the database (including joka_* tracking)",
@@ -603,7 +511,7 @@ Use --dry-run to print the plan without applying anything.`,
 
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
 	dataCmd.AddCommand(dataSyncCmd)
-	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityDiffCmd, entityReimportCmd, entityUpdateCmd, entityForgetCmd)
+	entityCmd.AddCommand(entitySyncCmd, entityDiffCmd, entityForgetCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
@@ -616,7 +524,7 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 
-	root.AddCommand(initCmd, makeCmd, statusCmd, migrateCmd, dataCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		if outputFormat == shared.OutputJSON {
