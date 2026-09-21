@@ -31,8 +31,19 @@ const version = "0.14.0"
 // command knows whether to stamp joka_meta. Read-only commands must not.
 const annotationMutates = "joka:mutates"
 
+// annotationWipes marks a command that destroys the tracking rather than
+// reading it. Such a command still writes, so it stamps — but it must not be
+// gated on an upgrade of bookkeeping it is about to delete.
+//
+// Without this, a database whose upgrade is blocked has no way out: every
+// command that could clear the blockage is itself blocked by it.
+const annotationWipes = "joka:wipes"
+
 // mutates is the annotation map for a command that writes.
 var mutates = map[string]string{annotationMutates: "true"}
+
+// wipes is the annotation map for a command that destroys the tracking.
+var wipes = map[string]string{annotationMutates: "true", annotationWipes: "true"}
 
 func main() {
 	var (
@@ -50,8 +61,14 @@ func main() {
 	)
 
 	root := &cobra.Command{
-		Use:   "joka",
-		Short: "Database migration management tool",
+		Use: "joka",
+		// A failed command prints its error once, and prints no flags. Cobra's
+		// own handling did both wrong: it dumped a screen of flags after every
+		// error, burying the message that named what to do next, and it printed
+		// the error itself on top of main's own handling below.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Database migration management tool",
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
 			if err := shared.ValidateOutputFlag(outputFormat); err != nil {
 				return err
@@ -114,7 +131,7 @@ func main() {
 			// only for commands that write. A
 			// read-only command must leave a bare database bare — that is what
 			// makes a missing tracking table reportable.
-			if c.Annotations[annotationMutates] == "true" {
+			if c.Annotations[annotationMutates] == "true" && c.Annotations[annotationWipes] != "true" {
 				applied, err := upgrade.Run(c.Context(), dbConn, version)
 				if err != nil {
 					return err
@@ -507,7 +524,7 @@ Use --dry-run to print the plan without applying anything.`,
 	dropCmd := &cobra.Command{
 		Use:         "drop",
 		Short:       "Drop every table in the database (including joka_* tracking)",
-		Annotations: mutates,
+		Annotations: wipes,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return dbtools.RunDropCommand{
 				DB:           dbConn,
@@ -520,7 +537,7 @@ Use --dry-run to print the plan without applying anything.`,
 	resetCmd := &cobra.Command{
 		Use:         "reset",
 		Short:       "Drop everything and re-run init, migrations, data sync, entity sync",
-		Annotations: mutates,
+		Annotations: wipes,
 		RunE: func(c *cobra.Command, _ []string) error {
 			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
 			for i, t := range cfg.Tables {

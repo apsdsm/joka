@@ -46,13 +46,16 @@ type EntityFile struct {
 // TrackedRow records a single row inserted during entity sync so it can be
 // deleted later during reimport. InsertionOrder determines deletion order
 // (highest first = children before parents).
+// The json tags are here because State.Unkeyed is serialised into the state
+// document, and Go field names beside EntityState's lowercase ones would have
+// made one document with two spellings.
 type TrackedRow struct {
-	EntityFile     string
-	TableName      string
-	RowPK          int64
-	PKColumn       string
-	RefID          string
-	InsertionOrder int
+	EntityFile     string `json:"file"`
+	TableName      string `json:"table"`
+	RowPK          int64  `json:"pk_value"`
+	PKColumn       string `json:"pk_column"`
+	RefID          string `json:"ref_id,omitempty"`
+	InsertionOrder int    `json:"order"`
 }
 
 // FileStatus represents the sync state of an entity file.

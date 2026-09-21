@@ -466,6 +466,11 @@ was absorbed by sniffing — checking for a column, tolerating an empty value �
 joka is the *newer* of the two. The case sniffing cannot cover is an older joka reading a database a
 newer joka already wrote: it has no way to know the format moved. `Check` makes that refusable.
 
+- **A blocker must not block its own remedy.** Version 2 refused a database whose tracked rows had no
+`_id` and told the reader to run `entity reimport` or `entity forget`; both are mutating commands, so
+the same refusal stopped them, and `drop` and `reset` with them. Before adding a blocker, check that
+something can still be run to clear it.
+
 - **Bump `TrackingVersion`** when the meaning or shape of the tracking tables changes in a way an
   older joka would read wrongly — not for additive changes it ignores harmlessly. Every bump needs a
   line in the constant's doc comment saying what moved.
@@ -590,10 +595,18 @@ rather than writing a row the document cannot key.
 `joka_state`, keyed `entities`, holding the `domain.State` JSON. `joka_entities` and
 `joka_entity_rows` are read into it and dropped.
 
-It carries the same blockers as version 2, for a different reason: the document is a map keyed on
-`_id`, so a row with no `_id` and an `_id` claimed twice are both unrepresentable rather than merely
-ambiguous. In practice version 2 has already cleared them — steps run in order and `Run` stops at
-the first blocked one — so the checks are there to be honest rather than because they fire.
+It blocks on **one** thing: an `_id` claimed by more than one tracked row. The document is a map
+keyed on `_id`, so two rows under one key is not a hard case, it is an impossible one.
+
+A row with **no** `_id` is deliberately not a blocker, and version 2 no longer blocks on one either.
+It used to, and the refusal named `entity reimport` and `entity forget` as the remedy — both of which
+the same refusal blocked, along with `drop` and `reset`. A database in that state had no joka command
+that could move it; tic_main was found in exactly that state. Those rows go into the document's
+`Unkeyed`, where `joka status` reports them and `entity forget` clears them.
+
+**`drop` and `reset` are not gated on the upgrade at all** (`joka:wipes`). They destroy the tracking,
+so upgrading it first is meaningless, and being unable to reset a database because its bookkeeping
+needs attention is the wrong way round.
 
 The step is idempotent by construction: the backend's `Load` prefers the document, so a retry after
 a partial run reads what was already written rather than the tables it is in the middle of replacing.

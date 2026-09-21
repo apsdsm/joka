@@ -36,6 +36,8 @@ type Step struct {
 	// Describe says what the step does, for the line printed when it runs.
 	Describe string
 	// Blockers reports what stands in the way, empty when the step can run.
+	// Nil when nothing can stand in the way — a step that only removes a
+	// constraint, or does nothing at all, cannot be refused by the data.
 	Blockers func(ctx context.Context, db *sql.DB) ([]string, error)
 	// Apply performs the change. It must be idempotent.
 	Apply func(ctx context.Context, db *sql.DB) error
@@ -45,22 +47,28 @@ type Step struct {
 var Steps = []Step{
 	{
 		To:       2,
-		Describe: "make _id the identity of a tracked row (unique index on joka_entity_rows.ref_id)",
-		Blockers: refIDBlockers,
-		Apply: func(ctx context.Context, db *sql.DB) error {
-			exists, err := jokadb.TableExists(ctx, db, "joka_entity_rows")
-			if err != nil || !exists {
-				// Nothing has been synced here; the table will be created with
-				// the index when something is.
-				return err
-			}
-			return infra.NewPostgresDBAdapter(db).EnsureRefIDIndex(ctx)
+		Describe: "make _id the identity of a tracked row",
+		Apply: func(context.Context, *sql.DB) error {
+			// Nothing. This step added a unique index to joka_entity_rows, and
+			// version 3 drops that table — a database going 1 → 3 would create
+			// the index and delete it in the same run.
+			//
+			// It is a no-op rather than deleted, because removing a step
+			// renumbers history and the version marker exists to stop exactly
+			// that. Its blockers are gone too, and that is the point: they
+			// refused a database with rows that had no _id, and named
+			// `entity reimport` and `entity forget` as the remedy — both of
+			// which the same refusal blocked, along with `drop` and `reset`.
+			// A database in that state had no joka command that could move it.
+			// Version 3 carries those rows into the document's Unkeyed instead,
+			// where `joka status` reports them and `entity forget` clears them.
+			return nil
 		},
 	},
 	{
 		To:       3,
 		Describe: "move entity tracking into one joka_state document",
-		Blockers: refIDBlockers,
+		Blockers: ambiguousIDBlockers,
 		Apply:    migrateEntityStateToDocument,
 	},
 }
@@ -113,13 +121,15 @@ func Run(ctx context.Context, db *sql.DB, jokaVersion string) ([]Step, error) {
 			continue
 		}
 
-		blockers, err := step.Blockers(ctx, db)
-		if err != nil {
-			return applied, err
-		}
-		if len(blockers) > 0 {
-			return applied, fmt.Errorf("%w: cannot %s\n  %s",
-				ErrBlocked, step.Describe, strings.Join(blockers, "\n  "))
+		if step.Blockers != nil {
+			blockers, err := step.Blockers(ctx, db)
+			if err != nil {
+				return applied, err
+			}
+			if len(blockers) > 0 {
+				return applied, fmt.Errorf("%w: cannot %s\n  %s",
+					ErrBlocked, step.Describe, strings.Join(blockers, "\n  "))
+			}
 		}
 
 		if err := step.Apply(ctx, db); err != nil {
@@ -142,38 +152,28 @@ func Run(ctx context.Context, db *sql.DB, jokaVersion string) ([]Step, error) {
 // shape of the problem without a screen of it.
 const maxReported = 10
 
-// refIDBlockers reports what stops ref_id becoming unique and required: rows
-// tracked before _id was recorded, and _ids claimed by more than one row.
+// ambiguousIDBlockers reports the one thing the state document genuinely cannot
+// represent: an _id claimed by more than one tracked row. The document is a map
+// keyed on _id, so two rows under one key is not a hard case, it is an
+// impossible one.
 //
-// The duplicate case is real rather than theoretical: two entity sets seeded
-// into one database (a dev1/ tree and a local/ tree of the same seeds) both
-// claim the same _ids, which version 1 allowed because it keyed on the file.
-func refIDBlockers(ctx context.Context, db *sql.DB) ([]string, error) {
+// It is real rather than theoretical: two entity sets seeded into one database
+// (a dev1/ tree and a local/ tree of the same seeds) both claim the same _ids,
+// which version 1 allowed because it keyed on the file.
+//
+// A row with *no* _id is deliberately not a blocker. It used to be, and the
+// refusal named `entity reimport` and `entity forget` as the remedy — both of
+// which the same refusal blocked, along with `drop` and `reset`. A database in
+// that state had no joka command that could move it. Those rows are carried
+// into the document's Unkeyed instead, where `joka status` reports them and
+// `entity forget` clears them.
+func ambiguousIDBlockers(ctx context.Context, db *sql.DB) ([]string, error) {
 	exists, err := jokadb.TableExists(ctx, db, "joka_entity_rows")
 	if err != nil || !exists {
 		return nil, err
 	}
 
 	var blockers []string
-
-	empty, err := countRows(ctx, db,
-		`SELECT count(*) FROM joka_entity_rows WHERE ref_id IS NULL OR ref_id = ''`)
-	if err != nil {
-		return nil, err
-	}
-	if empty > 0 {
-		files, err := listStrings(ctx, db, `
-			SELECT DISTINCT entity_file FROM joka_entity_rows
-			WHERE ref_id IS NULL OR ref_id = ''
-			ORDER BY entity_file LIMIT $1`, maxReported)
-		if err != nil {
-			return nil, err
-		}
-		blockers = append(blockers, fmt.Sprintf(
-			"%s no _id, from: %s — synced before joka recorded one. "+
-				"Re-sync with 'joka entity reimport <file>', or drop their tracking with "+
-				"'joka entity forget <file>'", trackedRows(empty), strings.Join(files, ", ")))
-	}
 
 	dupes, err := listStrings(ctx, db, `
 		SELECT ref_id || ' (' || count(*) || ' rows, in ' || string_agg(DISTINCT entity_file, ' and ') || ')'
@@ -194,14 +194,6 @@ func refIDBlockers(ctx context.Context, db *sql.DB) ([]string, error) {
 	return blockers, nil
 }
 
-func countRows(ctx context.Context, db *sql.DB, query string) (int, error) {
-	var n int
-	if err := db.QueryRowContext(ctx, query).Scan(&n); err != nil {
-		return 0, fmt.Errorf("checking tracked rows: %w", err)
-	}
-	return n, nil
-}
-
 func listStrings(ctx context.Context, db *sql.DB, query string, args ...any) ([]string, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -218,13 +210,4 @@ func listStrings(ctx context.Context, db *sql.DB, query string, args ...any) ([]
 		out = append(out, s)
 	}
 	return out, rows.Err()
-}
-
-// trackedRows renders a count of tracked rows with the right verb, so the
-// blocker reads as a sentence.
-func trackedRows(n int) string {
-	if n == 1 {
-		return "1 tracked row has"
-	}
-	return fmt.Sprintf("%d tracked rows have", n)
 }

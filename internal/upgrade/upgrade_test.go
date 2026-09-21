@@ -175,31 +175,37 @@ func TestRunOnADatabaseWithNoTrackingTable(t *testing.T) {
 	}
 }
 
-func TestRunBlocksOnRowsWithNoRefID(t *testing.T) {
+func TestRunCarriesRowsWithNoRefID(t *testing.T) {
+	// A row with no _id used to block the upgrade, and the refusal named
+	// `entity reimport` and `entity forget` as the remedy — both of which the
+	// same refusal blocked, along with `drop` and `reset`. A database in that
+	// state had no joka command that could move it, which is how tic_main's
+	// dev database was found stuck.
 	db := v1DB(t)
 	ctx := context.Background()
 
 	track(t, db, "a.yaml", "alpha", 1)
 	track(t, db, "old.yaml", "", 2)
 
-	_, err := upgrade.Run(ctx, db, jokaVersion)
-	if !errors.Is(err, upgrade.ErrBlocked) {
-		t.Fatalf("expected ErrBlocked, got %v", err)
-	}
-	for _, want := range []string{"1 tracked row has no _id", "old.yaml", "entity reimport"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("expected %q in:\n%s", want, err)
-		}
+	if _, err := upgrade.Run(ctx, db, jokaVersion); err != nil {
+		t.Fatalf("expected the upgrade to proceed, got %v", err)
 	}
 
-	// A blocked upgrade must change nothing, or a retry starts from a state
-	// nobody described.
-	if tableExists(t, db, "joka_state") {
-		t.Error("expected no state document after a blocked upgrade")
+	state, err := entityinfra.NewPostgresStateBackend(db).Load(ctx)
+	if err != nil {
+		t.Fatalf("loading the state: %v", err)
 	}
-	state, _ := meta.Read(ctx, db)
-	if state.Present {
-		t.Error("expected no version stamped after a blocked upgrade")
+
+	// The keyed row is identified; the unkeyed one is carried where
+	// `joka status` reports it and `entity forget` clears it, rather than lost.
+	if _, ok := state.Row("alpha"); !ok {
+		t.Error("expected alpha tracked")
+	}
+	if len(state.Unkeyed) != 1 || state.Unkeyed[0].RowPK != 2 {
+		t.Fatalf("expected the unkeyed row carried, got %+v", state.Unkeyed)
+	}
+	if state.Unkeyed[0].EntityFile != "old.yaml" {
+		t.Errorf("expected the file it came from kept, got %q", state.Unkeyed[0].EntityFile)
 	}
 }
 
