@@ -716,9 +716,19 @@ prints the note when it is not `agrees` or `untracked`.
 | `agrees` | normal |
 | `untracked` | nothing has written state here |
 | `no_file` | the database has been synced, but not from this directory |
+| `database_untracked` | the database holds no state and a file here describes one — `joka drop`, or a database rebuilt from scratch |
 | `database_behind` | restored from a dump, or rolled back — the tracking cannot see this, because it rolled back too |
 | `file_behind` | a sync ran elsewhere, or did not finish writing |
 | `different_database` | `DATABASE_URL` points somewhere unintended |
+
+**Only `different_database` refuses a write** (`StateAudit.BlocksWrite`), and only because two
+identities disagree. `database_untracked` must not: `joka drop` takes `joka_meta` with it, so a
+wiped database has no identity while the file beside the checkout still has one, and refusing on
+that made `joka drop` followed by `joka init` fail with nothing left to run. `joka reset` hid it,
+because its steps are internal calls that never reach the gate.
+
+A database with no state at all is not evidence of anything — it is a fresh one or a just-wiped one,
+and syncing into it is the ordinary first run.
 
 **Writing is after the commit and cannot fail the command.** A file cannot join a transaction. The
 database is already consistent; an unwritten file is a finding `joka status` reports, not a reason to

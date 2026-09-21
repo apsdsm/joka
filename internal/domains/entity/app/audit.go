@@ -21,6 +21,17 @@ const (
 	// AuditUntracked: the database has never had state written to it, so there
 	// is nothing for a file to describe.
 	AuditUntracked StateAudit = "untracked"
+	// AuditDatabaseUntracked: the database holds no state, and a file here
+	// describes one. `joka drop` leaves exactly this — it takes joka_meta with
+	// it — and so does a database rebuilt from scratch beside a checkout that
+	// synced the old one.
+	//
+	// It is reported and not refused. A database with no state at all is not
+	// evidence of anything: it is a fresh one or a just-wiped one, and syncing
+	// into it is the ordinary first run. Treating it as a substitution made
+	// `joka drop` followed by `joka init` refuse, which left no way to rebuild a
+	// database by hand.
+	AuditDatabaseUntracked StateAudit = "database_untracked"
 	// AuditDatabaseBehind: same database, lower version than the file records.
 	// It was restored from a dump, or rolled back. joka's own tracking cannot
 	// see this, because it rolled back too.
@@ -43,7 +54,7 @@ func AuditState(hasFile bool, fileIdentity string, fileVersion int, dbIdentity s
 	// a file to be right or wrong about.
 	if dbIdentity == "" && dbVersion == 0 {
 		if hasFile {
-			return AuditDifferentDatabase
+			return AuditDatabaseUntracked
 		}
 		return AuditUntracked
 	}
@@ -79,6 +90,9 @@ func (a StateAudit) Describe() string {
 		return "the database is behind the state file — it was restored from a dump, or rolled back"
 	case AuditFileBehind:
 		return "the state file is behind the database — a sync ran from somewhere else, or did not finish writing"
+	case AuditDatabaseUntracked:
+		return "this database holds no joka state, and the state file here describes one — " +
+			"it was dropped, or this is a different database"
 	case AuditDifferentDatabase:
 		return "the state file describes a different database"
 	}
@@ -104,6 +118,14 @@ func (a StateAudit) NeedsAttention() bool {
 // means the file describes a database this is not, and that is worth stopping
 // for — adoption claims the rows it finds rather than colliding with them, so
 // the wrong database no longer announces itself with a duplicate key.
+//
+// The cases that must not block are the point:
+//
+//	different_database  refuse  two identities that disagree
+//	database_untracked  report  `joka drop`, or a database rebuilt from scratch
+//	database_behind     report  a restore; the merge heals it on the next sync
+//	file_behind         report  the database is ahead, and it is what joka loads
+//	no_file             report  synced from somewhere else
 func (a StateAudit) BlocksWrite() bool {
 	return a == AuditDifferentDatabase
 }
