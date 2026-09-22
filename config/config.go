@@ -4,14 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/apsdsm/joka/internal/domains/template/domain"
 	"gopkg.in/yaml.v3"
 )
-
-type TableConfig struct {
-	Name     string              `yaml:"name"`
-	Strategy domain.StrategyType `yaml:"strategy"`
-}
 
 // Secret describes where to pull secrets from: either connection secrets when
 // a Connection's source is a secret provider (e.g. aws_secrets_manager), or a
@@ -55,26 +49,20 @@ type Connection struct {
 // Profile overlays the base config. Set (non-nil) fields override the base;
 // unset fields inherit it.
 type Profile struct {
-	Migrations        *string           `yaml:"migrations"`
-	Templates         *string           `yaml:"templates"`
-	Entities          *string           `yaml:"entities"`
-	StateFile         *string           `yaml:"statefile"`
-	Tables            []TableConfig     `yaml:"tables"`
-	IgnoreForeignKeys *bool             `yaml:"ignore_foreign_keys"`
-	Connection        *Connection       `yaml:"connection"`
-	Secrets           map[string]Secret `yaml:"secrets"`
+	Migrations *string           `yaml:"migrations"`
+	Entities   *string           `yaml:"entities"`
+	StateFile  *string           `yaml:"statefile"`
+	Connection *Connection       `yaml:"connection"`
+	Secrets    map[string]Secret `yaml:"secrets"`
 }
 
 type Config struct {
-	Migrations        string             `yaml:"migrations"`
-	Templates         string             `yaml:"templates"`
-	Entities          string             `yaml:"entities"`
-	StateFile         string             `yaml:"statefile"`
-	Tables            []TableConfig      `yaml:"tables"`
-	IgnoreForeignKeys bool               `yaml:"ignore_foreign_keys"`
-	Connection        *Connection        `yaml:"connection"`
-	Secrets           map[string]Secret  `yaml:"secrets"`
-	Profiles          map[string]Profile `yaml:"profiles"`
+	Migrations string             `yaml:"migrations"`
+	Entities   string             `yaml:"entities"`
+	StateFile  string             `yaml:"statefile"`
+	Connection *Connection        `yaml:"connection"`
+	Secrets    map[string]Secret  `yaml:"secrets"`
+	Profiles   map[string]Profile `yaml:"profiles"`
 }
 
 // Load reads .jokarc.yaml from the current working directory. If the file does
@@ -119,20 +107,11 @@ func applyProfile(base *Config, p Profile) *Config {
 	if p.Migrations != nil {
 		merged.Migrations = *p.Migrations
 	}
-	if p.Templates != nil {
-		merged.Templates = *p.Templates
-	}
 	if p.Entities != nil {
 		merged.Entities = *p.Entities
 	}
 	if p.StateFile != nil {
 		merged.StateFile = *p.StateFile
-	}
-	if p.Tables != nil {
-		merged.Tables = p.Tables
-	}
-	if p.IgnoreForeignKeys != nil {
-		merged.IgnoreForeignKeys = *p.IgnoreForeignKeys
 	}
 	if p.Connection != nil {
 		merged.Connection = p.Connection

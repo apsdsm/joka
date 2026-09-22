@@ -27,7 +27,6 @@ go run . migrate status
 go run . migrate snapshot
 go run . migrate verify
 go run . migrate consolidate --up-to 250116140000
-go run . data sync
 go run . entity sync
 go run . entity diff admin_user.yaml
 go run . entity forget admin_user.yaml
@@ -58,7 +57,6 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 
 - **`migration/`** — Migration lifecycle: create files, track applied migrations, apply pending ones, capture schema snapshots.
 - **`lock/`** — DB-backed advisory locking via `joka_lock` table. Prevents concurrent mutating operations.
-- **`template/`** — Syncs seed/reference data from YAML/CSV files to database tables.
 - **`entity/`** — Syncs entity graphs (parent-child seed data) from YAML files with reference resolution.
 
 ### Layer pattern (within each domain)
@@ -91,9 +89,9 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 - **Profiles**: `.jokarc.yaml` may define a `profiles:` map; `--profile <name>` overlays a profile
   (migrations/entities/connection) onto the base config. No `--profile` uses the base.
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
-- **CLI flags**: `--env` for .env path, `--profile`/`-p` for the config profile, `--migrations` for migrations dir, `--templates` for templates dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
+- **CLI flags**: `--env` for .env path, `--profile`/`-p` for the config profile, `--migrations` for migrations dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
 - **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
-- **Advisory locking**: `migrate up`, `data sync`, `entity sync`, `entity forget`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
+- **Advisory locking**: `migrate up`, `entity sync`, `entity forget`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
 
@@ -172,41 +170,11 @@ Note: the PostgreSQL reconstruction format changed in v0.13.0. Snapshots capture
 ## Wipe and reseed
 
 - **`joka drop`** — drops every table in the current database/schema, including all `joka_*` tracking tables. Confirms unless `--auto`. Uses `DROP TABLE ... CASCADE`.
-- **`joka reset`** — wipe-and-reseed pipeline: runs `drop`, then `init`, `migrate up`, `data sync`, `entity sync` in sequence. Acquires one outer advisory lock for the whole flow and confirms once.
-
-## Templates
-
-The `joka data sync` command syncs template/seed data from files to database tables.
-
-**Directory structure** (`devops/templates/` by default):
-```
-devops/templates/
-├── _config.yaml          # Defines tables and sync strategies
-├── email_templates/      # Directory per table
-│   ├── welcome.yaml      # YAML = single row
-│   └── reminder.yaml
-└── settings/
-    └── defaults.csv      # CSV = multiple rows
-```
-
-**_config.yaml format**:
-```yaml
-name: app_data
-tables:
-  - name: email_templates
-    strategy: truncate      # truncate | update | delete
-  - name: settings
-    strategy: truncate
-```
-
-**Strategies**:
-- `truncate` - Delete all rows, then insert from files (implemented)
-- `update` - Upsert/merge with existing data (not yet implemented)
-- `delete` - (not yet implemented)
+- **`joka reset`** — wipe-and-reseed pipeline: runs `drop`, then `init`, `migrate up`, `entity sync` in sequence. Acquires one outer advisory lock for the whole flow and confirms once.
 
 ## Entities
 
-The `joka entity sync` command syncs entity graphs from YAML files to database tables. Unlike templates, entities support parent-child relationships and cross-row references.
+The `joka entity sync` command syncs entity graphs from YAML files to database tables. Entities support parent-child relationships and cross-row references, and every seeded row joka owns goes through them — it is the only seeding path.
 
 **Directory structure** (`devops/entities/` by default):
 ```
@@ -430,6 +398,22 @@ around something sync could not do, and sync does all of it now.
 | `entity status` | Reported per-file `synced`/`modified` from the content hash, which no longer decides what a sync does. `entity sync --dry-run` answers the question it was being asked. `EntityStatusAction` survives for `entity forget --orphans`. |
 | `entity reimport` | Existed for the structural changes sync used to refuse. `--decayed` rewrites every column, `Recreate` puts back a deleted row, and identity matching handles renames and moves. |
 | `joka status` | Visibility work from the same commit as `entity diff` and `entity forget`, done to find a way around a sync that could not be trusted. The per-domain commands it aggregated are all still there. |
+| `joka data sync` | The template domain, and with it `--templates`, the `templates:`/`tables:`/`ignore_foreign_keys` config keys and reset's fourth step. See below. |
+
+**Templates are gone.** `joka data sync` seeded whole tables from CSV/YAML under a `truncate`
+strategy — delete every row, insert from files — with `update` and `delete` declared in the config
+schema and never implemented. It was removed after a count: across every project on the machine
+exactly one `.jokarc.yaml` had ever declared `tables:`, in an archived service, and the only template
+file in existence was a six-line CSV holding five industry types.
+
+Folding it into entities was considered and rejected, because there was nothing bulk to fold: five
+rows are five ordinary entities, and as entities they gain baselines, conflict detection and
+`entity diff`, none of which templates ever had. The one thing that did not survive is `truncate`
+semantics — "this file is the complete contents of the table, delete anything else". Entity sync
+never deletes, and since `reimport` went joka has no way to delete a seeded row at all, so folding
+templates in properly would have meant reintroducing deletion rather than removing a domain.
+
+`{{ lookup|… }}` is unaffected: it queries any table regardless of what seeded it.
 
 **joka can no longer delete a seeded row.** `reimport --prune` was the only thing that did, and
 `DBAdapter.DeleteRow` went with it. Sync reports an undeclared entity and leaves the row alone;

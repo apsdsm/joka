@@ -10,14 +10,12 @@ import (
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/shared"
-	"github.com/apsdsm/joka/cmd/template"
 	"github.com/apsdsm/joka/config"
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/connection"
 	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
-	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/apsdsm/joka/internal/meta"
 	"github.com/apsdsm/joka/internal/secrets"
 	"github.com/apsdsm/joka/internal/upgrade"
@@ -51,7 +49,6 @@ func main() {
 		envFile       string
 		profile       string
 		migrationsDir string
-		templatesDir  string
 		entitiesDir   string
 		stateFile     string
 		autoConfirm   bool
@@ -83,9 +80,6 @@ func main() {
 
 			if !c.Flags().Changed("migrations") && cfg.Migrations != "" {
 				migrationsDir = cfg.Migrations
-			}
-			if !c.Flags().Changed("templates") && cfg.Templates != "" {
-				templatesDir = cfg.Templates
 			}
 			if !c.Flags().Changed("entities") && cfg.Entities != "" {
 				entitiesDir = cfg.Entities
@@ -179,7 +173,6 @@ func main() {
 	root.PersistentFlags().StringVarP(&envFile, "env", "e", ".env", "Path to the environment file")
 	root.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Config profile to use (from .jokarc.yaml profiles)")
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
-	root.PersistentFlags().StringVarP(&templatesDir, "templates", "t", "devops/templates", "Path to the templates directory")
 	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")
 	root.PersistentFlags().StringVar(&stateFile, "statefile", "", "Path to the state file (default: joka[.<profile>].state.json beside the working directory)")
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
@@ -237,45 +230,6 @@ func main() {
 			}.Execute(c.Context())
 		},
 	}
-
-	dataCmd := &cobra.Command{
-		Use:   "data",
-		Short: "Application data state commands",
-	}
-
-	var ignoreForeignKeys bool
-
-	dataSyncCmd := &cobra.Command{
-		Use:         "sync",
-		Short:       "Sync template data to the database",
-		Annotations: mutates,
-		RunE: func(c *cobra.Command, _ []string) error {
-			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
-			for i, t := range cfg.Tables {
-				tables[i] = templateinfra.TableConfig{
-					Name:     t.Name,
-					Strategy: t.Strategy,
-				}
-			}
-
-			// CLI flag overrides config; config is the default.
-			ignoreFK := cfg.IgnoreForeignKeys
-			if c.Flags().Changed("ignore-foreign-keys") {
-				ignoreFK = ignoreForeignKeys
-			}
-
-			return template.RunDataSyncCommand{
-				DB:                dbConn,
-				TemplatesDir:      templatesDir,
-				Tables:            tables,
-				AutoConfirm:       autoConfirm,
-				IgnoreForeignKeys: ignoreFK,
-				OutputFormat:      outputFormat,
-			}.Execute(c.Context())
-		},
-	}
-
-	dataSyncCmd.Flags().BoolVar(&ignoreForeignKeys, "ignore-foreign-keys", false, "Defer foreign key constraint checks during truncate")
 
 	unlockCmd := &cobra.Command{
 		Use:         "unlock",
@@ -481,36 +435,24 @@ Use --dry-run to print the plan without applying anything.`,
 
 	resetCmd := &cobra.Command{
 		Use:         "reset",
-		Short:       "Drop everything and re-run init, migrations, data sync, entity sync",
+		Short:       "Drop everything and re-run init, migrations and entity sync",
 		Annotations: wipes,
 		RunE: func(c *cobra.Command, _ []string) error {
-			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
-			for i, t := range cfg.Tables {
-				tables[i] = templateinfra.TableConfig{
-					Name:     t.Name,
-					Strategy: t.Strategy,
-				}
-			}
-
 			return dbtools.RunResetCommand{
-				DB:                dbConn,
-				Secrets:           secrets.New(cfg.Secrets),
-				MigrationsDir:     migrationsDir,
-				TemplatesDir:      templatesDir,
-				EntitiesDir:       entitiesDir,
-				Tables:            tables,
-				IgnoreForeignKeys: cfg.IgnoreForeignKeys,
-				AutoConfirm:       autoConfirm,
-				OutputFormat:      outputFormat,
-				Profile:           profile,
-				StateFile:         stateFile,
-				JokaVersion:       version,
+				DB:            dbConn,
+				Secrets:       secrets.New(cfg.Secrets),
+				MigrationsDir: migrationsDir,
+				EntitiesDir:   entitiesDir,
+				AutoConfirm:   autoConfirm,
+				OutputFormat:  outputFormat,
+				Profile:       profile,
+				StateFile:     stateFile,
+				JokaVersion:   version,
 			}.Execute(c.Context())
 		},
 	}
 
 	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
-	dataCmd.AddCommand(dataSyncCmd)
 	entityCmd.AddCommand(entitySyncCmd, entityDiffCmd, entityForgetCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
@@ -524,7 +466,7 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 
-	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, makeCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		if outputFormat == shared.OutputJSON {

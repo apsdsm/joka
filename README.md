@@ -34,20 +34,14 @@ Instead of an env var you can declare the connection in `.jokarc.yaml` (see **Co
 
 ### Configuration File
 
-Create a `.jokarc.yaml` in your project root to configure paths and table sync settings:
+Create a `.jokarc.yaml` in your project root to configure paths:
 
 ```yaml
 migrations: devops/migrations
-templates: devops/templates
 entities: devops/entities
-tables:
-  - name: email_templates
-    strategy: truncate
-  - name: settings
-    strategy: truncate
 ```
 
-All fields are optional. CLI flags override `.jokarc.yaml` values. If neither is provided, defaults apply (`devops/migrations`, `devops/templates`, `devops/entities`).
+All fields are optional. CLI flags override `.jokarc.yaml` values. If neither is provided, defaults apply (`devops/migrations`, `devops/entities`).
 
 ### Connection
 
@@ -150,21 +144,6 @@ devops/migrations/
 ```
 
 Files are applied in order of their timestamp prefix. Each file can contain multiple SQL statements.
-
-### Template Files
-
-Seed/reference data lives in the templates directory (defaults to `devops/templates/`):
-
-```
-devops/templates/
-├── email_templates/
-│   ├── welcome.yaml
-│   └── reminder.yaml
-└── settings/
-    └── defaults.csv
-```
-
-YAML files represent single rows, CSV files represent multiple rows. Tables and their sync strategies are configured in `.jokarc.yaml`.
 
 ### Entity Files
 
@@ -349,13 +328,9 @@ All three files are replaced by `250201100000_consolidated.sql`.
 
 **Checks before anything is deleted.** The dump runs first; a missing binary, a version mismatch, or a dump that does not contain one `CREATE TABLE` per table in the database all abort before any file is written or removed.
 
-### `joka data sync`
-
-Syncs template/seed data from files to database tables based on the `tables` config in `.jokarc.yaml`. Currently supports the `truncate` strategy (delete all rows, then insert from files). Runs in a transaction with advisory locking.
-
 ### `joka entity sync`
 
-Syncs entity YAML files to the database. New files have their entity graph inserted depth-first (parents before children), resolving template expressions along the way. Files that changed since the last sync (`[modified]`) are reconciled **in place**: each entity is updated by primary key against the tracked row at the same depth-first position — existing PKs are preserved (no delete, so no FK conflict) and entities without an `_id` are handled fine. Unchanged files are skipped. Runs in a transaction with advisory locking.
+Syncs entity YAML files to the database, and is the only command that seeds data. Every declared entity is compared against the database whether or not its file changed: an entity joka does not track is claimed if a unique key finds its row and inserted otherwise, and a tracked one has each declared column compared against the file, the database, and what joka last applied. Existing primary keys are preserved, so external rows referencing them stay valid. Runs in a transaction with advisory locking.
 
 Adding, removing, reordering or moving an entity between files costs nothing: entities are matched to their rows by `_id` across the whole set. An `_id` tracked against one table and declared on another is refused, because the same `_id` on a different table is a different thing wearing the same name.
 
@@ -575,12 +550,10 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--env` | `-e` | `.env` | Path to the environment file |
 | `--profile` | `-p` | | Config profile to use (from `.jokarc.yaml` `profiles:`) |
 | `--migrations` | `-m` | `devops/migrations` | Path to the migrations directory |
-| `--templates` | `-t` | `devops/templates` | Path to the templates directory |
 | `--entities` | | `devops/entities` | Path to the entities directory |
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`; must be the last applied migration) |
-| `--ignore-foreign-keys` | | `false` | Defer FK constraint checks during data sync truncate |
 | `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`) |
 | `--statefile` | | | Path to the state file (default: `joka[.<profile>].state.json` beside the working directory) |
 | `--on-conflict` | | `fail` | What to do when the database changed since joka last wrote: `fail`, `file`, `db` or `ask` (`entity sync`). `db` and `ask` rewrite the seed files where the database wins |
@@ -591,7 +564,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 Joka uses four internal tables (all prefixed with `joka_`):
 
 - **`joka_migrations`** — Tracks which migrations have been applied and when.
-- **`joka_lock`** — Advisory lock table (at most one row). Prevents concurrent `migrate up`, `data sync`, or `entity sync` runs.
+- **`joka_lock`** — Advisory lock table (at most one row). Prevents concurrent `migrate up` or `entity sync` runs.
 - **`joka_snapshots`** — Stores a full schema snapshot (JSON of all `CREATE TABLE` statements) after each migration is applied.
 - **`joka_entities`** — Tracks which entity files have been synced (with content hashes for change detection).
 - **`joka_entity_rows`** — Tracks individual rows inserted per entity file, enabling reimport (delete + re-insert) and update (additive insert).

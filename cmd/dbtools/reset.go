@@ -4,34 +4,28 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 
 	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/shared"
-	"github.com/apsdsm/joka/cmd/template"
 	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
-	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	"github.com/fatih/color"
 )
 
 // RunResetCommand wipes every table in the database and re-runs the full seed
-// pipeline (init -> migrate up -> data sync -> entity sync). Destructive —
-// confirms once for the whole flow.
+// pipeline (init -> migrate up -> entity sync). Destructive — confirms once for
+// the whole flow.
 type RunResetCommand struct {
 	DB *sql.DB
 	// Secrets resolves {{ asm.<source>.<key> }} entity template references
 	// against the `secrets:` sources in .jokarc.yaml.
-	Secrets           entityapp.SecretResolver
-	MigrationsDir     string
-	TemplatesDir      string
-	EntitiesDir       string
-	Tables            []templateinfra.TableConfig
-	IgnoreForeignKeys bool
-	AutoConfirm       bool
-	OutputFormat      string
-	StateFile         string
+	Secrets       entityapp.SecretResolver
+	MigrationsDir string
+	EntitiesDir   string
+	AutoConfirm   bool
+	OutputFormat  string
+	StateFile     string
 	// Profile and JokaVersion are passed through to entity sync, which writes
 	// the state file.
 	Profile     string
@@ -57,8 +51,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		fmt.Println("  1. Drop every table in the current database (including joka_* tracking)")
 		fmt.Println("  2. Re-create the migrations table (init)")
 		fmt.Println("  3. Apply all migrations from scratch")
-		fmt.Println("  4. Sync template data")
-		fmt.Println("  5. Sync entity data")
+		fmt.Println("  4. Sync entity data")
 		fmt.Println()
 
 		if !r.AutoConfirm {
@@ -71,7 +64,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 
 	// 1. Drop everything.
 	if !jsonOut {
-		color.Cyan("\n[1/5] Dropping all tables...")
+		color.Cyan("\n[1/4] Dropping all tables...")
 	}
 	if err := (RunDropCommand{
 		DB:           r.DB,
@@ -87,7 +80,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 
 	// 2. Init migrations table.
 	if !jsonOut {
-		color.Cyan("\n[2/5] Initializing migrations table...")
+		color.Cyan("\n[2/4] Initializing migrations table...")
 	}
 	if err := (migration.RunInitCommand{
 		DB:           r.DB,
@@ -101,7 +94,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 
 	// 3. Migrate up.
 	if !jsonOut {
-		color.Cyan("\n[3/5] Applying migrations...")
+		color.Cyan("\n[3/4] Applying migrations...")
 	}
 	if err := (migration.RunMigrateUpCommand{
 		DB:            r.DB,
@@ -116,40 +109,9 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("migrate up: %w", err)
 	}
 
-	// 4. Data sync — skipped when the project has no templates.
-	//
-	// `joka data sync` on its own treats a missing templates directory as an
-	// error, and should: you asked for it and it is not there. Reset is not
-	// asking for it, it is re-running whatever the project has, and a project
-	// with no templates has nothing to run. Without this, reset is unusable
-	// for any project that seeds only entities.
-	if _, err := os.Stat(r.TemplatesDir); err != nil {
-		if !jsonOut {
-			color.Cyan("\n[4/5] No templates directory (%s) — skipping template data.", r.TemplatesDir)
-		}
-	} else {
-		if !jsonOut {
-			color.Cyan("\n[4/5] Syncing template data...")
-		}
-		if err := (template.RunDataSyncCommand{
-			DB:                r.DB,
-			TemplatesDir:      r.TemplatesDir,
-			Tables:            r.Tables,
-			AutoConfirm:       true,
-			IgnoreForeignKeys: r.IgnoreForeignKeys,
-			OutputFormat:      "text",
-			SkipLock:          true,
-		}).Execute(ctx); err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(fmt.Errorf("data sync: %w", err))
-			}
-			return fmt.Errorf("data sync: %w", err)
-		}
-	}
-
-	// 5. Entity sync.
+	// 4. Entity sync.
 	if !jsonOut {
-		color.Cyan("\n[5/5] Syncing entities...")
+		color.Cyan("\n[4/4] Syncing entities...")
 	}
 	if err := (entity.RunEntitySyncCommand{
 		DB:           r.DB,
