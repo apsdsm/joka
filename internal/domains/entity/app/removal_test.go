@@ -106,7 +106,7 @@ func TestAnIDCannotBeBothDeclaredAndRemoved(t *testing.T) {
 	if !errors.Is(err, domain.ErrEntitySetInvalid) {
 		t.Fatalf("expected the set refused, got %v", err)
 	}
-	if got := err.Error(); !strings.Contains(got, "both declared and removed") || !strings.Contains(got, "alpha") {
+	if got := err.Error(); !strings.Contains(got, "contradicts what the files declare") || !strings.Contains(got, "alpha") {
 		t.Errorf("expected the _id and the reason named, got:\n%s", got)
 	}
 }

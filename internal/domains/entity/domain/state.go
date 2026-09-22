@@ -221,3 +221,28 @@ func sortTrackedRows(rows []TrackedRow) {
 		return a.RefID < b.RefID
 	})
 }
+
+// Rekey moves the record held under one _id to another, leaving the row it
+// names untouched. It reports whether there was anything to move.
+//
+// This is what a declared `moved:` entry does. Renaming an _id whose natural
+// key stays put needs no declaration — adoption finds the row again and sync
+// infers the move — but a rename that also changes the unique key is
+// indistinguishable from a delete plus an insert, and only the author can say
+// which it was.
+//
+// It refuses to overwrite: two _ids collapsing into one would silently drop a
+// row's tracking, and false says so rather than doing it.
+func (s *State) Rekey(from, to string) bool {
+	e, tracked := s.Entities[from]
+	if !tracked {
+		return false
+	}
+	if _, taken := s.Entities[to]; taken {
+		return false
+	}
+
+	delete(s.Entities, from)
+	s.Entities[to] = e
+	return true
+}

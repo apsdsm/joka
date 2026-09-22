@@ -188,7 +188,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// write, and skipping it would claim the row again on every later run.
 	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 &&
 		len(plan.Adopted) == 0 && len(plan.Deletes) == 0 && len(plan.Forgets) == 0 &&
-		len(plan.Rekeyed) == 0 && len(plan.Removals) == 0 {
+		len(plan.Rekeyed) == 0 && len(plan.Removals) == 0 && len(plan.Moves) == 0 {
 		if jsonOut {
 			shared.PrintJSON(map[string]any{
 				"status": "ok", "inserted": []string{}, "updated": []string{},
@@ -383,6 +383,10 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		color.Cyan("  Renamed: %s → %s (the row is unchanged)", move.From, move.To)
 	}
 
+	for _, m := range result.Moves {
+		color.Cyan("  Moved:    %s → %s (the row is unchanged)", m.Move.From, m.Move.To)
+	}
+
 	for _, r := range result.Removed {
 		if r.Removal.Keep {
 			color.Cyan("  Released: %s (tracking dropped, the row is left in place)", r.Removal.RefID)
@@ -472,6 +476,7 @@ func printPlan(plan *app.SyncPlan) {
 	printDeletes(plan.Deletes, plan.Forgets)
 	printRekeyed(plan.Rekeyed)
 	printRemovals(plan.Removals)
+	printMoves(plan.Moves)
 
 	for _, f := range plan.Updates {
 		fmt.Println()
@@ -796,5 +801,25 @@ func printRemovals(removals []app.PlannedRemoval) {
 		}
 		red.Printf("  - %s  %s %s %d  (the row is DELETED)\n",
 			r.Removal.RefID, r.Row.TableName, r.Row.PKColumn, r.Row.RowPK)
+	}
+}
+
+// printMoves shows the declared _id renames this run will apply.
+//
+// It is separate from the rename sync infers for itself: that one is a
+// consequence of adoption finding the row again, this one is an instruction.
+func printMoves(moves []app.PlannedMove) {
+	if len(moves) == 0 {
+		return
+	}
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Declared moved — the row is kept, the _id it is tracked under changes:")
+	color.Unset()
+
+	for _, m := range moves {
+		color.Cyan("  ~ %s → %s  (%s %s %d)",
+			m.Move.From, m.Move.To, m.Row.TableName, m.Row.PKColumn, m.Row.RowPK)
 	}
 }

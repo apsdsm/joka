@@ -762,7 +762,7 @@ came from the reimport era, when the only thing that deleted took every row in a
 left joka half-converged: it would insert what the files gained and never remove what they lost, so a
 seed set could only ever grow.
 
-### `removed:` — state operations as declarations
+### `removed:` and `moved:` — state operations as declarations
 
 An entity file may carry a `removed:` list beside its `entities:`. It is not a declaration of desired
 state; it is a state operation, declared so that it happens once per database rather than once per
@@ -798,10 +798,34 @@ everyone including CI, idempotent, and deletable once every environment has caug
   things about one row, and guessing which the author meant would be worse than refusing.
 - The removal path owns its `_id`, so `planUndeclared` skips it: otherwise both would act on the row.
 
-What joka infers rather than declares: adoption is the `import` case, and a rename whose natural key
-survives is the `moved` case. A rename that *also* changes the unique key is indistinguishable from a
-delete plus an insert, and would need a `moved:` block — the same file and the same lifecycle would
-carry it.
+A file may also carry `moved:`, for the rename joka cannot infer:
+
+```yaml
+moved:
+  - from: api_key_web
+    to: api_key_browser
+```
+
+Most renames need no declaration. When any unique key survives, adoption finds the row again and sync
+reports it as a rename by itself — `api_keys` has two, so changing only `xid` is still inferred. When
+*no* unique key survives, the rename is indistinguishable from a delete plus an insert, and joka
+cannot tell which it was. That is the case this is for, and it is the same case terraform needs a
+`moved` block for.
+
+- **The move runs before anything else reads the state** (`applyMoves`), because a move says what the
+  state already was. Reconciliation has to see the post-move world, or the old `_id` reads as declared
+  nowhere and the new one as untracked — a delete and an insert, which is what the block exists to
+  prevent. The planner applies it to its own copy and the applier to the one inside the transaction,
+  through the same function, so the plan cannot describe a move the apply performs differently.
+- **`to:` must be declared and `from:` must not** (`ProblemMoveTargetUndeclared`,
+  `ProblemMoveSourceDeclared`). The first is what stops a typo being data loss: the move would
+  succeed, and the very next rule deletes a tracked entity no file declares. The second is the file
+  saying both "this entity exists" and "its record belongs to another name".
+- **A move that would collapse two `_id`s into one is refused** (`State.Rekey` returns false). One
+  row's tracking would be dropped silently.
+
+Adoption is the remaining piece: it is the `import` case, inferred rather than declared, because the
+unique key already says which row an entity is.
 
 ### Adoption: claiming a row joka did not insert
 

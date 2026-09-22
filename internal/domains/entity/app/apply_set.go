@@ -125,6 +125,9 @@ type ApplyResult struct {
 	Rekeyed []EntityMove `json:"rekeyed"`
 	// Removed are the `removed:` entries this run applied.
 	Removed []PlannedRemoval `json:"removed"`
+	// Moves are the `moved:` entries this run applied. Kept apart from Moved,
+	// which is a change of file rather than of _id.
+	Moves []PlannedMove `json:"moves"`
 	// Undeclared are tracked rows with no _id, which joka cannot match to a
 	// declaration either way. Reported, never removed.
 	Undeclared []domain.TrackedRow `json:"undeclared"`
@@ -149,6 +152,10 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// The same operation the plan applied to its own copy, against the one that
+	// will be saved.
+	result.Moves = applyMoves(state, a.Declared)
 
 	// Every tracked row's primary key is available to {{ ref.id }} from the
 	// start, so a reference resolves whether its target is being written this

@@ -44,6 +44,8 @@ type EntityFile struct {
 	// Removed are the file's `removed:` entries: state operations rather than
 	// declarations. See Removal.
 	Removed []Removal
+	// Moved are the file's `moved:` entries. See Move.
+	Moved []Move
 }
 
 // Removal is a declared state operation: an _id joka should stop tracking.
@@ -99,4 +101,22 @@ const (
 type EntityFileInfo struct {
 	Path   string
 	Status FileStatus
+}
+
+// Move is a declared state operation: the record under one _id becomes the
+// record under another, and the row is untouched.
+//
+// Most renames need no declaration. When the natural key stays put, adoption
+// finds the row again by it and sync infers the move. This is for the rename
+// that also changes the unique key, which is indistinguishable from a delete
+// plus an insert — joka cannot tell, and guessing either way would be wrong
+// half the time.
+//
+// Like a Removal it is idempotent and silent once applied, because the same
+// operation has to run once against every database.
+type Move struct {
+	// From is the _id joka currently tracks the row under.
+	From string
+	// To is the _id it should be tracked under, which some entity must declare.
+	To string
 }

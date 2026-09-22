@@ -20,6 +20,13 @@ type ParseEntityAction struct {
 type yamlFile struct {
 	Entities []map[string]any `yaml:"entities"`
 	Removed  []yamlRemoval    `yaml:"removed"`
+	Moved    []yamlMove       `yaml:"moved"`
+}
+
+// yamlMove is one entry of a file's `moved:` list.
+type yamlMove struct {
+	From string `yaml:"from"`
+	To   string `yaml:"to"`
 }
 
 // yamlRemoval is one entry of a file's `removed:` list.
@@ -56,10 +63,20 @@ func (a ParseEntityAction) Execute() (*domain.EntityFile, error) {
 		removed = append(removed, domain.Removal{RefID: r.ID, Keep: r.Keep})
 	}
 
+	moved := make([]domain.Move, 0, len(file.Moved))
+	for _, m := range file.Moved {
+		if m.From == "" || m.To == "" {
+			return nil, fmt.Errorf("%w: a moved: entry in %s needs both from: and to:",
+				domain.ErrEntityParseFailed, a.Path)
+		}
+		moved = append(moved, domain.Move{From: m.From, To: m.To})
+	}
+
 	return &domain.EntityFile{
 		Path:     a.Path,
 		Entities: entities,
 		Removed:  removed,
+		Moved:    moved,
 	}, nil
 }
 

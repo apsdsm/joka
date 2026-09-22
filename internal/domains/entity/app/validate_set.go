@@ -31,6 +31,15 @@ const (
 	// entity still declares. The file says both keep this and stop tracking it,
 	// and joka will not pick one.
 	ProblemRemovedAndDeclared = "removed_and_declared"
+	// ProblemMoveTargetUndeclared is a `moved:` entry whose to: nothing
+	// declares. The move would succeed and the very next rule would delete the
+	// row, because a tracked entity no file declares is removed — so a typo in
+	// to: is data loss. Requiring it to be declared is what catches that.
+	ProblemMoveTargetUndeclared = "move_target_undeclared"
+	// ProblemMoveSourceDeclared is a `moved:` entry whose from: something still
+	// declares. The file says both "this entity exists" and "its record belongs
+	// to another name", which cannot both be true.
+	ProblemMoveSourceDeclared = "move_source_declared"
 )
 
 // EntityLocation points at one entity in the set.
@@ -115,6 +124,29 @@ func ValidateEntitySet(files []*domain.EntityFile) []EntitySetProblem {
 		})
 	}
 
+	// A move's to: must be declared and its from: must not. Together those two
+	// say the rename has actually happened in the file, which is the only
+	// evidence joka has that the entry means what it says.
+	for _, file := range files {
+		if file == nil {
+			continue
+		}
+		for _, m := range file.Moved {
+			loc := EntityLocation{File: file.Path}
+
+			if _, declared := claims[m.To]; !declared {
+				problems = append(problems, EntitySetProblem{
+					Kind: ProblemMoveTargetUndeclared, RefID: m.To, Where: []EntityLocation{loc},
+				})
+			}
+			if _, declared := claims[m.From]; declared {
+				problems = append(problems, EntitySetProblem{
+					Kind: ProblemMoveSourceDeclared, RefID: m.From, Where: claims[m.From].locations,
+				})
+			}
+		}
+	}
+
 	for _, loc := range missing {
 		problems = append(problems, EntitySetProblem{Kind: ProblemMissingID, Where: []EntityLocation{loc}})
 	}
@@ -153,7 +185,7 @@ func EntitySetError(problems []EntitySetProblem) error {
 		switch p.Kind {
 		case ProblemMissingID:
 			missing++
-		case ProblemRemovedAndDeclared:
+		case ProblemRemovedAndDeclared, ProblemMoveTargetUndeclared, ProblemMoveSourceDeclared:
 			conflicting++
 		default:
 			duplicate++
@@ -168,7 +200,11 @@ func EntitySetError(problems []EntitySetProblem) error {
 		parts = append(parts, countOf(duplicate, "_id", "_ids")+" claimed twice")
 	}
 	if conflicting > 0 {
-		parts = append(parts, countOf(conflicting, "_id", "_ids")+" both declared and removed")
+		noun := "state operations that contradict"
+		if conflicting == 1 {
+			noun = "state operation that contradicts"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s what the files declare", conflicting, noun))
 	}
 	b.WriteString(strings.Join(parts, ", "))
 
@@ -183,6 +219,15 @@ func EntitySetError(problems []EntitySetProblem) error {
 			}
 		case ProblemRemovedAndDeclared:
 			fmt.Fprintf(&b, "\n  _id %q is named by a removed: entry and still declared at:", p.RefID)
+			for _, loc := range p.Where {
+				fmt.Fprintf(&b, "\n    %s", loc)
+			}
+		case ProblemMoveTargetUndeclared:
+			fmt.Fprintf(&b, "\n  moved: to %q in %s, which no entity declares \u2014 the move would "+
+				"succeed and the row would then be deleted for being declared nowhere",
+				p.RefID, p.Where[0].File)
+		case ProblemMoveSourceDeclared:
+			fmt.Fprintf(&b, "\n  moved: from %q, which is still declared at:", p.RefID)
 			for _, loc := range p.Where {
 				fmt.Fprintf(&b, "\n    %s", loc)
 			}

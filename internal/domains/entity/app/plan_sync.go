@@ -46,6 +46,9 @@ type SyncPlan struct {
 	// _id adopted the row by its unique key, so the old tracking is dropped
 	// rather than the row being deleted.
 	Rekeyed []EntityMove
+	// Moves are the declared `moved:` entries that will do something here: the
+	// from: is still tracked. Already-applied entries are absent, silently.
+	Moves []PlannedMove
 	// Removals are the declared `removed:` entries that will do something: the
 	// _id is still tracked here. An entry naming an _id joka does not track is
 	// absent, silently, so the same file can be left in place until every
@@ -152,7 +155,7 @@ func (p *SyncPlan) HasChanges() bool {
 	return len(p.Inserts) > 0 || len(p.Updates) > 0 ||
 		len(p.Conflicts) > 0 || len(p.Undeclared) > 0 || len(p.Adopted) > 0 ||
 		len(p.Deletes) > 0 || len(p.Forgets) > 0 ||
-		len(p.Rekeyed) > 0 || len(p.Removals) > 0
+		len(p.Rekeyed) > 0 || len(p.Removals) > 0 || len(p.Moves) > 0
 }
 
 // PlannedRemoval is one `removed:` entry matched to the row it names.
@@ -268,6 +271,10 @@ type PlanSyncAction struct {
 func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	plan := &SyncPlan{}
+
+	// Before anything reads the state: a move says what the state already was,
+	// so the rest of the plan has to see the post-move world.
+	plan.Moves = applyMoves(a.State, a.Declared)
 
 	refMap := make(map[string]int64, len(a.State.Entities))
 	for refID, tracked := range a.State.Entities {
