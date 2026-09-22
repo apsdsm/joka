@@ -274,11 +274,22 @@ which is the problem that made `entity sync` skip already-synced files in the fi
 - Removes the `joka_entities` record and every `joka_entity_rows` entry for a file. **Never touches
   the rows they point at, and never touches the file on disk.** The inverse of `reimport`, which
   replaces the rows and keeps the tracking.
-- Answers the two states nothing else resolves: tracking whose rows were deleted by hand elsewhere,
-  and an orphan (file and rows both gone, tracking left behind). `entity diff` shows both.
-- **Refuses when a tracked row is still in the database** (`ErrRowsStillLive`), because dropping the
-  tracking for a live row leaves a row joka does not own and the next sync inserts a second copy.
-  `--force` overrides; the plan still reports the live rows either way.
+- It is the one thing sync deliberately will not do. Sync never deletes and never disowns: a tracked
+  entity no file declares is reported and left alone, and its file's record stays in the state for
+  ever, because `forgetEmptyFiles` only fires for a file whose entities moved somewhere else, not one
+  that was deleted. Forget covers what that leaves standing:
+  - **Retiring a seed.** Delete the file, forget the tracking, and the rows stay as ordinary
+    application data joka no longer owns. Needs `--force`, since the rows are live.
+  - **An orphan**: file and rows both gone, tracking outlived them. Nothing is live, so no `--force`.
+  - **A duplicate `_id` claim blocking a tracking upgrade**, where two entity sets were seeded into
+    one database and one claim has to go.
+- **Refuses when a tracked row is still in the database** (`ErrRowsStillLive`): dropping the tracking
+  for a live row hands it to nobody, which is worth confirming. `--force` overrides; the plan reports
+  the live rows either way.
+  - The refusal predates adoption and used to be justified by duplication — the next sync would
+    insert a second copy. It no longer does: a file that still declares the entity finds the row by
+    its unique key and claims it back, so forgetting without deleting the file is a no-op with extra
+    steps. The command said otherwise in its output until this was checked against a real run.
 - `--orphans` resolves its targets through `EntityStatusAction`, which compares the files on disk
   against the tracked ones. It is the last caller of that action; `entity status`, the command it was
   written for, is gone.

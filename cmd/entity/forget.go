@@ -162,8 +162,9 @@ func (r RunEntityForgetCommand) Execute(ctx context.Context) error {
 	color.Green("Forgotten. %s removed from tracking across %s.",
 		pluralRows(rows), pluralFiles(len(forgotten)))
 	if live > 0 {
-		color.Yellow("%s left in the database untracked. The next entity sync will insert a second copy.",
-			pluralRows(live))
+		color.Yellow("%s left in the database, no longer tracked by joka.", pluralRows(live))
+		fmt.Println("  A file that still declares them will claim them back on the next sync.")
+		fmt.Println("  Delete the file too if you meant to hand the rows to the application.")
 	}
 	fmt.Println()
 

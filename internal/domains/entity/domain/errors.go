@@ -25,8 +25,13 @@ var (
 
 	// ErrRowsStillLive is returned when entity forget is asked to drop the
 	// tracking for a file whose rows are still in the database. Forgetting
-	// them would leave rows nothing tracks, and the next sync would insert a
-	// second copy, so the caller must pass --force to mean it.
+	// them hands live rows to nobody, so the caller must pass --force to mean
+	// it.
+	//
+	// It used to say the next sync would insert a second copy. Adoption made
+	// that false: a file that still declares the entity finds the row by its
+	// unique key and claims it back. The refusal stands because giving up
+	// ownership of live rows is worth confirming, not because it duplicates.
 	ErrRowsStillLive = errors.New("tracked rows are still in the database")
 
 	// ErrEntitySetInvalid means the entity set breaks an invariant the _id

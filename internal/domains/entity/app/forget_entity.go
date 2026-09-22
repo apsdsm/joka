@@ -11,12 +11,21 @@ import (
 // joka_entities record and every joka_entity_rows entry pointing at it —
 // without touching the rows those entries point at.
 //
-// It exists for the two states a tracking row can end up in that no other
-// command resolves: a file whose rows were deleted by hand elsewhere, so the
-// tracking points at nothing; and an orphan, where the file was deleted along
-// with its rows but the tracking outlived both. `entity reimport` cannot help
-// with either — it deletes and re-inserts, which needs a file, and on the first
-// case would re-create rows that were removed deliberately.
+// It is the one thing sync deliberately will not do. Sync never deletes and
+// never disowns: a tracked entity no file declares is reported and left alone,
+// and its file's record stays in the state for ever, because the automatic
+// cleanup (forgetEmptyFiles) only fires for a file whose entities moved
+// somewhere else, not one that was deleted.
+//
+// So forget covers the states sync leaves standing:
+//
+//   - Retiring a seed. Delete the file, forget the tracking, and the rows stay
+//     as ordinary application data joka no longer owns. Needs --force, since
+//     the rows are live.
+//   - An orphan: the file and its rows are both gone and the tracking outlived
+//     them. Nothing is live, so no --force.
+//   - A duplicate _id claim blocking a tracking upgrade, where two entity sets
+//     were seeded into one database and one claim has to go.
 type ForgetEntityAction struct {
 	DB DBAdapter
 	// State is what joka last applied. Plan reads it rather than the database,
@@ -24,8 +33,12 @@ type ForgetEntityAction struct {
 	State    *domain.State
 	FilePath string
 	// Force allows forgetting rows that are still in the database. Without it
-	// Execute refuses, because dropping the tracking for a live row leaves a
-	// row nothing owns and the next sync inserts a second copy.
+	// Execute refuses: dropping the tracking for a live row hands it to nobody,
+	// which is worth confirming.
+	//
+	// The refusal predates adoption and used to be justified by duplication —
+	// the next sync would insert a second copy. It no longer does; a file that
+	// still declares the entity claims the row back by its unique key.
 	Force bool
 }
 
