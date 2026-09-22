@@ -404,6 +404,67 @@ removed, and returned when sync took on the whole existence table. The differenc
 decision is made: sync deletes only what the plan named and the operator confirmed, one row at a
 time, never a whole file at once.
 
+## Planned: `joka plan` / `joka apply`
+
+Agreed in design, not built. One command that brings a database up to date with both its
+migrations and its seeds, driven by a `joka.yaml` in the directory it runs from — the terraform
+shape, which is what joka has been converging on anyway.
+
+**The one hard problem: the data half cannot be planned until the schema half has run.** A migration
+that adds a column changes what an entity plan means, because `ResolveRowChanges` reads live rows and
+compares columns. Terraform has one dependency graph over homogeneous resources; joka has a hard
+phase boundary.
+
+**The approach: speculate and roll back.** Every pending migration already runs in one transaction
+(`cmd/migration/up.go`), and PostgreSQL has transactional DDL, so joka can apply the migrations, plan
+the entities against the post-migration schema, and roll back. `joka plan` does exactly that and is
+read-only overall. `joka apply` speculates, rolls back, prints, confirms, then does the real thing in
+a fresh transaction — rather than holding DDL locks on the whole schema while a human reads a prompt.
+The advisory lock is held across both passes and the migration set is file-driven, so the plan cannot
+go stale in between.
+
+- **Migrations execute twice on an apply.** Rollback is cheap for DDL (it discards rather than
+  unwinding), so the cost is the forward pass, and DDL locks are taken for two brief windows rather
+  than one.
+- **Skip the speculation when nothing is pending**, which is most runs. Plan the entities directly
+  against the live schema; the two-pass cost then only lands on runs already doing schema work.
+- **The entity plan must read through the same transaction handle**, or it sees the pre-migration
+  schema and the whole exercise is pointless. `infra.NewPostgresTxDBAdapter` exists; this is the part
+  most likely to be got subtly wrong.
+- **Non-transactional DDL fails rather than persisting** — `CREATE INDEX CONCURRENTLY` and friends
+  error inside a transaction block. That is not new exposure: `migrate up` already wraps everything
+  in one transaction, so such a migration fails today too. Speculation moves the failure from
+  apply-time to plan-time, which is earlier and therefore better.
+- **Sequences are not rolled back**, so speculation burns primary keys. Deliberately accepted; see
+  **Primary key gaps** in the README. The way around it is a throwaway shadow database to migrate
+  against, as Atlas does — rejected, because it means provisioning and maintaining a second database
+  to make ids look neater.
+
+**Why it is worth doing at all**, beyond presenting one plan: `joka migrate up && joka entity sync`
+commits the schema change and *then* discovers the seeds are wrong. The speculative plan is the first
+time joka can report that a migration and its seeds disagree without having already applied the
+migration.
+
+Still open before building:
+
+1. **`--on-conflict=ask` under `apply`.** The entity half can stop and ask which side wins, and that
+   prompt lands after the migration plan is already approved. Either `ask` is refused under `apply`
+   (as it already is under `--auto`), or an apply has two interaction points, which undercuts one
+   plan and one confirmation.
+2. **Root discovery.** Paths resolve relative to the working directory and nothing marks a directory
+   as a joka root, so running from a subdirectory silently finds no migrations rather than saying you
+   are in the wrong place. `apply` needs that to be an error.
+3. **`joka.yaml` vs `.jokarc.yaml`.** The existing file already declares everything needed. Read
+   both, prefer the new name, never print the old one.
+4. **Detailed exit codes** (0 no changes, 1 error, 2 changes pending), which is what a CI drift gate
+   wants and what joka currently overloads onto the conflict exit.
+5. **`migrate verify` overlaps `plan`** — verify compares against a snapshot, plan against the files.
+   Different questions that will read as the same one.
+
+Build order: `plan` first (read-only, useful alone in CI), then root discovery and `joka.yaml`, then
+`apply`, then a `--wait` for the container case (`db.Open` pings and fails immediately, so there is
+no retry today).
+
 ## Entity identity (`_id`)
 
 joka identifies every seeded row by its `_id`. This is being moved to gradually; the steps done so

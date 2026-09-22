@@ -518,12 +518,34 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 
 ## How It Works
 
-Joka uses four internal tables (all prefixed with `joka_`):
+Joka uses five internal tables (all prefixed with `joka_`):
 
 - **`joka_migrations`** — Tracks which migrations have been applied and when.
 - **`joka_lock`** — Advisory lock table (at most one row). Prevents concurrent `migrate up` or `entity sync` runs.
 - **`joka_snapshots`** — Stores a full schema snapshot (JSON of all `CREATE TABLE` statements) after each migration is applied.
-- **`joka_entities`** — Tracks which entity files have been synced (with content hashes for change detection).
-- **`joka_entity_rows`** — Tracks individual rows inserted per entity file, enabling reimport (delete + re-insert) and update (additive insert).
+- **`joka_state`** — One JSON document holding everything joka has seeded: each entity file's content hash, and each `_id` with the row it became and a per-column baseline of the values last applied.
+- **`joka_meta`** — The tracking format version, the joka release that last wrote, and the identity of this database.
 
-The lock, snapshot, entity, and entity row tables are created automatically on first use. Only `joka_migrations` requires `joka init`.
+All of these except `joka_migrations` are created automatically on first use. Only `joka_migrations` requires `joka init`.
+
+### Primary key gaps
+
+A joka run that fails leaves gaps in `serial` / `identity` primary keys. Every run is
+wrapped in a transaction, so a failure rolls back cleanly and no row survives it — but
+PostgreSQL sequences are deliberately exempt from rollback, so the numbers those inserts
+consumed are not returned:
+
+```
+-- one committed insert, two rolled back, one committed
+SELECT string_agg(id::text, ',' ORDER BY id) FROM t;   -- 1,4
+```
+
+This is normal PostgreSQL behaviour and not specific to joka: anything that inserts inside
+a transaction that later rolls back does the same. It is called out here only because seed
+data is the one place people tend to expect tidy, contiguous ids — nothing in joka depends
+on them being contiguous, and neither should anything else.
+
+Tools that avoid this run migrations against a throwaway *shadow* database first (Atlas
+works this way). joka does not, deliberately: it would mean provisioning and maintaining a
+second database to make primary keys look neater, which is a large amount of machinery for
+a cosmetic property.
