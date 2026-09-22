@@ -79,6 +79,12 @@ type ApplySetAction struct {
 	// Forget are the plan's Forgets: the same, for rows already gone. Only the
 	// tracking is dropped.
 	Forget []domain.TrackedRow
+	// Rekeyed are the plan's Rekeyed: entities whose _id changed while the row
+	// stayed put. The new _id adopted the row, so all that is left is to drop
+	// the record the old _id held. Kept apart from Forget because the two look
+	// identical to the state and nothing alike to a reader — one is a row that
+	// vanished, the other a row that was renamed.
+	Rekeyed []EntityMove
 	// Recreate names the _ids the plan found tracked but no longer in the
 	// database. They are inserted again and the tracking is re-pointed at the
 	// new row, rather than updated against a row that is not there.
@@ -112,6 +118,8 @@ type ApplyResult struct {
 	// Forgotten are the tracked entities dropped without a delete, because the
 	// row had already gone.
 	Forgotten []domain.TrackedRow `json:"forgotten"`
+	// Rekeyed are entities whose _id changed with the row left in place.
+	Rekeyed []EntityMove `json:"rekeyed"`
 	// Undeclared are tracked rows with no _id, which joka cannot match to a
 	// declaration either way. Reported, never removed.
 	Undeclared []domain.TrackedRow `json:"undeclared"`
@@ -267,11 +275,18 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 		result.Deleted = append(result.Deleted, row)
 	}
 
-	// Already gone from the database, so there is nothing to write — only the
-	// tracking to drop. The orphan that used to need `entity forget`.
+	// Already gone from the database, or claimed by the _id that replaced it.
+	// Either way there is nothing to write — only the tracking to drop.
 	for _, row := range a.Forget {
 		state.Forget(row.RefID)
 		result.Forgotten = append(result.Forgotten, row)
+	}
+
+	// The new _id already adopted the row above; this drops the record the old
+	// one held, so one row stops having two names.
+	for _, move := range a.Rekeyed {
+		state.Forget(move.From)
+		result.Rekeyed = append(result.Rekeyed, move)
 	}
 
 	// Read after the writes rather than before: everything written this run is

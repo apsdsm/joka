@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,10 @@ type SyncPlan struct {
 	// already gone. Nothing is written; the tracking is dropped. This is the
 	// orphan that used to need `entity forget`.
 	Forgets []domain.TrackedRow
+	// Rekeyed are entities whose _id changed while the row stayed put: the new
+	// _id adopted the row by its unique key, so the old tracking is dropped
+	// rather than the row being deleted.
+	Rekeyed []EntityMove
 	// Undeclared are tracked rows joka cannot match to a declaration at all,
 	// because they carry no _id. Not knowing whether a file declares them is
 	// different from knowing none does, so they are reported and left alone.
@@ -388,6 +393,12 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 // before joka recorded _ids, which is the data loss this whole model exists to
 // prevent.
 func (a PlanSyncAction) planUndeclared(ctx context.Context, plan *SyncPlan, declared map[string]bool) error {
+	// Every row an adoption claimed this run, by the _id that claimed it.
+	claimed := make(map[string]string, len(plan.Adopted))
+	for refID, adoption := range plan.Adopted {
+		claimed[rowKey(adoption.Row.Table, adoption.Row.PKValue)] = refID
+	}
+
 	for _, row := range a.State.AllRows() {
 		if declared[row.RefID] {
 			continue
@@ -402,6 +413,20 @@ func (a PlanSyncAction) planUndeclared(ctx context.Context, plan *SyncPlan, decl
 		if err != nil {
 			return fmt.Errorf("checking whether %s %s=%d is still there: %w",
 				row.TableName, row.PKColumn, row.RowPK, err)
+		}
+
+		// The row another _id just claimed is not a row to delete: the entity
+		// was renamed, and adoption found it again by its unique key. Deleting
+		// it would destroy the row the new _id now tracks and leave the state
+		// pointing at a primary key that no longer exists.
+		//
+		// This is the case terraform needs `moved` blocks for. joka can infer
+		// it whenever the natural key stays put; a rename that also changes the
+		// unique key is still a delete and an insert, and cannot be told apart
+		// from one without being declared.
+		if to, moved := claimed[rowKey(row.TableName, row.RowPK)]; moved {
+			plan.Rekeyed = append(plan.Rekeyed, EntityMove{RefID: row.RefID, From: row.RefID, To: to})
+			continue
 		}
 
 		if live {
@@ -714,4 +739,11 @@ func alignForDisplay(before, after string) (string, string) {
 		return before, after
 	}
 	return beforeJSON, afterJSON
+}
+
+// rowKey identifies one database row for the move check: a table and a primary
+// key, which is the only thing an adoption and a tracked row have in common
+// when the _id between them has changed.
+func rowKey(table string, pk int64) string {
+	return table + "|" + strconv.FormatInt(pk, 10)
 }

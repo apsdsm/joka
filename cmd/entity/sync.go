@@ -187,7 +187,8 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// writes no row when every column agrees, but the tracking it records is a
 	// write, and skipping it would claim the row again on every later run.
 	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 &&
-		len(plan.Adopted) == 0 && len(plan.Deletes) == 0 && len(plan.Forgets) == 0 {
+		len(plan.Adopted) == 0 && len(plan.Deletes) == 0 && len(plan.Forgets) == 0 &&
+		len(plan.Rekeyed) == 0 {
 		if jsonOut {
 			shared.PrintJSON(map[string]any{
 				"status": "ok", "inserted": []string{}, "updated": []string{},
@@ -319,6 +320,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Adopted:  plan.Adopted,
 		Delete:   plan.Deletes,
 		Forget:   plan.Forgets,
+		Rekeyed:  plan.Rekeyed,
 		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
@@ -374,6 +376,10 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	for _, row := range result.Forgotten {
 		color.Cyan("  Dropped tracking for %s (its row was already gone)", row.RefID)
+	}
+
+	for _, move := range result.Rekeyed {
+		color.Cyan("  Renamed: %s → %s (the row is unchanged)", move.From, move.To)
 	}
 
 	fmt.Println()
@@ -455,6 +461,7 @@ func printPlan(plan *app.SyncPlan) {
 
 	printAdoptions(plan.Adopted)
 	printDeletes(plan.Deletes, plan.Forgets)
+	printRekeyed(plan.Rekeyed)
 
 	for _, f := range plan.Updates {
 		fmt.Println()
@@ -716,5 +723,40 @@ func printDeletes(deletes, forgets []domain.TrackedRow) {
 			color.Cyan("  \u00b7 %s  %s %s %d  (tracking dropped, nothing to delete)",
 				row.RefID, row.TableName, row.PKColumn, row.RowPK)
 		}
+	}
+}
+
+// rekeyedRows renders the plan's Rekeyed entries as the tracked rows whose
+// records the apply should drop.
+//
+// An entity whose _id changed while its row stayed put has two records for one
+// row for the length of the run: the new _id adopted it, and the old _id still
+// names it. Dropping the old one is all that is left to do — the row itself
+// needs nothing.
+func rekeyedRows(plan *app.SyncPlan) []domain.TrackedRow {
+	rows := make([]domain.TrackedRow, 0, len(plan.Rekeyed))
+	for _, move := range plan.Rekeyed {
+		rows = append(rows, domain.TrackedRow{RefID: move.From})
+	}
+	return rows
+}
+
+// printRekeyed names the entities whose _id changed while the row stayed put.
+//
+// It is reported because it looks like a deletion and an insertion in the file
+// and is neither: the row is untouched and only the name joka files it under
+// has moved.
+func printRekeyed(moves []app.EntityMove) {
+	if len(moves) == 0 {
+		return
+	}
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Renamed — the row is kept, the _id it is tracked under changes:")
+	color.Unset()
+
+	for _, move := range moves {
+		color.Cyan("  ~ %s → %s", move.From, move.To)
 	}
 }

@@ -53,6 +53,7 @@ func applyPlanned(t *testing.T, db *mockDBAdapter, dirty map[string]bool, files 
 		Adopted:  plan.Adopted,
 		Delete:   plan.Deletes,
 		Forget:   plan.Forgets,
+		Rekeyed:  plan.Rekeyed,
 		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
@@ -387,5 +388,41 @@ func TestApplySetRecordsTheFileHash(t *testing.T) {
 
 	if hash, _ := db.fileHash("a.yaml"); hash != file.ContentHash {
 		t.Errorf("expected the hash recorded, got %q", hash)
+	}
+}
+
+func TestRenamingAnIDKeepsTheRow(t *testing.T) {
+	// An _id rename where the natural key stays put: the new _id adopts the row
+	// and the old one is declared nowhere. Before the move check, the adoption
+	// and the delete named the same primary key — the row was destroyed and the
+	// state was left pointing at a row that no longer existed.
+	//
+	// This is what terraform needs a `moved` block for. joka infers it whenever
+	// the unique key does not change.
+	db := newMockDBAdapter()
+	db.uniqueKeys = map[string][][]string{"fields": {{"xid"}}}
+
+	applyAll(t, db, entityFile("a.yaml",
+		col("fields", "alpha", map[string]any{"xid": "x1", "label": "Alpha"}),
+	))
+
+	renamed := entityFile("a.yaml", col("fields", "beta", map[string]any{"xid": "x1", "label": "Alpha"}))
+	renamed.ContentHash = "renamed"
+	result := applyAll(t, db, renamed)
+
+	if len(db.deletedRows) != 0 {
+		t.Fatalf("expected nothing deleted on a rename, got %+v", db.deletedRows)
+	}
+	if len(result.Deleted) != 0 {
+		t.Errorf("expected no deletes planned, got %+v", result.Deleted)
+	}
+
+	tracked := trackedByRef(db)
+	if _, gone := tracked["alpha"]; gone {
+		t.Error("expected the old _id's tracking dropped")
+	}
+	beta, ok := tracked["beta"]
+	if !ok || beta.RowPK != 1 {
+		t.Errorf("expected beta tracking the original row, got %+v ok=%v", beta, ok)
 	}
 }

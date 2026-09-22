@@ -736,6 +736,15 @@ is the plan and the confirmation, the way terraform does it.
 | ✗ | ✓ | ✗ | insert |
 | ✗ | ✗ | ✗ | nothing exists |
 
+- **A renamed `_id` is not a delete.** The new `_id` adopts the row by its unique key while the old
+  one is declared nowhere, so without a check the adoption and the delete name the same primary key:
+  the row is destroyed and the state is left pointing at a row that no longer exists. The plan drops
+  any delete whose (table, primary key) an adoption claimed this run, and reports it as a rename
+  instead. `TestRenamingAnIDKeepsTheRow` guards it.
+
+  This is the case terraform needs a `moved` block for. joka infers it whenever the natural key stays
+  put; a rename that *also* changes the unique key is a delete and an insert, and nothing can tell it
+  apart from one without being told.
 - **Deleting is the only irreversible thing sync does**, so `ApplySetAction` executes the list the
   plan produced rather than recomputing it — the same reason it executes `ColumnsToWrite`. The plan
   names every row; `--auto` and `--output json` skip the confirmation, so a reset or a CI run deletes
