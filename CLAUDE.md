@@ -33,16 +33,20 @@ go run . drop
 go run . reset
 go run . unlock
 
-# Run tests
-go test ./... -v
+# Run tests. -p 1 is required: the integration tests bring up PostgreSQL
+# testcontainers, and running packages in parallel overloads them.
+go test ./... -p 1
 
 # Run a single test
-go test ./internal/domains/migration/app/ -run TestGetMigrationChain_AllApplied -v
+go test ./internal/domains/migration/app/ -run TestGetMigrationChain -v
 ```
 
 ## Architecture
 
-The codebase follows a domain-driven layered architecture. Each domain lives under `internal/domains/` and has its own `domain_spec.md` with detailed documentation.
+The codebase follows a domain-driven layered architecture. Domains live under `internal/domains/`.
+Two carry a `domain_spec.md` with detail this file does not repeat — `lock/` and `migration/`.
+`entity/` does not: it has changed faster than a separate document could track, and what would be in
+one is the **Entities**, **Entity state**, **Convergence** and **Identity matching** chapters below.
 
 ### Top-level structure
 
@@ -55,8 +59,12 @@ The codebase follows a domain-driven layered architecture. Each domain lives und
 ### Domains
 
 - **`migration/`** — Migration lifecycle: create files, track applied migrations, apply pending ones, capture schema snapshots.
-- **`lock/`** — DB-backed advisory locking via `joka_lock` table. Prevents concurrent mutating operations.
-- **`entity/`** — Syncs entity graphs (parent-child seed data) from YAML files with reference resolution.
+- **`lock/`** — A PostgreSQL session advisory lock, with `joka_lock` as the visibility row saying who
+  holds it. Prevents concurrent mutating operations.
+- **`entity/`** — Syncs entity graphs (parent-child seed data) from YAML files with reference
+  resolution. The largest domain by a wide margin.
+- **`dbtools/`** — `drop` and `reset`: operations on the database as a whole rather than on one kind
+  of content.
 
 ### Layer pattern (within each domain)
 
@@ -99,25 +107,26 @@ All joka-owned tables use the `joka_` prefix:
 ```sql
 -- Migration tracking
 CREATE TABLE joka_migrations (
-    id INT AUTO_INCREMENT PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     migration_index VARCHAR(255) NOT NULL UNIQUE,
-    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 
--- Advisory lock (at most one row)
+-- Advisory lock visibility row (at most one). The gate is a session-level
+-- pg_advisory_lock; this row only records who holds it.
 CREATE TABLE joka_lock (
-    id INT PRIMARY KEY DEFAULT 1,
+    id INTEGER PRIMARY KEY DEFAULT 1,
     locked_by VARCHAR(255) NOT NULL,
-    locked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     operation VARCHAR(255) NOT NULL
 )
 
 -- Schema snapshots (one per migration)
 CREATE TABLE joka_snapshots (
-    id INT AUTO_INCREMENT PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     migration_index VARCHAR(255) NOT NULL UNIQUE,
-    schema_snapshot LONGTEXT NOT NULL,
-    captured_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    schema_snapshot TEXT NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 ```
 
@@ -270,9 +279,9 @@ which is the problem that made `entity sync` skip already-synced files in the fi
 - Value comparison normalizes driver types to strings; a column stored as a SQL decimal may show a spurious diff against a YAML float that formats differently (e.g. `3.50` vs `3.5`).
 
 **Entity diff** (`joka entity diff <file>`):
-- Lines the declared graph up against `joka_entity_rows` and against the live rows, and prints one
-  row per alignment line with a `= ≠ + - ~ !` gutter. Read-only; takes no lock and creates no
-  tracking tables.
+- Lines the declared graph up against the tracked rows and against the live rows, and prints one row
+  per alignment line with a `= ≠ + @ - ~ !` gutter (`@` is a row already in the database that sync
+  would claim rather than insert). Read-only; takes no lock and creates nothing.
 - Was built because sync's structural refusal named the symptom ("48 entities but 38 are tracked")
   without saying which entities were new, and recommended a destructive reimport. The diff showed the
   shape of the change and whether an identity match would be exact, which was the input to the
@@ -356,7 +365,8 @@ something can still be run to clear it.
 - **Check runs on connect; Stamp runs only for commands that write.** `main.go` tags mutating
   commands with the `joka:mutates` annotation and the root `PersistentPreRunE` stamps on that. A
   read-only command must leave a bare database bare, which is what makes a missing tracking table
-  reportable — `TestStatusIsReadOnly` and `TestReadCreatesNothing` both guard it.
+  reportable — `meta.TestReadCreatesNothing` guards it. (`TestStatusIsReadOnly` guarded the same rule
+  from the `joka status` side and went with that command.)
 - **A wiping command stamps on the way out, not the way in.** `drop` and `reset` carry
   `joka:wipes` and skip the upgrade gate, and the stamp lives inside it, so they used to leave a
   database this build had just written with no marker on it — and the next mutating command read
@@ -376,7 +386,7 @@ around something sync could not do, and sync does all of it now.
 | Removed | Why |
 |---|---|
 | `entity update` | Skipped tracked `_id`s and inserted the rest. Sync does that for the whole set. Its one distinguishing property — never touching an existing row — meant an edit to an existing entity was silently ignored. |
-| `entity status` | Reported per-file `synced`/`modified` from the content hash, which no longer decides what a sync does. `entity sync --dry-run` answers the question it was being asked. `EntityStatusAction` went with `entity forget`, its last caller. |
+| `entity status` | Reported per-file `synced`/`modified` from the content hash, which no longer decides what a sync does. `entity sync --dry-run` answers the question it was being asked. The action behind it went with `entity forget`, its last caller. |
 | `entity reimport` | Existed for the structural changes sync used to refuse. `--decayed` rewrites every column, `Recreate` puts back a deleted row, and identity matching handles renames and moves. |
 | `joka status` | Visibility work from the same commit as `entity diff` and `entity forget`, done to find a way around a sync that could not be trusted. The per-domain commands it aggregated are all still there. |
 | `joka data sync` | The template domain, and with it `--templates`, the `templates:`/`tables:`/`ignore_foreign_keys` config keys and reset's fourth step. See below. |
@@ -567,8 +577,8 @@ Blocked by two things, both real rather than theoretical:
   file, so two entity sets seeded into one database (a `dev1/` and a `local/` tree of the same
   seeds) both claim the same `_id`s. One claim has to go.
 
-`ReimportEntityAction` and `UpdateEntityAction` reject an empty `_id` with `ErrEntitySetInvalid`
-rather than writing a row the document cannot key.
+Nothing writes a row with an empty `_id` any more: `ValidateEntitySet` refuses the whole set before
+anything is applied, and the two commands that used to bypass it are gone.
 
 ### Version 3: entity tracking is one document
 

@@ -21,8 +21,10 @@ If at any point a step fails, **stop and fix the root cause** — never bypass w
 
 2. Run the full test suite:
    ```bash
-   go test ./... -count=1 -timeout 600s
+   go test ./... -p 1 -count=1 -timeout 600s
    ```
+   - `-p 1` is required, not optional: the integration tests bring up PostgreSQL testcontainers, and
+     running packages in parallel overloads them.
    - **All packages must pass.** If any fail: investigate root cause, fix the code (don't disable tests), re-run.
    - Report the result explicitly: "Full suite green" or list failing packages.
 

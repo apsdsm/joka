@@ -39,9 +39,12 @@ Create a `.jokarc.yaml` in your project root to configure paths:
 ```yaml
 migrations: devops/migrations
 entities: devops/entities
+statefile: joka.state.json    # optional; see "State file" below
 ```
 
-All fields are optional. CLI flags override `.jokarc.yaml` values. If neither is provided, defaults apply (`devops/migrations`, `devops/entities`).
+All fields are optional. CLI flags override `.jokarc.yaml` values. If neither is provided, defaults
+apply (`devops/migrations`, `devops/entities`, and `joka[.<profile>].state.json` beside the working
+directory).
 
 ### Connection
 
@@ -527,6 +530,36 @@ Joka uses five internal tables (all prefixed with `joka_`):
 - **`joka_meta`** — The tracking format version, the joka release that last wrote, and the identity of this database.
 
 All of these except `joka_migrations` are created automatically on first use. Only `joka_migrations` requires `joka init`.
+
+### The state file
+
+After a write commits, joka materializes its state to `joka.state.json` in the directory it was run
+from — `joka.<profile>.state.json` when `--profile` is set, because one directory often syncs several
+databases and a shared name would have each overwrite the last. `--statefile`, or `statefile:` in
+`.jokarc.yaml`, overrides both.
+
+**The database copy is authoritative.** The file is an audit copy, and losing it costs nothing: joka
+reads what it applies from `joka_state`. What the file adds is a second opinion, because state living
+inside the database it describes is always self-consistent and can never report that this is the
+wrong database.
+
+Two markers in `joka_meta` make that comparison possible: an identity stamped once per database and
+never rewritten (so it travels with a dump), and a counter incremented with each write. If the file's
+identity and the database's disagree, **every command that writes refuses**:
+
+```
+the state file describes a different database: joka.state.json names 63e9ba27…,
+and this database is a1b2c3d4…. Nothing was written.
+  If the connection is right, the state file is stale: remove it, or point
+  --statefile somewhere else.
+```
+
+Only a disagreeing identity refuses. A version disagreement is informational — joka loads what it
+applies from the database, so a file that is ahead or behind does not change what a run does. A
+database with no state at all, which is what `joka drop` leaves, is not a disagreement either.
+
+Whether you commit the file is your call. It is per-environment, so it belongs beside the other
+per-environment configuration if you keep it.
 
 ### Primary key gaps
 
