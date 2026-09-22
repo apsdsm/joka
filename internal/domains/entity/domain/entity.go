@@ -41,6 +41,33 @@ type EntityFile struct {
 	Path        string
 	ContentHash string
 	Entities    []Entity
+	// Removed are the file's `removed:` entries: state operations rather than
+	// declarations. See Removal.
+	Removed []Removal
+}
+
+// Removal is a declared state operation: an _id joka should stop tracking.
+//
+// Deleting an entity from a file already removes its row — the declaration is
+// the desired state. What a removal adds is the other answer, Keep, which is
+// the only way to stop owning a row without deleting it.
+//
+// It is a declaration rather than a command because the operation has to happen
+// once per database, not once per operator. A command could only ever act on
+// whichever database the person running it was pointed at; every other
+// environment carried on tracking a row nobody meant to own. This is the same
+// reasoning that moved terraform from imperative state surgery to `removed`
+// blocks that live in the configuration and are applied by everyone.
+//
+// An entry that matches nothing does nothing, silently. That is what makes it
+// safe to leave in the file until every environment has applied it — which is
+// the author's judgement to make, so joka never suggests deleting one.
+type Removal struct {
+	// RefID is the _id to stop tracking.
+	RefID string
+	// Keep leaves the row in the database and drops only the tracking. Without
+	// it the row is deleted, which is what an undeclared entity gets anyway.
+	Keep bool
 }
 
 // TrackedRow records a single row inserted during entity sync so it can be

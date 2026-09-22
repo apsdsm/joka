@@ -46,6 +46,11 @@ type SyncPlan struct {
 	// _id adopted the row by its unique key, so the old tracking is dropped
 	// rather than the row being deleted.
 	Rekeyed []EntityMove
+	// Removals are the declared `removed:` entries that will do something: the
+	// _id is still tracked here. An entry naming an _id joka does not track is
+	// absent, silently, so the same file can be left in place until every
+	// database has applied it.
+	Removals []PlannedRemoval
 	// Undeclared are tracked rows joka cannot match to a declaration at all,
 	// because they carry no _id. Not knowing whether a file declares them is
 	// different from knowing none does, so they are reported and left alone.
@@ -146,7 +151,18 @@ func (c ColumnChange) IsConflict() bool { return c.Verdict == VerdictConflict }
 func (p *SyncPlan) HasChanges() bool {
 	return len(p.Inserts) > 0 || len(p.Updates) > 0 ||
 		len(p.Conflicts) > 0 || len(p.Undeclared) > 0 || len(p.Adopted) > 0 ||
-		len(p.Deletes) > 0 || len(p.Forgets) > 0
+		len(p.Deletes) > 0 || len(p.Forgets) > 0 ||
+		len(p.Rekeyed) > 0 || len(p.Removals) > 0
+}
+
+// PlannedRemoval is one `removed:` entry matched to the row it names.
+type PlannedRemoval struct {
+	Removal domain.Removal
+	// File is where the entry was declared, for the report.
+	File string
+	// Row is the tracking it will drop, and the row it will delete unless the
+	// entry says to keep it.
+	Row domain.TrackedRow
 }
 
 // ConflictedColumns counts the columns across every conflicted row.
@@ -371,6 +387,8 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 		}
 	}
 
+	a.planRemovals(plan)
+
 	if err := a.planUndeclared(ctx, plan, declared); err != nil {
 		return nil, err
 	}
@@ -392,7 +410,47 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 // first sync after a version 1 database's upgrade removing every row written
 // before joka recorded _ids, which is the data loss this whole model exists to
 // prevent.
+// planRemovals turns the declared `removed:` entries into what each will do.
+//
+// An entry naming an _id joka does not track does nothing and says nothing.
+// That is the whole point: the same entry has to be applied once against every
+// database, and the ones that have already applied it must stay quiet, or a
+// file kept until every environment has caught up would report the same finding
+// for ever.
+func (a PlanSyncAction) planRemovals(plan *SyncPlan) {
+	for _, file := range a.Declared {
+		for _, removal := range file.Removed {
+			row, tracked := a.State.Row(removal.RefID)
+			if !tracked {
+				continue
+			}
+
+			plan.Removals = append(plan.Removals, PlannedRemoval{
+				Removal: removal,
+				File:    file.Path,
+				Row: domain.TrackedRow{
+					EntityFile: row.File, TableName: row.Table, RowPK: row.PKValue,
+					PKColumn: row.PKColumn, RefID: removal.RefID, InsertionOrder: row.Order,
+				},
+			})
+		}
+	}
+
+	sort.Slice(plan.Removals, func(i, j int) bool {
+		return plan.Removals[i].Removal.RefID < plan.Removals[j].Removal.RefID
+	})
+}
+
 func (a PlanSyncAction) planUndeclared(ctx context.Context, plan *SyncPlan, declared map[string]bool) error {
+	// An _id a removal names is that removal's business. Without this it would
+	// also read as undeclared, and the two paths would both act on one row.
+	removing := make(map[string]bool)
+	for _, file := range a.Declared {
+		for _, removal := range file.Removed {
+			removing[removal.RefID] = true
+		}
+	}
+
 	// Every row an adoption claimed this run, by the _id that claimed it.
 	claimed := make(map[string]string, len(plan.Adopted))
 	for refID, adoption := range plan.Adopted {
@@ -400,7 +458,7 @@ func (a PlanSyncAction) planUndeclared(ctx context.Context, plan *SyncPlan, decl
 	}
 
 	for _, row := range a.State.AllRows() {
-		if declared[row.RefID] {
+		if declared[row.RefID] || removing[row.RefID] {
 			continue
 		}
 

@@ -27,6 +27,10 @@ const (
 	ProblemMissingID = "missing_id"
 	// ProblemDuplicateID is an _id claimed by more than one entity in the set.
 	ProblemDuplicateID = "duplicate_id"
+	// ProblemRemovedAndDeclared is an _id that a `removed:` entry names and an
+	// entity still declares. The file says both keep this and stop tracking it,
+	// and joka will not pick one.
+	ProblemRemovedAndDeclared = "removed_and_declared"
 )
 
 // EntityLocation points at one entity in the set.
@@ -87,6 +91,30 @@ func ValidateEntitySet(files []*domain.EntityFile) []EntitySetProblem {
 
 	var problems []EntitySetProblem
 
+	// An _id cannot be both declared and removed. The two say opposite things
+	// about the same row, and guessing which the author meant would be worse
+	// than refusing.
+	var removed []string
+	for _, file := range files {
+		if file == nil {
+			continue
+		}
+		for _, r := range file.Removed {
+			if _, declared := claims[r.RefID]; declared {
+				removed = append(removed, r.RefID)
+			}
+		}
+	}
+	sort.Strings(removed)
+
+	for _, refID := range removed {
+		problems = append(problems, EntitySetProblem{
+			Kind:  ProblemRemovedAndDeclared,
+			RefID: refID,
+			Where: claims[refID].locations,
+		})
+	}
+
 	for _, loc := range missing {
 		problems = append(problems, EntitySetProblem{Kind: ProblemMissingID, Where: []EntityLocation{loc}})
 	}
@@ -120,23 +148,29 @@ func EntitySetError(problems []EntitySetProblem) error {
 	var b strings.Builder
 	sentinel := domain.ErrEntitySetInvalid
 
-	missing, duplicate := 0, 0
+	missing, duplicate, conflicting := 0, 0, 0
 	for _, p := range problems {
-		if p.Kind == ProblemMissingID {
+		switch p.Kind {
+		case ProblemMissingID:
 			missing++
-		} else {
+		case ProblemRemovedAndDeclared:
+			conflicting++
+		default:
 			duplicate++
 		}
 	}
 
-	switch {
-	case missing > 0 && duplicate > 0:
-		fmt.Fprintf(&b, "%s without an _id and %s claimed twice", countOf(missing, "entity", "entities"), countOf(duplicate, "_id", "_ids"))
-	case missing > 0:
-		fmt.Fprintf(&b, "%s without an _id", countOf(missing, "entity", "entities"))
-	default:
-		fmt.Fprintf(&b, "%s claimed twice", countOf(duplicate, "_id", "_ids"))
+	var parts []string
+	if missing > 0 {
+		parts = append(parts, countOf(missing, "entity", "entities")+" without an _id")
 	}
+	if duplicate > 0 {
+		parts = append(parts, countOf(duplicate, "_id", "_ids")+" claimed twice")
+	}
+	if conflicting > 0 {
+		parts = append(parts, countOf(conflicting, "_id", "_ids")+" both declared and removed")
+	}
+	b.WriteString(strings.Join(parts, ", "))
 
 	for _, p := range problems {
 		switch p.Kind {
@@ -144,6 +178,11 @@ func EntitySetError(problems []EntitySetProblem) error {
 			fmt.Fprintf(&b, "\n  no _id: %s", p.Where[0])
 		case ProblemDuplicateID:
 			fmt.Fprintf(&b, "\n  _id %q is claimed by:", p.RefID)
+			for _, loc := range p.Where {
+				fmt.Fprintf(&b, "\n    %s", loc)
+			}
+		case ProblemRemovedAndDeclared:
+			fmt.Fprintf(&b, "\n  _id %q is named by a removed: entry and still declared at:", p.RefID)
 			for _, loc := range p.Where {
 				fmt.Fprintf(&b, "\n    %s", loc)
 			}

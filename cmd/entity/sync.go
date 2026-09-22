@@ -188,7 +188,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// write, and skipping it would claim the row again on every later run.
 	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 &&
 		len(plan.Adopted) == 0 && len(plan.Deletes) == 0 && len(plan.Forgets) == 0 &&
-		len(plan.Rekeyed) == 0 {
+		len(plan.Rekeyed) == 0 && len(plan.Removals) == 0 {
 		if jsonOut {
 			shared.PrintJSON(map[string]any{
 				"status": "ok", "inserted": []string{}, "updated": []string{},
@@ -321,6 +321,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Delete:   plan.Deletes,
 		Forget:   plan.Forgets,
 		Rekeyed:  plan.Rekeyed,
+		Removals: plan.Removals,
 		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
@@ -380,6 +381,14 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	for _, move := range result.Rekeyed {
 		color.Cyan("  Renamed: %s → %s (the row is unchanged)", move.From, move.To)
+	}
+
+	for _, r := range result.Removed {
+		if r.Removal.Keep {
+			color.Cyan("  Released: %s (tracking dropped, the row is left in place)", r.Removal.RefID)
+			continue
+		}
+		color.Red("  Removed:  %s (declared removed, the row is deleted)", r.Removal.RefID)
 	}
 
 	fmt.Println()
@@ -462,6 +471,7 @@ func printPlan(plan *app.SyncPlan) {
 	printAdoptions(plan.Adopted)
 	printDeletes(plan.Deletes, plan.Forgets)
 	printRekeyed(plan.Rekeyed)
+	printRemovals(plan.Removals)
 
 	for _, f := range plan.Updates {
 		fmt.Println()
@@ -758,5 +768,33 @@ func printRekeyed(moves []app.EntityMove) {
 
 	for _, move := range moves {
 		color.Cyan("  ~ %s → %s", move.From, move.To)
+	}
+}
+
+// printRemovals shows the declared state operations this run will apply.
+//
+// A `removed:` entry naming an _id joka does not track is absent from the plan
+// entirely, which is what lets one file be left in place until every database
+// has applied it. The ones that appear are the ones that will do something here.
+func printRemovals(removals []app.PlannedRemoval) {
+	if len(removals) == 0 {
+		return
+	}
+
+	red := color.New(color.FgRed)
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Declared removed:")
+	color.Unset()
+
+	for _, r := range removals {
+		if r.Removal.Keep {
+			color.Cyan("  · %s  %s %s %d  (tracking dropped, the row is kept)",
+				r.Removal.RefID, r.Row.TableName, r.Row.PKColumn, r.Row.RowPK)
+			continue
+		}
+		red.Printf("  - %s  %s %s %d  (the row is DELETED)\n",
+			r.Removal.RefID, r.Row.TableName, r.Row.PKColumn, r.Row.RowPK)
 	}
 }

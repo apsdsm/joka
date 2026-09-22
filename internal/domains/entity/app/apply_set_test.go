@@ -54,6 +54,7 @@ func applyPlanned(t *testing.T, db *mockDBAdapter, dirty map[string]bool, files 
 		Delete:   plan.Deletes,
 		Forget:   plan.Forgets,
 		Rekeyed:  plan.Rekeyed,
+		Removals: plan.Removals,
 		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {

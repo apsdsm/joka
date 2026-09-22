@@ -19,6 +19,13 @@ type ParseEntityAction struct {
 // yamlFile is the top-level YAML structure for an entity file.
 type yamlFile struct {
 	Entities []map[string]any `yaml:"entities"`
+	Removed  []yamlRemoval    `yaml:"removed"`
+}
+
+// yamlRemoval is one entry of a file's `removed:` list.
+type yamlRemoval struct {
+	ID   string `yaml:"_id"`
+	Keep bool   `yaml:"keep"`
 }
 
 // Execute reads the YAML file at Path, parses each entity in the entities
@@ -40,9 +47,19 @@ func (a ParseEntityAction) Execute() (*domain.EntityFile, error) {
 		return nil, fmt.Errorf("%w: %v", domain.ErrEntityParseFailed, err)
 	}
 
+	removed := make([]domain.Removal, 0, len(file.Removed))
+	for _, r := range file.Removed {
+		if r.ID == "" {
+			return nil, fmt.Errorf("%w: a removed: entry in %s has no _id",
+				domain.ErrEntityParseFailed, a.Path)
+		}
+		removed = append(removed, domain.Removal{RefID: r.ID, Keep: r.Keep})
+	}
+
 	return &domain.EntityFile{
 		Path:     a.Path,
 		Entities: entities,
+		Removed:  removed,
 	}, nil
 }
 

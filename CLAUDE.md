@@ -398,11 +398,6 @@ would have meant reintroducing deletion. Sync has since taken that on for every 
 
 `{{ lookup|… }}` is unaffected: it queries any table regardless of what seeded it.
 
-**There is no way to stop tracking a row without deleting it.** That is the existence table's
-design, not an omission: it has no cell for tracked-and-undeclared-but-kept. If joka should be able
-to hand a seeded row to the application, that is a new cell to add deliberately, not `entity forget`
-to bring back.
-
 **Deletion came back, in sync rather than in a command.** `reimport --prune` deleted on a flag whose
 output only said "tracked rows to delete: N"; `DBAdapter.DeleteRow` went with it when reimport was
 removed, and returned when sync took on the whole existence table. The difference is where the
@@ -766,6 +761,47 @@ This replaced "nothing is ever deleted, a tracked entity no file declares is rep
 came from the reimport era, when the only thing that deleted took every row in a file with it. It
 left joka half-converged: it would insert what the files gained and never remove what they lost, so a
 seed set could only ever grow.
+
+### `removed:` — state operations as declarations
+
+An entity file may carry a `removed:` list beside its `entities:`. It is not a declaration of desired
+state; it is a state operation, declared so that it happens once per database rather than once per
+operator.
+
+```yaml
+removed:
+  - _id: api_key_web
+    keep: true      # drop the tracking, leave the row
+  - _id: legacy_grant
+                    # no keep: the row is deleted
+```
+
+`keep: true` is the only way to stop owning a row without deleting it — the cell the existence table
+does not have. Without `keep` the outcome is the same one an undeclared entity gets, said out loud in
+the file.
+
+**Why a declaration rather than a command.** `entity forget` could only ever act on whichever
+database the person running it was pointed at; every other environment carried on tracking a row
+nobody meant to own, and nothing in version control recorded the decision. This is the same move
+terraform made from imperative state surgery to `moved` / `import` / `removed` blocks that live in
+the configuration: reviewable in a pull request, visible in the plan before it happens, applied by
+everyone including CI, idempotent, and deletable once every environment has caught up.
+
+- **An entry that matches nothing does nothing, silently.** It is absent from the plan rather than
+  reported as stale. That is what makes it safe to leave in the file until every database has applied
+  it, and deciding when that has happened is the author's judgement — joka never suggests deleting
+  one. `TestAnAppliedRemovalIsSilentAfterwards` guards it.
+- **`keep` needs no tombstone.** Adoption only looks for a *declared* entity, and the premise of a
+  removal is that nothing declares it any more, so a released row is never claimed back.
+  `TestAKeptRowIsNotAdoptedBackLater` guards it.
+- **An `_id` cannot be both declared and removed** (`ProblemRemovedAndDeclared`). The two say opposite
+  things about one row, and guessing which the author meant would be worse than refusing.
+- The removal path owns its `_id`, so `planUndeclared` skips it: otherwise both would act on the row.
+
+What joka infers rather than declares: adoption is the `import` case, and a rename whose natural key
+survives is the `moved` case. A rename that *also* changes the unique key is indistinguishable from a
+delete plus an insert, and would need a `moved:` block — the same file and the same lifecycle would
+carry it.
 
 ### Adoption: claiming a row joka did not insert
 

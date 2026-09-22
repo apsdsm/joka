@@ -79,6 +79,9 @@ type ApplySetAction struct {
 	// Forget are the plan's Forgets: the same, for rows already gone. Only the
 	// tracking is dropped.
 	Forget []domain.TrackedRow
+	// Removals are the plan's Removals: declared state operations. Each drops
+	// the tracking, and deletes the row unless the entry says to keep it.
+	Removals []PlannedRemoval
 	// Rekeyed are the plan's Rekeyed: entities whose _id changed while the row
 	// stayed put. The new _id adopted the row, so all that is left is to drop
 	// the record the old _id held. Kept apart from Forget because the two look
@@ -120,6 +123,8 @@ type ApplyResult struct {
 	Forgotten []domain.TrackedRow `json:"forgotten"`
 	// Rekeyed are entities whose _id changed with the row left in place.
 	Rekeyed []EntityMove `json:"rekeyed"`
+	// Removed are the `removed:` entries this run applied.
+	Removed []PlannedRemoval `json:"removed"`
 	// Undeclared are tracked rows with no _id, which joka cannot match to a
 	// declaration either way. Reported, never removed.
 	Undeclared []domain.TrackedRow `json:"undeclared"`
@@ -280,6 +285,20 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 	for _, row := range a.Forget {
 		state.Forget(row.RefID)
 		result.Forgotten = append(result.Forgotten, row)
+	}
+
+	// A declared state operation. Keep is the only way to stop owning a row
+	// without deleting it; without it this is the same outcome an undeclared
+	// entity gets, said out loud in the file.
+	for _, r := range a.Removals {
+		if !r.Removal.Keep {
+			if err := a.DB.DeleteRow(ctx, r.Row.TableName, r.Row.PKColumn, r.Row.RowPK); err != nil {
+				return nil, err
+			}
+			result.Deleted = append(result.Deleted, r.Row)
+		}
+		state.Forget(r.Removal.RefID)
+		result.Removed = append(result.Removed, r)
 	}
 
 	// The new _id already adopted the row above; this drops the record the old
