@@ -22,7 +22,7 @@ import (
 // What each edit now costs:
 //
 //	add an entity        one INSERT
-//	remove an entity     nothing is deleted; it is reported as undeclared
+//	remove an entity     the row is deleted; see Existence in CLAUDE.md
 //	reorder entities     nothing, beyond re-recording the new positions
 //	rename a file        nothing, beyond re-pointing the rows at the new path
 //	move between files   nothing, same
@@ -71,6 +71,14 @@ type ApplySetAction struct {
 	// updates against that row and the tracking is recorded, so the next run
 	// sees an ordinary tracked entity.
 	Adopted map[string]Adoption
+	// Delete are the plan's Deletes: tracked entities no file declares any more
+	// whose row is still there, ordered children before parents. Deleting is the
+	// one thing sync does that cannot be undone by running it again, so the list
+	// comes from the plan the operator confirmed rather than being recomputed.
+	Delete []domain.TrackedRow
+	// Forget are the plan's Forgets: the same, for rows already gone. Only the
+	// tracking is dropped.
+	Forget []domain.TrackedRow
 	// Recreate names the _ids the plan found tracked but no longer in the
 	// database. They are inserted again and the tracking is re-pointed at the
 	// new row, rather than updated against a row that is not there.
@@ -99,9 +107,13 @@ type ApplyResult struct {
 	Moved []EntityMove `json:"moved"`
 	// Files are the paths written.
 	Files []string `json:"files"`
-	// Undeclared are tracked rows no file declares any more. Nothing is deleted
-	// on their account — a seed file edited by mistake should not take data
-	// with it — so they are reported for a human to decide about.
+	// Deleted are the rows removed because no file declares them any more.
+	Deleted []domain.TrackedRow `json:"deleted"`
+	// Forgotten are the tracked entities dropped without a delete, because the
+	// row had already gone.
+	Forgotten []domain.TrackedRow `json:"forgotten"`
+	// Undeclared are tracked rows with no _id, which joka cannot match to a
+	// declaration either way. Reported, never removed.
 	Undeclared []domain.TrackedRow `json:"undeclared"`
 	// ForgottenFiles are joka_entities records dropped because the file is gone
 	// and every row it tracked now belongs to another file. This is what makes
@@ -241,16 +253,40 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 		}
 	}
 
+	// An entity the declaration no longer mentions is one joka is being told to
+	// stop owning, and owning it means the row goes with it. The plan decided
+	// which are still in the database and ordered them children-first; the
+	// apply executes that list rather than deciding again, the same way it
+	// executes ColumnsToWrite.
+	for _, row := range a.Delete {
+		if err := a.DB.DeleteRow(ctx, row.TableName, row.PKColumn, row.RowPK); err != nil {
+			return nil, err
+		}
+		state.Forget(row.RefID)
+		result.Deleted = append(result.Deleted, row)
+	}
+
+	// Already gone from the database, so there is nothing to write — only the
+	// tracking to drop. The orphan that used to need `entity forget`.
+	for _, row := range a.Forget {
+		state.Forget(row.RefID)
+		result.Forgotten = append(result.Forgotten, row)
+	}
+
 	// Read after the writes rather than before: everything written this run is
 	// declared by definition, so the answer is the same, and taking it from the
 	// one document means it cannot disagree with what is about to be saved.
+	//
+	// What is left here is only what joka cannot match to a declaration at all
+	// — a row with no _id. Those are reported, never removed: not knowing
+	// whether a file declares them is different from knowing none does.
 	for _, row := range state.AllRows() {
-		if !declared[row.RefID] {
+		if row.RefID == "" {
 			result.Undeclared = append(result.Undeclared, row)
 		}
 	}
 
-	result.ForgottenFiles = a.forgetEmptyFiles(state, result.Moved)
+	result.ForgottenFiles = a.forgetEmptyFiles(state)
 
 	if err := a.Backend.Save(ctx, state); err != nil {
 		return nil, err
@@ -408,35 +444,32 @@ func writableColumns(resolved map[string]any, e domain.Entity, kept map[string]s
 	return out
 }
 
-// forgetEmptyFiles drops the record of a file that is no longer declared and no
-// longer tracks any row — every entity it held moved somewhere else. Without
-// this a rename leaves a permanent ghost entry behind, which nothing but a
-// manual forget would ever clear.
+// forgetEmptyFiles drops the record of a file that no longer declares anything
+// and no longer has any rows tracked against it.
 //
-// It reads the state after the run's writes, so "no longer tracks any row" is
-// asked of the document about to be saved rather than of a second query.
-func (a ApplySetAction) forgetEmptyFiles(state *domain.State, moved []EntityMove) []string {
-	if len(moved) == 0 {
-		return nil
-	}
-
-	sources := make(map[string]bool)
-	for _, move := range moved {
-		sources[move.From] = true
-	}
+// It covers two ways a file empties out. A rename or a move takes every row to
+// another file, and without this the old path stays in the state for ever as a
+// ghost nothing but a manual forget could clear. A deleted file has its rows
+// deleted or its tracking dropped by the rules above, which leaves the same
+// ghost — that case used to be permanent, because the old implementation
+// returned early unless something had moved.
+func (a ApplySetAction) forgetEmptyFiles(state *domain.State) []string {
+	declared := make(map[string]bool, len(a.Declared))
 	for _, file := range a.Declared {
-		delete(sources, file.Path)
-	}
-	if len(sources) == 0 {
-		return nil
+		declared[file.Path] = true
 	}
 
+	holds := make(map[string]bool)
 	for _, row := range state.AllRows() {
-		delete(sources, row.EntityFile)
+		holds[row.EntityFile] = true
 	}
 
-	forgotten := make([]string, 0, len(sources))
-	for path := range sources {
+	var forgotten []string
+
+	for path := range state.Files {
+		if declared[path] || holds[path] {
+			continue
+		}
 		state.ForgetFile(path)
 		forgotten = append(forgotten, path)
 	}

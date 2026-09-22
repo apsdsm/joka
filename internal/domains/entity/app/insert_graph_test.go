@@ -15,6 +15,7 @@ type mockDBAdapter struct {
 	insertedRows  []mockInsertCall
 	nextID        int64
 	lookupData    map[string]any // keyed by "table.returnCol.whereCol=whereVal"
+	deletedRows   []mockDeleteCall
 	updatedRows   []mockUpdateCall
 	currentRows   map[string]map[string]any // key: "table|pkValue" -> column values
 	missingTables map[string]bool           // tables the mock reports as dropped
@@ -34,6 +35,12 @@ type mockDBAdapter struct {
 type mockInsertCall struct {
 	Table   string
 	Columns map[string]any
+}
+
+type mockDeleteCall struct {
+	Table    string
+	PKColumn string
+	PKValue  int64
 }
 
 // mockUpdateCall records the arguments passed to UpdateRow.
@@ -511,4 +518,12 @@ func splitRowKey(rowKey string) (string, int64, bool) {
 	}
 
 	return rowKey[:sep], pk, true
+}
+
+// DeleteRow records the call and removes the row, so a later liveness check
+// sees what the delete did.
+func (m *mockDBAdapter) DeleteRow(_ context.Context, table, pkColumn string, pkValue int64) error {
+	m.deletedRows = append(m.deletedRows, mockDeleteCall{Table: table, PKColumn: pkColumn, PKValue: pkValue})
+	delete(m.currentRows, fmt.Sprintf("%s|%d", table, pkValue))
+	return nil
 }

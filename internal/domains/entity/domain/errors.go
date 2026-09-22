@@ -23,6 +23,14 @@ var (
 	// that has never been synced.
 	ErrEntityNotSynced = errors.New("entity file has not been synced")
 
+	// ErrForeignKeyConflict is returned when a DELETE fails because another
+	// row references it via a foreign key constraint.
+	//
+	// Sync deletes a tracked entity no file declares any more, children before
+	// parents, but a foreign key from outside the seeded set is something it
+	// cannot order around. The run rolls back and names the row.
+	ErrForeignKeyConflict = errors.New("foreign key constraint prevented deletion")
+
 	// ErrRowsStillLive is returned when entity forget is asked to drop the
 	// tracking for a file whose rows are still in the database. Forgetting
 	// them hands live rows to nobody, so the caller must pass --force to mean

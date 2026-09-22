@@ -187,7 +187,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// writes no row when every column agrees, but the tracking it records is a
 	// write, and skipping it would claim the row again on every later run.
 	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 &&
-		len(plan.Adopted) == 0 {
+		len(plan.Adopted) == 0 && len(plan.Deletes) == 0 && len(plan.Forgets) == 0 {
 		if jsonOut {
 			shared.PrintJSON(map[string]any{
 				"status": "ok", "inserted": []string{}, "updated": []string{},
@@ -317,6 +317,8 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Keep:     keep,
 		Recreate: plan.Recreate,
 		Adopted:  plan.Adopted,
+		Delete:   plan.Deletes,
+		Forget:   plan.Forgets,
 		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
@@ -336,8 +338,10 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		shared.PrintJSON(map[string]any{
 			"status": "ok", "on_conflict": string(r.OnConflict), "plan": planJSON(plan),
 			"inserted": orEmpty(result.Inserted), "updated": orEmpty(result.Updated),
-			"adopted": orEmpty(result.Adopted),
-			"files":   orEmpty(result.Files), "moved": result.Moved,
+			"adopted":   orEmpty(result.Adopted),
+			"deleted":   undeclaredJSON(result.Deleted),
+			"forgotten": undeclaredJSON(result.Forgotten),
+			"files":     orEmpty(result.Files), "moved": result.Moved,
 			"undeclared":      undeclaredJSON(result.Undeclared),
 			"forgotten_files": orEmpty(result.ForgottenFiles),
 			"rewritten_files": orEmpty(rewritten),
@@ -356,16 +360,25 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}
 
 	for _, path := range result.ForgottenFiles {
-		color.Cyan("  Cleared tracking for %s (every entity it held moved elsewhere)", path)
+		color.Cyan("  Cleared tracking for %s (it declares nothing joka still tracks)", path)
 	}
 
 	for _, refID := range result.Adopted {
 		color.Yellow("  Claimed: %s (a row joka did not insert)", refID)
 	}
 
+	for _, row := range result.Deleted {
+		color.Red("  Deleted: %s  %s %s %d (declared nowhere)",
+			row.RefID, row.TableName, row.PKColumn, row.RowPK)
+	}
+
+	for _, row := range result.Forgotten {
+		color.Cyan("  Dropped tracking for %s (its row was already gone)", row.RefID)
+	}
+
 	fmt.Println()
-	color.Green("Entity sync complete. %d inserted, %d updated, %d claimed, across %d files.",
-		len(result.Inserted), len(result.Updated), len(result.Adopted), len(result.Files))
+	color.Green("Entity sync complete. %d inserted, %d updated, %d claimed, %d deleted, across %d files.",
+		len(result.Inserted), len(result.Updated), len(result.Adopted), len(result.Deleted), len(result.Files))
 
 	// Nothing is deleted on an undeclared entity's account: a seed file edited
 	// by mistake should not take data with it.
@@ -441,6 +454,7 @@ func printPlan(plan *app.SyncPlan) {
 	}
 
 	printAdoptions(plan.Adopted)
+	printDeletes(plan.Deletes, plan.Forgets)
 
 	for _, f := range plan.Updates {
 		fmt.Println()
@@ -582,7 +596,7 @@ func reportUndeclared(rows []domain.TrackedRow) {
 	}
 
 	fmt.Println()
-	color.Yellow("%d tracked entities are no longer declared in any file:", len(rows))
+	color.Yellow("%d tracked rows carry no _id, so joka cannot tell whether a file declares them:", len(rows))
 	for _, row := range firstRows(rows, 10) {
 		color.Yellow("  %s  %s %s %d  (last declared in %s)",
 			row.RefID, row.TableName, row.PKColumn, row.RowPK, row.EntityFile)
@@ -591,8 +605,8 @@ func reportUndeclared(rows []domain.TrackedRow) {
 		color.Yellow("  … and %d more", extra)
 	}
 	fmt.Println()
-	color.Yellow("  Nothing was deleted. 'joka entity forget <file>' drops the tracking,")
-	color.Yellow("  'joka entity diff <file>' shows what each one points at.")
+	color.Yellow("  Nothing was deleted \u2014 an entity declared nowhere is removed, but these cannot be")
+	color.Yellow("  matched either way. 'joka entity forget <file>' drops the tracking.")
 	fmt.Println()
 }
 
@@ -668,5 +682,39 @@ func printAdoptions(adopted map[string]app.Adoption) {
 		color.Yellow("  = %s  %s %s %d  (%s, matched on %s)",
 			refID, a.Row.Table, a.Row.PKColumn, a.Row.PKValue, a.File,
 			strings.Join(a.MatchedOn, ", "))
+	}
+}
+
+// printDeletes shows the rows a sync is about to remove because no file
+// declares them any more, and the tracking it will drop for rows already gone.
+//
+// Deleting is the one thing a sync does that running it again cannot undo, so
+// every row is named rather than counted. The confirmation prompt after the
+// plan is the only gate on it.
+func printDeletes(deletes, forgets []domain.TrackedRow) {
+	if len(deletes) > 0 {
+		red := color.New(color.FgRed)
+
+		fmt.Println()
+		color.Set(color.Bold)
+		fmt.Println("Declared in no file any more — these rows will be DELETED:")
+		color.Unset()
+
+		for _, row := range deletes {
+			red.Printf("  - %s  %s %s %d  (last declared in %s)\n",
+				row.RefID, row.TableName, row.PKColumn, row.RowPK, row.EntityFile)
+		}
+	}
+
+	if len(forgets) > 0 {
+		fmt.Println()
+		color.Set(color.Bold)
+		fmt.Println("Declared in no file any more, and already gone from the database:")
+		color.Unset()
+
+		for _, row := range forgets {
+			color.Cyan("  \u00b7 %s  %s %s %d  (tracking dropped, nothing to delete)",
+				row.RefID, row.TableName, row.PKColumn, row.RowPK)
+		}
 	}
 }

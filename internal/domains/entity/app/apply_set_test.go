@@ -51,6 +51,8 @@ func applyPlanned(t *testing.T, db *mockDBAdapter, dirty map[string]bool, files 
 		Dirty:    dirty,
 		Recreate: plan.Recreate,
 		Adopted:  plan.Adopted,
+		Delete:   plan.Deletes,
+		Forget:   plan.Forgets,
 		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
@@ -218,7 +220,10 @@ func TestApplySetRenamingAFileLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-func TestApplySetReportsUndeclaredWithoutDeleting(t *testing.T) {
+func TestApplySetDeletesAnEntityDeclaredNowhere(t *testing.T) {
+	// The declaration is the desired state, so an entity it no longer mentions
+	// is one joka is being told to stop owning — and owning it means the row
+	// goes with it. The gate is the plan and the confirmation, not a refusal.
 	db := newMockDBAdapter()
 
 	applyAll(t, db, entityFile("a.yaml",
@@ -230,12 +235,38 @@ func TestApplySetReportsUndeclaredWithoutDeleting(t *testing.T) {
 		col("fields", "alpha", map[string]any{"label": "Alpha"}),
 	))
 
-	if len(result.Undeclared) != 1 || result.Undeclared[0].RefID != "beta" {
-		t.Fatalf("expected beta reported undeclared, got %+v", result.Undeclared)
+	if len(result.Deleted) != 1 || result.Deleted[0].RefID != "beta" {
+		t.Fatalf("expected beta deleted, got %+v", result.Deleted)
 	}
-	// A seed file edited by mistake must not take data with it.
-	if _, stillTracked := trackedByRef(db)["beta"]; !stillTracked {
-		t.Error("expected beta's tracking left in place for a human to decide about")
+	if len(db.deletedRows) != 1 || db.deletedRows[0].PKValue != 2 {
+		t.Errorf("expected beta's row deleted, got %+v", db.deletedRows)
+	}
+	if _, stillTracked := trackedByRef(db)["beta"]; stillTracked {
+		t.Error("expected beta's tracking dropped with the row")
+	}
+
+	// alpha is untouched: only what the file stopped declaring goes.
+	if _, stillTracked := trackedByRef(db)["alpha"]; !stillTracked {
+		t.Error("expected alpha left alone")
+	}
+}
+
+func TestApplySetNeverDeletesARowItCannotMatch(t *testing.T) {
+	// A row with no _id cannot be matched to a declaration at all, so "no file
+	// declares it" is not something joka knows — it is something it cannot
+	// tell. Deleting those would make the first sync after a version 1
+	// database's upgrade remove every row written before joka recorded _ids.
+	db := newMockDBAdapter()
+	db.track("a.yaml", domain.TrackedRow{TableName: "fields", RowPK: 7, PKColumn: "id", InsertionOrder: 0})
+	db.currentRows["fields|7"] = map[string]any{"label": "from before _ids"}
+
+	result := applyAll(t, db, entityFile("a.yaml", col("fields", "alpha", map[string]any{"label": "Alpha"})))
+
+	if len(db.deletedRows) != 0 {
+		t.Errorf("expected the unkeyed row left alone, got %+v", db.deletedRows)
+	}
+	if len(result.Undeclared) != 1 || result.Undeclared[0].RowPK != 7 {
+		t.Errorf("expected it reported instead, got %+v", result.Undeclared)
 	}
 }
 

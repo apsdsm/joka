@@ -415,6 +415,8 @@ func TestApplyRecreatesADeletedRow(t *testing.T) {
 		Dirty:    map[string]bool{},
 		Recreate: plan.Recreate,
 		Adopted:  plan.Adopted,
+		Delete:   plan.Deletes,
+		Forget:   plan.Forgets,
 	}).Execute(context.Background()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

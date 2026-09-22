@@ -258,8 +258,8 @@ which is the problem that made `entity sync` skip already-synced files in the fi
 - A tracked entity has each declared column compared three ways — file, database, and what joka last
   applied. Only the file moved: push. The database moved: conflict, and `--on-conflict` decides.
   See **Convergence**.
-- A tracked row that is gone from the database is inserted again and the tracking re-pointed at it.
-- Nothing is ever deleted. A tracked entity no file declares is reported, not removed.
+- Existence is converged too, on the same rule: the declaration is the desired state. See
+  **Existence** below.
 - Updates preserve primary keys, so external rows referencing them by id stay valid.
 
 **Preview / dry-run** (`joka entity sync --dry-run`):
@@ -419,17 +419,18 @@ file in existence was a six-line CSV holding five industry types.
 
 Folding it into entities was considered and rejected, because there was nothing bulk to fold: five
 rows are five ordinary entities, and as entities they gain baselines, conflict detection and
-`entity diff`, none of which templates ever had. The one thing that did not survive is `truncate`
-semantics — "this file is the complete contents of the table, delete anything else". Entity sync
-never deletes, and since `reimport` went joka has no way to delete a seeded row at all, so folding
-templates in properly would have meant reintroducing deletion rather than removing a domain.
+`entity diff`, none of which templates ever had. The argument against folding at the time was that
+`truncate` semantics — "this file is the complete contents of the table, delete anything else" —
+would have meant reintroducing deletion. Sync has since taken that on for every entity (see
+**Existence**), so the gap templates filled is closed rather than merely dropped.
 
 `{{ lookup|… }}` is unaffected: it queries any table regardless of what seeded it.
 
-**joka can no longer delete a seeded row.** `reimport --prune` was the only thing that did, and
-`DBAdapter.DeleteRow` went with it. Sync reports an undeclared entity and leaves the row alone;
-`entity forget` drops the tracking without touching it; `drop` takes whole tables. If pruning is
-wanted back it belongs on sync as a flag, not as a command whose safe uses are all covered elsewhere.
+**Deletion came back, in sync rather than in a command.** `reimport --prune` deleted on a flag whose
+output only said "tracked rows to delete: N"; `DBAdapter.DeleteRow` went with it when reimport was
+removed, and returned when sync took on the whole existence table. The difference is where the
+decision is made: sync deletes only what the plan named and the operator confirmed, one row at a
+time, never a whole file at once.
 
 ## Entity identity (`_id`)
 
@@ -742,6 +743,46 @@ all, and it is the finding `--force` was added for and never fixed.
   modified forever.
 - **`--force` is gone.** It existed because the hash was the gate.
 
+### Existence
+
+Column values converge three ways; existence converges on a truth table, because there is no third
+point for it to disagree about. The state says joka put a row somewhere, and a row is either there or
+not — so unlike a column, existence has no conflict to arbitrate and needs no policy flag. The gate
+is the plan and the confirmation, the way terraform does it.
+
+| in the database | declared | tracked | |
+|---|---|---|---|
+| ✓ | ✓ | ✗ | **adopt** — claim it, record the tracking |
+| ✓ | ✗ | ✗ | not joka's concern; it never sees it |
+| ✓ | ✗ | ✓ | **delete** the row |
+| ✗ | ✓ | ✓ | **insert** it again, re-point the tracking |
+| ✗ | ✗ | ✓ | **drop the tracking**, nothing to delete |
+| ✓ | ✓ | ✓ | the normal case: converge the columns |
+| ✗ | ✓ | ✗ | insert |
+| ✗ | ✗ | ✗ | nothing exists |
+
+- **Deleting is the only irreversible thing sync does**, so `ApplySetAction` executes the list the
+  plan produced rather than recomputing it — the same reason it executes `ColumnsToWrite`. The plan
+  names every row; `--auto` and `--output json` skip the confirmation, so a reset or a CI run deletes
+  without being asked.
+- **Children before parents.** `Order` is the insertion position, and deletes are sorted by file then
+  descending order so a foreign key inside the seeded set is satisfied. A foreign key from outside it
+  is not something joka can order around: the delete fails with `ErrForeignKeyConflict` and the
+  transaction rolls back.
+- **A row with no `_id` is never deleted.** joka cannot match it to a declaration at all, so "no file
+  declares it" is not something it knows, it is something it cannot tell — and the difference
+  matters, because the first sync after a version 1 database's upgrade would otherwise remove every
+  row written before joka recorded `_id`s. Those stay in `Undeclared` and are reported.
+  `TestApplySetNeverDeletesARowItCannotMatch` guards it.
+- **`forgetEmptyFiles` covers deletion too.** It used to return early unless something had moved, so a
+  deleted seed file left its record in the state for ever; now any file that declares nothing and
+  holds no rows is dropped.
+
+This replaced "nothing is ever deleted, a tracked entity no file declares is reported". That rule
+came from the reimport era, when the only thing that deleted took every row in a file with it. It
+left joka half-converged: it would insert what the files gained and never remove what they lost, so a
+seed set could only ever grow.
+
 ### Adoption: claiming a row joka did not insert
 
 An entity with no tracked row may still be in the database — someone seeded it before joka, or
@@ -922,8 +963,8 @@ What each edit costs now:
   sorts first, the same rule as within a file.
 - **An unchanged file is still read.** It contributes its declarations, which is what makes an `_id`
   claimed elsewhere and an entity declared nowhere both visible. Only dirty files are written.
-- **Nothing is deleted for an undeclared entity.** A seed file edited by mistake must not take data
-  with it. They are reported, with `entity forget` and `entity diff` named.
+- **An undeclared entity's row is deleted.** See **Existence**. This was the reverse until the
+  truth table landed.
 - **A table change is refused** (`ErrEntityTableChanged`). An `_id` names one row; the same `_id` on
   a different table is a different thing wearing the same name, and guessing would be worse.
 - **`forgetEmptyFiles`** drops the `joka_entities` record of a file that is gone and whose every row

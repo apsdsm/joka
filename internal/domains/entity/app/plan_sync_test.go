@@ -343,7 +343,8 @@ func dirtySet(files []*domain.EntityFile) map[string]bool {
 }
 
 func TestPlanSyncReportsUndeclared(t *testing.T) {
-	// An entity dropped from the file is reported, not refused and not deleted.
+	// An entity dropped from the file is planned for deletion when its row is
+	// still there, and for a tracking drop when it is not.
 	db := newMockDBAdapter()
 	db.track("client.yaml",
 		domain.TrackedRow{TableName: "clients", RowPK: 4, PKColumn: "id", RefID: "c1", InsertionOrder: 0},
@@ -363,10 +364,23 @@ func TestPlanSyncReportsUndeclared(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(plan.Undeclared) != 1 {
-		t.Fatalf("expected the dropped entity reported, got %+v", plan.Undeclared)
+	// g1's row was never put in currentRows, so it reads as already gone: the
+	// tracking is dropped and nothing is deleted.
+	if len(plan.Forgets) != 1 || plan.Forgets[0].RefID != "g1" {
+		t.Fatalf("expected g1 planned as a tracking drop, got %+v", plan.Forgets)
 	}
-	if plan.Undeclared[0].RefID != "g1" {
-		t.Errorf("expected g1 undeclared, got %q", plan.Undeclared[0].RefID)
+	if len(plan.Deletes) != 0 {
+		t.Errorf("expected nothing deleted for a row that is already gone, got %+v", plan.Deletes)
+	}
+
+	// With the row live it becomes a delete instead.
+	db.currentRows["grants|9"] = map[string]any{"x": 1}
+
+	plan, err = (PlanSyncAction{DB: db, State: db.state, Declared: files, Dirty: dirtySet(files)}).Execute(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(plan.Deletes) != 1 || plan.Deletes[0].RefID != "g1" {
+		t.Errorf("expected g1 planned for deletion, got %+v", plan.Deletes)
 	}
 }

@@ -32,8 +32,18 @@ type SyncPlan struct {
 	// that was found, with no baseline, so the declaration is written over it.
 	// The apply records the tracking.
 	Adopted map[string]Adoption
-	// Undeclared are tracked rows no file declares any more. Nothing would be
-	// deleted on their account; they are here so a dry run reports them.
+	// Deletes are tracked entities no file declares any more whose row is still
+	// in the database. The declaration is the desired state, so an entity it no
+	// longer mentions is one joka is being told to stop owning, and owning it
+	// means the row goes with it. Ordered children before parents.
+	Deletes []domain.TrackedRow
+	// Forgets are tracked entities no file declares any more whose row is
+	// already gone. Nothing is written; the tracking is dropped. This is the
+	// orphan that used to need `entity forget`.
+	Forgets []domain.TrackedRow
+	// Undeclared are tracked rows joka cannot match to a declaration at all,
+	// because they carry no _id. Not knowing whether a file declares them is
+	// different from knowing none does, so they are reported and left alone.
 	Undeclared []domain.TrackedRow
 }
 
@@ -130,7 +140,8 @@ func (c ColumnChange) IsConflict() bool { return c.Verdict == VerdictConflict }
 // be recorded or the next run adopts it all over again.
 func (p *SyncPlan) HasChanges() bool {
 	return len(p.Inserts) > 0 || len(p.Updates) > 0 ||
-		len(p.Conflicts) > 0 || len(p.Undeclared) > 0 || len(p.Adopted) > 0
+		len(p.Conflicts) > 0 || len(p.Undeclared) > 0 || len(p.Adopted) > 0 ||
+		len(p.Deletes) > 0 || len(p.Forgets) > 0
 }
 
 // ConflictedColumns counts the columns across every conflicted row.
@@ -355,13 +366,61 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 		}
 	}
 
-	for _, row := range a.State.AllRows() {
-		if !declared[row.RefID] {
-			plan.Undeclared = append(plan.Undeclared, row)
-		}
+	if err := a.planUndeclared(ctx, plan, declared); err != nil {
+		return nil, err
 	}
 
 	return plan, nil
+}
+
+// planUndeclared sorts the tracked rows no file declares any more into what
+// happens to each.
+//
+// The declaration is the desired state, so an entity it no longer mentions is
+// one joka is being told to stop owning. Still in the database: delete it.
+// Already gone: drop the tracking, which is the orphan nothing used to clear
+// without `entity forget`.
+//
+// A row with no _id is neither. joka cannot match it to a declaration at all,
+// so "no file declares it" is not something it knows — it is something it
+// cannot tell. Those are reported and left alone. Deleting them would mean the
+// first sync after a version 1 database's upgrade removing every row written
+// before joka recorded _ids, which is the data loss this whole model exists to
+// prevent.
+func (a PlanSyncAction) planUndeclared(ctx context.Context, plan *SyncPlan, declared map[string]bool) error {
+	for _, row := range a.State.AllRows() {
+		if declared[row.RefID] {
+			continue
+		}
+
+		if row.RefID == "" {
+			plan.Undeclared = append(plan.Undeclared, row)
+			continue
+		}
+
+		live, err := a.DB.RowExists(ctx, row.TableName, row.PKColumn, row.RowPK)
+		if err != nil {
+			return fmt.Errorf("checking whether %s %s=%d is still there: %w",
+				row.TableName, row.PKColumn, row.RowPK, err)
+		}
+
+		if live {
+			plan.Deletes = append(plan.Deletes, row)
+			continue
+		}
+		plan.Forgets = append(plan.Forgets, row)
+	}
+
+	// Children before parents: a foreign key makes the order load-bearing, and
+	// the insertion order is the only record of which is which.
+	sort.Slice(plan.Deletes, func(i, j int) bool {
+		if plan.Deletes[i].EntityFile != plan.Deletes[j].EntityFile {
+			return plan.Deletes[i].EntityFile < plan.Deletes[j].EntityFile
+		}
+		return plan.Deletes[i].InsertionOrder > plan.Deletes[j].InsertionOrder
+	})
+
+	return nil
 }
 
 // planInsert describes one row that would be inserted. A template that cannot
