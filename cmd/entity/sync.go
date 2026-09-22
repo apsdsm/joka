@@ -606,7 +606,7 @@ func reportUndeclared(rows []domain.TrackedRow) {
 	}
 	fmt.Println()
 	color.Yellow("  Nothing was deleted \u2014 an entity declared nowhere is removed, but these cannot be")
-	color.Yellow("  matched either way. 'joka entity forget <file>' drops the tracking.")
+	color.Yellow("  matched either way. Give them an _id, or drop their rows from the tracking by hand.")
 	fmt.Println()
 }
 

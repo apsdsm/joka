@@ -98,7 +98,9 @@ func main() {
 				return err
 			}
 
-			if c.Name() == "make" {
+			// `migrate new` writes a file and never opens a connection, so it
+			// runs without a reachable database.
+			if c.Name() == "new" {
 				return nil
 			}
 
@@ -187,8 +189,8 @@ func main() {
 		},
 	}
 
-	makeCmd := &cobra.Command{
-		Use:   "make [name]",
+	migrateNewCmd := &cobra.Command{
+		Use:   "new [name]",
 		Short: "Create a new migration file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -379,47 +381,6 @@ Use --dry-run to print the plan without applying anything.`,
 
 	entityDiffCmd.Flags().BoolVar(&diffNoValues, "no-values", false, "Skip the per-row column comparison (saves one query per matched row)")
 
-	var (
-		forgetOrphans bool
-		forgetForce   bool
-	)
-
-	entityForgetCmd := &cobra.Command{
-		Use:         "forget [file]",
-		Short:       "Remove joka's tracking for an entity file without touching its database rows",
-		Args:        cobra.MaximumNArgs(1),
-		Annotations: mutates,
-		RunE: func(c *cobra.Command, args []string) error {
-			if forgetOrphans && len(args) > 0 {
-				return fmt.Errorf("pass either a file or --orphans, not both")
-			}
-			if !forgetOrphans && len(args) == 0 {
-				return fmt.Errorf("specify an entity file to forget, or --orphans to forget every tracked file that is no longer on disk")
-			}
-
-			filePath := ""
-			if len(args) > 0 {
-				filePath = args[0]
-			}
-
-			return entity.RunEntityForgetCommand{
-				DB:           dbConn,
-				EntitiesDir:  entitiesDir,
-				FilePath:     filePath,
-				Orphans:      forgetOrphans,
-				Force:        forgetForce,
-				AutoConfirm:  autoConfirm,
-				OutputFormat: outputFormat,
-				Profile:      profile,
-				StateFile:    stateFile,
-				JokaVersion:  version,
-			}.Execute(c.Context())
-		},
-	}
-
-	entityForgetCmd.Flags().BoolVar(&forgetOrphans, "orphans", false, "Forget every tracked entity file that is no longer on disk")
-	entityForgetCmd.Flags().BoolVar(&forgetForce, "force", false, "Forget the tracking even for rows that are still in the database")
-
 	dropCmd := &cobra.Command{
 		Use:         "drop",
 		Short:       "Drop every table in the database (including joka_* tracking)",
@@ -452,8 +413,8 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 
-	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
-	entityCmd.AddCommand(entitySyncCmd, entityDiffCmd, entityForgetCmd)
+	migrateCmd.AddCommand(migrateNewCmd, migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
+	entityCmd.AddCommand(entitySyncCmd, entityDiffCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
@@ -466,7 +427,7 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 
-	root.AddCommand(initCmd, makeCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		if outputFormat == shared.OutputJSON {

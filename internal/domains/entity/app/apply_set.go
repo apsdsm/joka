@@ -209,7 +209,8 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			// the author meant would be worse than saying so.
 			if row.Table != e.Table {
 				return nil, fmt.Errorf("%w: _id %q is tracked as a row in %q but %s now declares it in %q; "+
-					"use 'joka entity forget' to release the _id, or a different _id for the new row",
+					"give the new row a different _id; the old one is then declared nowhere, and sync "+
+					"removes the row it names",
 					domain.ErrEntityTableChanged, e.RefID, row.Table, file.Path, e.Table)
 			}
 

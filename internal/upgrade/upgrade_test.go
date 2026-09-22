@@ -222,7 +222,10 @@ func TestRunBlocksOnDuplicateRefID(t *testing.T) {
 	if !errors.Is(err, upgrade.ErrBlocked) {
 		t.Fatalf("expected ErrBlocked, got %v", err)
 	}
-	for _, want := range []string{"role_owner", "local/a.yaml", "dev1/a.yaml", "entity forget"} {
+	// The remedy has to be one that works. It named `entity forget` until that
+	// was checked: forget is a mutating command, so this blocker gated it, and
+	// its first step is a state load that fails on this very ambiguity.
+	for _, want := range []string{"role_owner", "local/a.yaml", "dev1/a.yaml", "joka_entity_rows"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected %q in:\n%s", want, err)
 		}

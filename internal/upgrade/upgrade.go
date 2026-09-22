@@ -187,8 +187,10 @@ func ambiguousIDBlockers(ctx context.Context, db *sql.DB) ([]string, error) {
 	if len(dupes) > 0 {
 		blockers = append(blockers, fmt.Sprintf(
 			"these _ids are claimed by more than one tracked row: %s. An _id identifies one row, so "+
-				"one claim has to go — 'joka entity forget <file>' drops a file's tracking without "+
-				"touching its rows", strings.Join(dupes, "; ")))
+				"one claim has to go. No joka command can do it: every one that writes is gated on "+
+				"this upgrade, and reading the tracking fails on the same ambiguity. Drop the losing "+
+				"claim directly, e.g. DELETE FROM joka_entity_rows WHERE entity_file = '<file>'",
+			strings.Join(dupes, "; ")))
 	}
 
 	return blockers, nil

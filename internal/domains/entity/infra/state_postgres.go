@@ -249,9 +249,9 @@ func (b *PostgresStateBackend) loadLegacyEntities(ctx context.Context, state *do
 		}
 
 		if first, dup := claimed[row.RefID]; dup {
-			return fmt.Errorf("%w: %q is claimed by a row in %s and another in %s; "+
-				"drop one file's tracking with 'joka entity forget <file>'",
-				domain.ErrStateAmbiguous, row.RefID, first, row.EntityFile)
+			return fmt.Errorf("%w: %q is claimed by a row in %s and another in %s; drop the losing "+
+				"claim directly, e.g. DELETE FROM joka_entity_rows WHERE entity_file = '%s'",
+				domain.ErrStateAmbiguous, row.RefID, first, row.EntityFile, row.EntityFile)
 		}
 		claimed[row.RefID] = row.EntityFile
 

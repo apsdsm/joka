@@ -263,7 +263,9 @@ changing nothing:
 Error: tracking upgrade is blocked: cannot make _id the identity of a tracked row
   these _ids are claimed by more than one tracked row: role_owner (2 rows, in
   local/a.yaml and dev1/a.yaml). An _id identifies one row, so one claim has to
-  go — 'joka entity forget <file>' drops a file's tracking without touching its rows
+  go. No joka command can do it: every one that writes is gated on this upgrade,
+  and reading the tracking fails on the same ambiguity. Drop the losing claim
+  directly, e.g. DELETE FROM joka_entity_rows WHERE entity_file = '<file>'
 ```
 
 Read-only commands (`entity diff`, `migrate status`, `migrate verify`) work
@@ -280,12 +282,13 @@ before deciding.
 A database with tracking tables but no `joka_meta` predates the marker — it is
 read as the current version and stamped on the next command that writes.
 
-### `joka make <name>`
+### `joka migrate new <name>`
 
-Creates a new timestamped migration file in the migrations directory.
+Creates a new timestamped migration file in the migrations directory. It writes
+a file and never opens a connection, so it works without a reachable database.
 
 ```bash
-joka make create_users_table
+joka migrate new create_users_table
 # Creates: devops/migrations/250615143022_create_users_table.sql
 ```
 
@@ -352,17 +355,21 @@ previously — including a reference to an entity declared in another file. File
 are processed in load order, so the target's file has to sort first, the same
 rule as within a file.
 
-An entity that no file declares any more is reported, never deleted — a seed
-file edited by mistake should not take data with it:
+An entity that no file declares any more is deleted — the declaration is the
+desired state, so an entity it no longer mentions is one joka is being told to
+stop owning. The plan names every row first, and the confirmation is the gate:
 
 ```
-2 tracked entities are no longer declared in any file:
-  field_ceo  fields id 3  (last declared in 03_ceo.yaml)
-  field_ceo_v1  field_versions id 3  (last declared in 03_ceo.yaml)
+Declared in no file any more — these rows will be DELETED:
+  - field_ceo  fields id 3  (last declared in 03_ceo.yaml)
+  - field_ceo_v1  field_versions id 3  (last declared in 03_ceo.yaml)
 
-  Nothing was deleted. 'joka entity forget <file>' drops the tracking,
-  'joka entity diff <file>' shows what each one points at.
+Proceed with entity sync? (only 'yes' will confirm):
 ```
+
+A tracked row with no `_id` is the exception: joka cannot match it to a
+declaration at all, so "no file declares it" is not something it knows. Those
+are reported and left alone.
 
 Before applying, sync prints a plan — new files show the rows to be inserted, and modified files show a per-column before/after diff. Use `--dry-run` to print the plan and exit without changing anything (and without taking the advisory lock). Non-deterministic columns like `{{ argon2id|… }}` and `{{ now }}` are shown as `(regenerated)`; secret-backed columns (`{{ asm.… }}`, hashed or plain) are also redacted this way and are never fetched or displayed at plan time. A `{{ lookup|… }}` whose target row doesn't exist yet (e.g. it's inserted by another file in the same sync) is shown as `(lookup, resolved at apply time)` rather than failing the plan. With `--output json`, the plan is included as a `plan` object.
 
@@ -488,56 +495,6 @@ joka entity diff system_fields.yaml -o json | jq '.lines[] | select(.status=="in
 joka entity diff system_fields.yaml -o json |
   jq '.lines[] | select(.status=="adopt") | {ref_id, pk_value, matched_on}'
 ```
-
-### `joka entity forget <file>` / `joka entity forget --orphans`
-
-Removes joka's tracking for an entity file — its entry in the state document and
-every row recorded under it — **without touching the rows that tracking points
-at, or the file on disk.** The opposite of `reimport`, which replaces the rows
-and keeps the tracking.
-
-It is for the two states no other command resolves:
-
-| State | What happened | What forget does |
-|---|---|---|
-| tracked, rows gone | the rows were deleted by hand elsewhere, so tracking points at nothing | drops the tracking; `entity sync` then treats the file as new |
-| orphaned | the file and its rows were both deleted, but the tracking outlived them | drops the tracking; nothing else is left to clean up |
-
-```bash
-joka entity forget 01_operators/sysadmin_grants.yaml
-joka entity forget --orphans     # every tracked file that is no longer on disk
-```
-
-It shows what it will remove and the state of each row before asking to confirm:
-
-```
-Entity forget:
-
-  08_slots/system_assignments.yaml
-    entity_slot_assignments  id 5  (_id slot_a)  — table no longer exists
-    slots                    id 12               — already gone from the database
-
-  Database rows are not touched. Files on disk are not touched.
-
-Forget this tracking? Database rows are not touched (only 'yes' will confirm):
-```
-
-**It refuses when the rows are still in the database.** Dropping the tracking
-for a live row leaves a row joka does not own, and the next `entity sync` treats
-the file as new and inserts a second copy. `--force` overrides:
-
-```
-Error: tracked rows are still in the database: 1 of 1; use --force to forget
-them anyway
-```
-
-Retiring a seed file that should stop being applied is two steps, because forget
-deliberately does not touch files: forget the tracking, then delete the file or
-rename it so discovery skips it (any extension other than `.yaml` / `.yml`
-works, e.g. `mv seed.yaml seed.yaml.off`).
-
-`--output json` returns `{"status": "ok", "forgotten": [{file, rows: [{table,
-pk_column, pk_value, ref_id, live, table_missing}], live}]}`.
 
 ### `joka unlock`
 

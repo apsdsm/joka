@@ -21,7 +21,7 @@ go run . [command] [options]
 
 # Examples
 go run . init
-go run . make "add_users_table"
+go run . migrate new "add_users_table"
 go run . migrate up
 go run . migrate status
 go run . migrate snapshot
@@ -29,7 +29,6 @@ go run . migrate verify
 go run . migrate consolidate --up-to 250116140000
 go run . entity sync
 go run . entity diff admin_user.yaml
-go run . entity forget admin_user.yaml
 go run . drop
 go run . reset
 go run . unlock
@@ -91,7 +90,7 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 - **Migration files**: Named `YYMMDDHHMMSS_description.sql` in `devops/migrations/` by default.
 - **CLI flags**: `--env` for .env path, `--profile`/`-p` for the config profile, `--migrations` for migrations dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
 - **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
-- **Advisory locking**: `migrate up`, `entity sync`, `entity forget`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
+- **Advisory locking**: `migrate up`, `entity sync`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
 
 ## Database Tables
 
@@ -270,35 +269,6 @@ which is the problem that made `entity sync` skip already-synced files in the fi
 - `--output json` includes a `plan` object (and `dry_run: true` for `--dry-run`).
 - Value comparison normalizes driver types to strings; a column stored as a SQL decimal may show a spurious diff against a YAML float that formats differently (e.g. `3.50` vs `3.5`).
 
-**Entity forget** (`joka entity forget <file>` / `--orphans`):
-- Removes the `joka_entities` record and every `joka_entity_rows` entry for a file. **Never touches
-  the rows they point at, and never touches the file on disk.** The inverse of `reimport`, which
-  replaces the rows and keeps the tracking.
-- It is the one thing sync deliberately will not do. Sync never deletes and never disowns: a tracked
-  entity no file declares is reported and left alone, and its file's record stays in the state for
-  ever, because `forgetEmptyFiles` only fires for a file whose entities moved somewhere else, not one
-  that was deleted. Forget covers what that leaves standing:
-  - **Retiring a seed.** Delete the file, forget the tracking, and the rows stay as ordinary
-    application data joka no longer owns. Needs `--force`, since the rows are live.
-  - **An orphan**: file and rows both gone, tracking outlived them. Nothing is live, so no `--force`.
-  - **A duplicate `_id` claim blocking a tracking upgrade**, where two entity sets were seeded into
-    one database and one claim has to go.
-- **Refuses when a tracked row is still in the database** (`ErrRowsStillLive`): dropping the tracking
-  for a live row hands it to nobody, which is worth confirming. `--force` overrides; the plan reports
-  the live rows either way.
-  - The refusal predates adoption and used to be justified by duplication — the next sync would
-    insert a second copy. It no longer does: a file that still declares the entity finds the row by
-    its unique key and claims it back, so forgetting without deleting the file is a no-op with extra
-    steps. The command said otherwise in its output until this was checked against a real run.
-- `--orphans` resolves its targets through `EntityStatusAction`, which compares the files on disk
-  against the tracked ones. It is the last caller of that action; `entity status`, the command it was
-  written for, is gone.
-- `ForgetEntityAction` splits `Plan` (read-only, used for the preview and the refusal) from
-  `Execute`. `Execute` returns the plan it acted on, and returns it alongside `ErrRowsStillLive` too,
-  so the caller shows the offending rows rather than packing them into the error string.
-- Deliberately does not delete or rename files. Retiring a seed is forget + `rm`, or forget +
-  `mv seed.yaml seed.yaml.off` (`DiscoverEntityFiles` only picks up `.yaml` / `.yml`).
-
 **Entity diff** (`joka entity diff <file>`):
 - Lines the declared graph up against `joka_entity_rows` and against the live rows, and prints one
   row per alignment line with a `= ≠ + - ~ !` gutter. Read-only; takes no lock and creates no
@@ -406,10 +376,12 @@ around something sync could not do, and sync does all of it now.
 | Removed | Why |
 |---|---|
 | `entity update` | Skipped tracked `_id`s and inserted the rest. Sync does that for the whole set. Its one distinguishing property — never touching an existing row — meant an edit to an existing entity was silently ignored. |
-| `entity status` | Reported per-file `synced`/`modified` from the content hash, which no longer decides what a sync does. `entity sync --dry-run` answers the question it was being asked. `EntityStatusAction` survives for `entity forget --orphans`. |
+| `entity status` | Reported per-file `synced`/`modified` from the content hash, which no longer decides what a sync does. `entity sync --dry-run` answers the question it was being asked. `EntityStatusAction` went with `entity forget`, its last caller. |
 | `entity reimport` | Existed for the structural changes sync used to refuse. `--decayed` rewrites every column, `Recreate` puts back a deleted row, and identity matching handles renames and moves. |
 | `joka status` | Visibility work from the same commit as `entity diff` and `entity forget`, done to find a way around a sync that could not be trusted. The per-domain commands it aggregated are all still there. |
 | `joka data sync` | The template domain, and with it `--templates`, the `templates:`/`tables:`/`ignore_foreign_keys` config keys and reset's fourth step. See below. |
+| `joka entity forget` | Four things named it as the remedy. `--orphans` is rule **e** of the existence table, automatic. `ErrEntityTableChanged` already offered "or a different `_id`", which adoption makes work. The duplicate-`_id` upgrade blocker named it and could never run it — forget was a mutating command the blocker gated, and its first step was a state load that the same ambiguity fails. What was left was "keep the rows, stop tracking", reachable only by deleting the file and forgetting *before* the next sync, since a sync after the file is gone deletes the row. A two-step whose wrong order destroys the data it was meant to save. |
+| `joka make` | Renamed `joka migrate new`. Creating a migration file is a migration operation, and it was the only verb sitting at the top level. |
 
 **Templates are gone.** `joka data sync` seeded whole tables from CSV/YAML under a `truncate`
 strategy — delete every row, insert from files — with `update` and `delete` declared in the config
@@ -425,6 +397,11 @@ would have meant reintroducing deletion. Sync has since taken that on for every 
 **Existence**), so the gap templates filled is closed rather than merely dropped.
 
 `{{ lookup|… }}` is unaffected: it queries any table regardless of what seeded it.
+
+**There is no way to stop tracking a row without deleting it.** That is the existence table's
+design, not an omission: it has no cell for tracked-and-undeclared-but-kept. If joka should be able
+to hand a seeded row to the application, that is a new cell to add deliberately, not `entity forget`
+to bring back.
 
 **Deletion came back, in sync rather than in a command.** `reimport --prune` deleted on a flag whose
 output only said "tracked rows to delete: N"; `DBAdapter.DeleteRow` went with it when reimport was
@@ -490,8 +467,7 @@ told. Not done.
 2. ~~Re-key `joka_entity_rows` on `ref_id`.~~ Done — see **Tracking upgrades** below.
 3. ~~Identity matching in sync.~~ Done — see **Identity matching** below.
 4. ~~Adopting a row joka did not insert.~~ Done — see **Adoption** under Convergence.
-5. `entity diff --undeclared` and `entity forget --undeclared`, to act in bulk on the entities sync
-   already reports as declared nowhere.
+5. ~~Bulk action on entities declared nowhere.~~ Done — sync deletes them; see **Existence**.
 6. Infer the primary key column and retire `_pk`.
 
 ## Tracking upgrades
@@ -529,7 +505,8 @@ as metadata — where the entity was last declared — and is no longer what ide
 
 Blocked by two things, both real rather than theoretical:
 
-- **Rows with no `ref_id`**, synced before joka recorded one. Fix with `entity forget`.
+- **Rows with no `ref_id`**, synced before joka recorded one. Nothing removes them automatically:
+  sync reports them, because an unkeyed row cannot be matched to a declaration either way.
 - **An `_id` claimed by more than one tracked row.** Version 1 allowed this because it keyed on the
   file, so two entity sets seeded into one database (a `dev1/` and a `local/` tree of the same
   seeds) both claim the same `_id`s. One claim has to go.
@@ -549,7 +526,8 @@ A row with **no** `_id` is deliberately not a blocker, and version 2 no longer b
 It used to, and the refusal named mutating commands as the remedy — both of which
 the same refusal blocked, along with `drop` and `reset`. A database in that state had no joka command
 that could move it; tic_main was found in exactly that state. Those rows go into the document's
-`Unkeyed`, where `entity forget` clears them.
+`Unkeyed`, where sync reports them and nothing deletes them — joka cannot tell whether a file
+declares a row it cannot key.
 
 **`drop` and `reset` are not gated on the upgrade at all** (`joka:wipes`). They destroy the tracking,
 so upgrading it first is meaningless, and being unable to reset a database because its bookkeeping
@@ -687,9 +665,6 @@ is written, which is not done.
   in the action that writes. `entity sync` previews with `PlanSyncAction` on the outer read and
   applies with `ApplySetAction` on the inner one. Making the apply consume the previewed plan instead
   is `proposal_entity_convergence_20260918.md` D10, and is not done.
-- **`entity forget` is the exception**: every target edits the one document and the command saves it
-  once inside a transaction, so forgetting three orphans is one write rather than six statements with
-  nothing around them.
 - **`app.DBAdapter` carries no tracking at all** — seven methods, all of them operations on the
   seeded tables (`InsertRow`, `UpdateRow`, `DeleteRow`, `GetRow`, `TableExists`, `RowExists`,
   `LookupValue`). Reading or writing what joka tracked goes through the backend, so there is one

@@ -193,13 +193,13 @@ func renderDiffSummary(w io.Writer, d *app.EntityDiff) {
 	case !d.Tracked:
 		color.New(color.FgCyan).Fprintf(w, "  → joka entity sync   (inserts all %d)\n", d.DeclaredCount)
 	case !d.OnDisk:
-		color.New(color.FgYellow).Fprintf(w, "  → joka entity forget %s\n", d.Path)
+		color.New(color.FgYellow).Fprintf(w,
+			"  → joka entity sync   (the file is gone, so its rows are deleted)\n")
 	case d.Changes > 0:
 		color.New(color.FgYellow).Fprintf(w, "  → joka entity sync   (updates %d %s in place)\n", d.Changes, isAreRowsNoun(d.Changes))
 	case d.MissingRows > 0:
 		color.New(color.FgYellow).Fprintf(w, "  → joka entity sync   (puts back the missing %s)\n",
 			isAreRowsNoun(d.MissingRows))
-		color.New(color.FgYellow).Fprintf(w, "  → joka entity forget %s     (drops the tracking instead, if the deletion was deliberate)\n", d.Path)
 	default:
 		color.New(color.FgGreen).Fprintln(w, "  the file and the tracking agree")
 	}

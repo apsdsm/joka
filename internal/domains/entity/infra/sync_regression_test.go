@@ -70,8 +70,10 @@ func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 	}
 }
 
-// classify mirrors `entity status`: it asks EntityStatusAction for the status
-// of rel given the file on disk and the recorded tracking state.
+// classify asks the same question `entity status` used to answer: is this file
+// new, modified or synced relative to what joka recorded? It goes through
+// app.FileStatusFor, which is what the sync command itself calls, so the
+// regression below is measured against the verdict sync acts on.
 func classify(t *testing.T, db *sql.DB, entitiesDir, rel string) domain.FileStatus {
 	t.Helper()
 	ctx := context.Background()
@@ -81,22 +83,13 @@ func classify(t *testing.T, db *sql.DB, entitiesDir, rel string) domain.FileStat
 		t.Fatalf("loading state: %v", err)
 	}
 
-	results, err := (app.EntityStatusAction{
-		State:       state,
-		EntitiesDir: entitiesDir,
-		Files:       []string{rel},
-	}).Execute()
+	hash, err := app.HashFileContent(filepath.Join(entitiesDir, rel))
 	if err != nil {
-		t.Fatalf("status: %v", err)
+		t.Fatalf("hashing %s: %v", rel, err)
 	}
 
-	for _, r := range results {
-		if r.Path == rel {
-			return r.Status
-		}
-	}
-	t.Fatalf("no status reported for %s", rel)
-	return ""
+	stored, tracked := state.FileHash(rel)
+	return app.FileStatusFor(tracked, stored, hash)
 }
 
 // applyModified mirrors the sync command's update path for a single modified

@@ -94,7 +94,7 @@ Infrastructure implementations.
 | Command | What it does |
 |---------|-------------|
 | `joka init` | Creates the `joka_migrations` table |
-| `joka make <name>` | Creates a new timestamped `.sql` file in the migrations directory |
+| `joka migrate new <name>` | Creates a new timestamped `.sql` file in the migrations directory |
 | `joka migrate up` | Applies all pending migrations (with locking) |
 | `joka migrate status` | Prints the status of every migration in the chain |
 | `joka migrate snapshot [index]` | Prints the stored schema snapshot for a migration (defaults to latest) |
