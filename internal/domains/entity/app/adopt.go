@@ -54,17 +54,19 @@ type Adoption struct {
 // exactly the rows it is meant to find.
 func adopt(
 	ctx context.Context,
-	db DBAdapter,
+	keys *keyCache,
 	e domain.Entity,
 	file string,
 	order int,
 ) (Adoption, bool, error) {
-	keys, err := db.UniqueKeys(ctx, e.Table)
+	db := keys.db
+
+	candidates, err := keys.of(ctx, e.Table)
 	if err != nil {
 		return Adoption{}, false, err
 	}
 
-	for _, columns := range keys {
+	for _, columns := range candidates {
 		key, usable := literalKey(e, columns)
 		if !usable {
 			continue
@@ -114,6 +116,44 @@ func adopt(
 	}
 
 	return Adoption{}, false, nil
+}
+
+// keyCache remembers each table's unique indexes for the length of one run.
+//
+// Without it `UniqueKeys` is asked once per entity rather than once per table,
+// and the ratio is not small: jjc2's shape is 294 entities over 18 tables, so
+// 276 of the 294 catalog queries were asking a question already answered. That
+// was 23% of every round trip a first adoption made.
+//
+// A run's lifetime is the right scope. The set of unique indexes can only change
+// under a migration, and joka does not migrate and seed in the same command —
+// until `joka apply` does, and then the cache has to be built after the
+// migrations rather than before.
+type keyCache struct {
+	db     DBAdapter
+	tables map[string][][]string
+}
+
+func newKeyCache(db DBAdapter) *keyCache {
+	return &keyCache{db: db, tables: make(map[string][][]string)}
+}
+
+// of returns the table's unique indexes, reading the catalog the first time.
+//
+// A table with none caches the empty answer too, so a set full of entities joka
+// cannot adopt does not re-ask for each one.
+func (c *keyCache) of(ctx context.Context, table string) ([][]string, error) {
+	if keys, known := c.tables[table]; known {
+		return keys, nil
+	}
+
+	keys, err := c.db.UniqueKeys(ctx, table)
+	if err != nil {
+		return nil, err
+	}
+
+	c.tables[table] = keys
+	return keys, nil
 }
 
 // literalKey narrows an entity's declaration to the named columns, and reports

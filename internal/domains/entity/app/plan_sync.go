@@ -272,6 +272,10 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	plan := &SyncPlan{}
 
+	// One read of each table's unique indexes for the whole run, rather than one
+	// per entity. See keyCache.
+	keys := newKeyCache(a.DB)
+
 	// Before anything reads the state: a move says what the state already was,
 	// so the rest of the plan has to see the post-move world.
 	plan.Moves = applyMoves(a.State, a.Declared)
@@ -301,7 +305,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 			// on top of it, which is what the unique constraint used to stop
 			// with a duplicate key error and no way forward.
 			if !isTracked {
-				adoption, adopted, err := adopt(ctx, a.DB, e, file.Path, i)
+				adoption, adopted, err := adopt(ctx, keys, e, file.Path, i)
 				if err != nil {
 					return nil, fmt.Errorf("%s: looking for an existing %s (_id %s): %w",
 						file.Path, e.Table, e.RefID, err)

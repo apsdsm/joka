@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
@@ -289,5 +290,26 @@ func TestAdoptionRecordsWhatTheRowHeld(t *testing.T) {
 	plan := seeded(t, db, file)
 	if len(plan.Conflicts) != 1 || plan.Conflicts[0].Columns[0].Column != "label" {
 		t.Errorf("expected drift on the adopted row reported as a conflict, got %+v", plan.Conflicts)
+	}
+}
+
+func TestUniqueKeysAreReadOncePerTable(t *testing.T) {
+	// Measured at jjc2's shape — 294 entities over 18 tables — asking per
+	// entity was 294 catalog queries where 18 would do, 23% of every round trip
+	// a first adoption made.
+	db := newMockDBAdapter()
+	db.uniqueKeys = map[string][][]string{"fields": {{"xid"}}}
+
+	entities := make([]domain.Entity, 0, 20)
+	for i := 0; i < 20; i++ {
+		entities = append(entities, col("fields", fmt.Sprintf("e%02d", i),
+			map[string]any{"xid": fmt.Sprintf("x%02d", i)}))
+	}
+
+	seeded(t, db, entityFile("a.yaml", entities...))
+
+	if db.uniqueKeyCalls != 1 {
+		t.Errorf("expected one catalog read for one table across 20 entities, got %d",
+			db.uniqueKeyCalls)
 	}
 }

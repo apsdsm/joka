@@ -982,7 +982,23 @@ way forward short of dropping the data.
   being claimed for the first time needs it; without it the plan dies with "not found in reference
   map".
 - **The claim is printed, not counted.** The rows were put there by something other than joka and are
-  about to be written over, so the plan names each one and the column it matched on.
+  about to be written over, so the plan names each one and the column it matched on. At jjc2's scale
+  that is 294 lines, which is too many — the list wants the same cap `reportUndeclared` uses.
+- **Each table's unique indexes are read once per run** (`keyCache`), not once per entity. Measured at
+  jjc2's shape — 294 entities over 18 tables — asking per entity was 294 catalog queries where 18
+  would do, 23% of every round trip a first adoption made.
+
+**Measured cost**, 294 entities over 18 tables, counted from `log_statement='all'`:
+
+| | queries | local | @10ms | @30ms |
+|---|---|---|---|---|
+| first adoption | 944 | 0.32s | 9.8s | 28.6s |
+| steady state | 310 | 0.05s | 3.1s | 9.3s |
+| `joka status` | 11 | 0.01s | 0.1s | 0.3s |
+
+Adoption is 3.2 round trips per entity: one `FindByUniqueKey`, and two `GetRow` — `liveBaseline` and
+the plan's own read of the same columns of the same row. Collapsing those two is the next saving
+available and has not been done.
 
 Adoption is what makes the `state_identity` marker load-bearing rather than informational.
 Before it, a sync against the wrong database announced itself with a duplicate key; now it would

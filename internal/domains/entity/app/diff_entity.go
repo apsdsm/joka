@@ -225,6 +225,7 @@ type pair struct {
 
 func (a DiffEntityAction) buildLines(ctx context.Context, diff *EntityDiff, declared []domain.Entity, depths []int, tracked []domain.TrackedRow, pairs []pair) error {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	keys := newKeyCache(a.DB)
 	refMap := make(map[string]int64)
 	tableExists := make(map[string]bool)
 	regenerated := make(map[string]struct{})
@@ -269,7 +270,7 @@ func (a DiffEntityAction) buildLines(ctx context.Context, diff *EntityDiff, decl
 			// key the declaration fills in and claims it if it is there, so the
 			// diff has to look in the same place or it reports an insert that
 			// sync will not perform.
-			adoption, adopted, err := adopt(ctx, a.DB, *entity, a.Path, p.declared)
+			adoption, adopted, err := adopt(ctx, keys, *entity, a.Path, p.declared)
 			if err != nil {
 				return err
 			}

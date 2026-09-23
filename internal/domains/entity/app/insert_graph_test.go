@@ -25,6 +25,10 @@ type mockDBAdapter struct {
 	// is the default so existing fixtures keep inserting.
 	uniqueKeys map[string][][]string
 
+	// uniqueKeyCalls counts catalog reads, so a test can assert the per-run
+	// cache is doing its job.
+	uniqueKeyCalls int
+
 	// state is the tracking, and the only record of it: the adapter carries no
 	// tracking methods any more. A fixture sets it up with track, a test reads
 	// it back with fileHash or trackedRows.
@@ -470,6 +474,7 @@ func TestInsertGraphAction(t *testing.T) {
 
 // UniqueKeys returns the unique indexes the fixture declared for the table.
 func (m *mockDBAdapter) UniqueKeys(_ context.Context, table string) ([][]string, error) {
+	m.uniqueKeyCalls++
 	return m.uniqueKeys[table], nil
 }
 
