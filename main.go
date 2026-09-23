@@ -242,11 +242,14 @@ func main() {
 		},
 	}
 
+	// No annotation: this only reads joka_snapshots. Tagged as mutating it
+	// stamped joka_meta, ran the tracking upgrade and went through the
+	// wrong-database gate — so looking at a stored snapshot wrote four rows, and
+	// on a database whose state file had moved on it was refused outright.
 	migrateSnapshotCmd := &cobra.Command{
-		Use:         "snapshot [migration_index]",
-		Short:       "View schema snapshot for a migration",
-		Args:        cobra.MaximumNArgs(1),
-		Annotations: mutates,
+		Use:   "snapshot [migration_index]",
+		Short: "View schema snapshot for a migration",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			var index string
 			if len(args) > 0 {
@@ -483,7 +486,7 @@ func refuseWrongDatabase(c *cobra.Command, stateFile, profile string, db *sql.DB
 
 	return fmt.Errorf("%w: %s names %s, and this database is %s. Nothing was written.\n"+
 		"  If the connection is right, the state file is stale: remove it, or point --statefile "+
-		"somewhere else. 'joka status' shows both.",
+		"somewhere else.",
 		domain.ErrWrongDatabase, path,
 		identityOrNone(doc.Identity), identityOrNone(metaState.StateIdentity))
 }
