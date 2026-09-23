@@ -259,3 +259,35 @@ func TestDecayedStillHonoursOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestAdoptionRecordsWhatTheRowHeld(t *testing.T) {
+	// Without this an adopted entity has no baseline, so drift on it is
+	// invisible: live-versus-baseline cannot be asked, every difference reads as
+	// push, and the next hand-edit is silently overwritten. Adopting tic_main
+	// left five of its six entities in exactly that state.
+	db := seededDB(t)
+
+	file := entityFile("a.yaml", col("fields", "alpha", map[string]any{
+		"xid":   "field-one",
+		"label": "Set up by hand", // already agrees
+	}))
+
+	applyAll(t, db, file)
+
+	alpha, tracked := db.state.Row("alpha")
+	if !tracked {
+		t.Fatal("expected the row claimed")
+	}
+	if hash, ok := alpha.Baseline("label"); !ok || hash != HashValue("Set up by hand") {
+		t.Fatalf("expected the live value recorded as the baseline, got %q ok=%v", hash, ok)
+	}
+
+	// And it does its job: the database moving that column is now a conflict
+	// rather than something joka assumes it is free to overwrite.
+	db.currentRows["fields|7"] = map[string]any{"xid": "field-one", "label": "Edited in the app"}
+
+	plan := seeded(t, db, file)
+	if len(plan.Conflicts) != 1 || plan.Conflicts[0].Columns[0].Column != "label" {
+		t.Errorf("expected drift on the adopted row reported as a conflict, got %+v", plan.Conflicts)
+	}
+}

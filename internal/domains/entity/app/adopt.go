@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 )
@@ -15,11 +17,14 @@ import (
 // schema has — which is how every existing joka user's first run under the _id
 // model ended. tic_main failed on `api_keys_xid_key`.
 //
-// The row is claimed, not compared: an adopted entity gets a nil baseline, and
-// a nil baseline reads as push, so the declaration is written over whatever the
-// row holds and the plan shows every column it changes. That is the destructive
-// reading, and it is the right one — the seed files are the desired state, and
-// a row joka is being told to own should end up saying what they say.
+// The row is claimed, not merged with: its baseline is set to what it holds at
+// the moment of the claim, so every column the declaration disagrees about reads
+// as a push and is written over. That is the destructive reading, and it is the
+// right one — the seed files are the desired state, and a row joka is being told
+// to own should end up saying what they say.
+//
+// Recording that baseline rather than leaving it nil is what makes drift
+// detectable afterwards. See liveBaseline.
 type Adoption struct {
 	// RefID is the entity's _id.
 	RefID string
@@ -73,6 +78,26 @@ func adopt(
 			return Adoption{}, false, err
 		}
 
+		// The baseline is what the row holds at the moment joka takes ownership
+		// of it.
+		//
+		// A nil baseline would read as push, which gets the claim itself right —
+		// the declaration is written over the row — but leaves every column that
+		// already agreed with no baseline at all, for ever. Drift on those is
+		// then invisible: no third point, so live-versus-baseline cannot be
+		// asked, and the next hand-edit is silently overwritten. Adopting an
+		// existing product left five of tic_main's six entities in exactly that
+		// state, which is the one case adoption exists for.
+		//
+		// Recording the live values does not change what the claim does. A
+		// column that differs still pushes: declared moved from the baseline,
+		// live has not, which is the push row of the table. A column that agrees
+		// is unchanged, and now has a baseline to be measured against later.
+		baseline, err := liveBaseline(ctx, db, e, pk)
+		if err != nil {
+			return Adoption{}, false, err
+		}
+
 		return Adoption{
 			RefID:     e.RefID,
 			File:      file,
@@ -83,10 +108,7 @@ func adopt(
 				PKValue:  pk,
 				File:     file,
 				Order:    order,
-				// No baseline. joka did not write this row, so it has no record
-				// of applying anything to it, and a nil baseline is exactly
-				// that statement — every difference reads as push.
-				Columns: nil,
+				Columns:  baseline,
 			},
 		}, true, nil
 	}
@@ -111,4 +133,30 @@ func literalKey(e domain.Entity, columns []string) (map[string]any, bool) {
 	}
 
 	return key, len(key) > 0
+}
+
+// liveBaseline reads the declared columns of the row being adopted and hashes
+// them, so the entity starts with a record of what was there when joka claimed
+// it.
+//
+// A row that cannot be read after being found is not a case worth tolerating:
+// the unique key just matched it, so a failure here is a real error rather than
+// a missing row.
+func liveBaseline(ctx context.Context, db DBAdapter, e domain.Entity, pk int64) (map[string]string, error) {
+	columns := make([]string, 0, len(e.Columns))
+	for name := range e.Columns {
+		columns = append(columns, name)
+	}
+	if len(columns) == 0 {
+		return nil, nil
+	}
+	sort.Strings(columns)
+
+	live, err := db.GetRow(ctx, e.Table, columns, e.PKColumn, pk)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s %s=%d to record what it holds: %w",
+			e.Table, e.PKColumn, pk, err)
+	}
+
+	return BaselineOf(live), nil
 }
