@@ -75,6 +75,20 @@ one is the **Entities**, **Entity state**, **Convergence** and **Identity matchi
 - **`infra/`** — PostgreSQL and filesystem implementations. Implements the interfaces defined in `app/`. The database adapter lives in `postgres.go`; helpers shared within the package (the `DBTX` interface, small conversions) live in `shared.go`.
 - **`infra/models/`** — Flat structs for DB rows and file representations.
 
+## Skills
+
+`.claude/skills/` holds two, and they have different audiences:
+
+- **`release`** — the release-readiness workflow for this repo. For someone working *on* joka.
+- **`joka`** — how to use joka against a project's database: the mental model, the commands, the
+  workflows, and the traps. For an agent working *in a consuming project* (tic_main, jjc2, lnc_main),
+  which is why it is self-contained and assumes nothing about this repo being present.
+
+The second is the one to keep current when behaviour changes. Every command, flag, error string,
+reserved key and template expression it names was checked against the binary when it was written, and
+its `removed:` and `moved:` snippets were run verbatim against tic_main. Do the same when editing it:
+a skill that documents a flag joka no longer has is worse than no skill.
+
 ## Versioning
 
 The version is defined as a `const` in `main.go`. When bumping the version:
