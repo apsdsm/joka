@@ -10,6 +10,7 @@ import (
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/shared"
+	"github.com/apsdsm/joka/cmd/status"
 	"github.com/apsdsm/joka/config"
 	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/connection"
@@ -180,6 +181,31 @@ func main() {
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 
+	// No annotation. Status is read-only, so it stays out of the upgrade gate,
+	// the wrong-database refusal and the joka_meta stamp — a status that stamped
+	// the database would change what it reports on, and one refused for
+	// describing the wrong database would refuse the question it exists for.
+	statusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Report what joka has done to this database",
+		Long: `Report what joka has done to this database.
+
+An inventory, not a diff: status answers "what is", where a plan answers "what
+would change". Read-only, creates nothing, and always exits 0 when the report
+could be built — 'joka migrate verify' is the drift gate for schema and
+'joka entity sync' for seeds.`,
+		RunE: func(c *cobra.Command, _ []string) error {
+			return status.RunStatusCommand{
+				DB:            dbConn,
+				Profile:       profile,
+				MigrationsDir: migrationsDir,
+				EntitiesDir:   entitiesDir,
+				StateFile:     stateFile,
+				OutputFormat:  outputFormat,
+			}.Execute(c.Context())
+		},
+	}
+
 	initCmd := &cobra.Command{
 		Use:         "init",
 		Short:       "Initialize the migrations table",
@@ -239,27 +265,6 @@ func main() {
 		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return lock.RunUnlockCommand{DB: dbConn, OutputFormat: outputFormat}.Execute(c.Context())
-		},
-	}
-
-	// No annotation: this only reads joka_snapshots. Tagged as mutating it
-	// stamped joka_meta, ran the tracking upgrade and went through the
-	// wrong-database gate — so looking at a stored snapshot wrote four rows, and
-	// on a database whose state file had moved on it was refused outright.
-	migrateSnapshotCmd := &cobra.Command{
-		Use:   "snapshot [migration_index]",
-		Short: "View schema snapshot for a migration",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			var index string
-			if len(args) > 0 {
-				index = args[0]
-			}
-			return migration.RunSnapshotCommand{
-				DB:             dbConn,
-				MigrationIndex: index,
-				OutputFormat:   outputFormat,
-			}.Execute(c.Context())
 		},
 	}
 
@@ -416,7 +421,7 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 
-	migrateCmd.AddCommand(migrateNewCmd, migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
+	migrateCmd.AddCommand(migrateNewCmd, migrateUpCmd, migrateStatusCmd, migrateConsolidateCmd, migrateVerifyCmd)
 	entityCmd.AddCommand(entitySyncCmd, entityDiffCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
@@ -430,7 +435,7 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 
-	root.AddCommand(initCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, statusCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		if outputFormat == shared.OutputJSON {

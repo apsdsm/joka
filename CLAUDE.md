@@ -24,7 +24,7 @@ go run . init
 go run . migrate new "add_users_table"
 go run . migrate up
 go run . migrate status
-go run . migrate snapshot
+go run . status
 go run . migrate verify
 go run . migrate consolidate --up-to 250116140000
 go run . entity sync
@@ -54,6 +54,8 @@ one is the **Entities**, **Entity state**, **Convergence** and **Identity matchi
 - **`db/`** — Database utilities (`Open`, `TableExists`).
 - **`cmd/`** — Command handlers. Each receives dependencies and calls into domain actions.
 - **`internal/domains/`** — Domain logic, organized by bounded context.
+- **`internal/status/`** — The read-only inventory behind `joka status`. Sits above the domains
+  (they never import each other) and reads from all of them.
 - **`internal/textui/`** — Rune-aware terminal table used by `joka entity diff`. Widths are counted in runes, never bytes: `✓` is three bytes and `·` is two, so byte padding misaligns them by different amounts.
 
 ### Domains
@@ -160,7 +162,7 @@ Snapshots cover **base tables only**, and are reconstructed rather than dumped:
 
 - Rebuilt from `pg_catalog` in `reconstructCreateTable`. Column types come from `format_type()`; identity, generated and serial columns are read from `pg_attribute`. `information_schema.columns` is deliberately **not** used: it reports `ARRAY` / `USER-DEFINED` instead of real types and has no way to express identity. Each statement it emits is terminated with `;`, including the index statements appended after the table body. Sequences owned by a `serial` column are recreated by rendering the column as `serial`/`bigserial`.
 
-Views, functions, types, triggers and standalone sequences are **not** captured. Snapshots feed `migrate snapshot` and `migrate verify` only — **not** consolidation, which dumps the schema with pg_dump precisely because a table snapshot cannot describe a whole schema.
+Views, functions, types, triggers and standalone sequences are **not** captured. Snapshots feed `migrate verify` and the drift line in `joka status` only — **not** consolidation, which dumps the schema with pg_dump precisely because a table snapshot cannot describe a whole schema.
 
 Note: the PostgreSQL reconstruction format changed in v0.13.0. Snapshots captured by v0.12.0 or earlier will show as drift in `migrate verify` until the next migration re-captures them.
 
@@ -388,7 +390,8 @@ around something sync could not do, and sync does all of it now.
 | `entity update` | Skipped tracked `_id`s and inserted the rest. Sync does that for the whole set. Its one distinguishing property — never touching an existing row — meant an edit to an existing entity was silently ignored. |
 | `entity status` | Reported per-file `synced`/`modified` from the content hash, which no longer decides what a sync does. `entity sync --dry-run` answers the question it was being asked. The action behind it went with `entity forget`, its last caller. |
 | `entity reimport` | Existed for the structural changes sync used to refuse. `--decayed` rewrites every column, `Recreate` puts back a deleted row, and identity matching handles renames and moves. |
-| `joka status` | Visibility work from the same commit as `entity diff` and `entity forget`, done to find a way around a sync that could not be trusted. The per-domain commands it aggregated are all still there. |
+| `joka status` | Removed, then rebuilt for a different job — see **Status** below. The first one was visibility work compensating for a sync that could not be trusted; the second reports things nothing else says. |
+| `joka migrate snapshot` | Printed the stored `CREATE TABLE` statements for one migration. Its summary (count, latest index, drift) is a status line now, and the statements themselves are a debugging detail for a drift report that has never appeared. |
 | `joka data sync` | The template domain, and with it `--templates`, the `templates:`/`tables:`/`ignore_foreign_keys` config keys and reset's fourth step. See below. |
 | `joka entity forget` | Four things named it as the remedy. `--orphans` is rule **e** of the existence table, automatic. `ErrEntityTableChanged` already offered "or a different `_id`", which adoption makes work. The duplicate-`_id` upgrade blocker named it and could never run it — forget was a mutating command the blocker gated, and its first step was a state load that the same ambiguity fails. What was left was "keep the rows, stop tracking", reachable only by deleting the file and forgetting *before* the next sync, since a sync after the file is gone deletes the row. A two-step whose wrong order destroys the data it was meant to save. |
 | `joka make` | Renamed `joka migrate new`. Creating a migration file is a migration operation, and it was the only verb sitting at the top level. |
@@ -413,6 +416,53 @@ output only said "tracked rows to delete: N"; `DBAdapter.DeleteRow` went with it
 removed, and returned when sync took on the whole existence table. The difference is where the
 decision is made: sync deletes only what the plan named and the operator confirmed, one row at a
 time, never a whole file at once.
+
+## Status
+
+`joka status` (`internal/status`, `cmd/status`) is an **inventory, not a diff**. It answers "what
+is"; a plan answers "what would change". That line is what stops the two being two names for one
+thing, and it is the split terraform draws between `plan` and `show`.
+
+```
+database   tracking v3 · written by joka 0.14.0
+state      the state file and the database agree
+           joka.state.json
+migrations 29 applied · no drift
+entities   6 tracked across 5 files
+           devops/entities/local
+lock       free
+```
+
+**It was built for the orphans.** Most of what it prints was already computed and had nowhere to be
+said:
+
+| | Before |
+|---|---|
+| the state audit | Seven verdicts computed on every write, one acted on. `Describe()` and `NeedsAttention()` had no caller outside the test suite |
+| the tracking marker | `meta.Read` was called and the version never shown |
+| a held lock | Discoverable only by trying a mutating command and being refused, or by running `joka unlock`, which releases it |
+| unkeyed rows | Reported during a sync and no other way |
+| snapshots and drift | `migrate snapshot` dumped the DDL; nothing gave the one-line answer |
+
+- **It creates nothing**, which is the rule every other command breaks deliberately. A missing table
+  is a finding, not something to fix on the way past. Two reads would create one if called directly
+  — `GetLatestSnapshotIndex` ensures `joka_snapshots`, the lock adapter's `GetLock` ensures
+  `joka_lock` — so both are gated behind a `TableExists` probe. `TestStatusCreatesNothing` asserts a
+  bare database still has no `joka_*` tables after a full report.
+- **No `joka:mutates` annotation**, which keeps it out of the upgrade gate, the wrong-database
+  refusal and the `joka_meta` stamp. A status that stamped the database would change what it reports
+  on, and one refused for describing the wrong database would be refusing the question it exists for.
+- **Exit code is always 0** when the report could be built. It is not a gate: `migrate verify` is
+  that for schema and `entity sync` for seeds.
+- **One unreadable half does not take the other with it.** The reason to run status is usually that
+  something is wrong, so each section sets its own `Problem` and the rest still builds. A state
+  document that cannot be read — a duplicate `_id` blocking the version 3 upgrade reads exactly this
+  way — is itself the finding.
+- **Every section always prints**, whether or not it has something to say, so the output reads the
+  same shape each time. A missing line is indistinguishable from a section that failed.
+
+Deliberately *not* folded in: `migrate verify`. It is the CI drift gate with a meaningful exit code,
+and status must not exit non-zero. Status says "1 table drifted" and names verify for the detail.
 
 ## Planned: `joka plan` / `joka apply`
 

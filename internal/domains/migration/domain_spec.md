@@ -104,6 +104,7 @@ Infrastructure implementations.
 | `joka migrate new <name>` | Creates a new timestamped `.sql` file in the migrations directory |
 | `joka migrate up` | Applies all pending migrations (with locking) |
 | `joka migrate status` | Prints the status of every migration in the chain |
-| `joka migrate snapshot [index]` | Prints the stored schema snapshot for a migration (defaults to latest) |
+
 | `joka migrate verify` | Compares the live schema against the latest snapshot; non-zero exit on drift |
+| `joka status` | Reports applied/pending counts and the drift total as part of the whole-database inventory |
 | `joka migrate consolidate --up-to <index>` | Squashes applied history into one pg_dump baseline |

@@ -303,10 +303,6 @@ Shows current migration status, then applies any pending migrations (with confir
 
 Shows the status of every migration (applied or pending) without applying anything.
 
-### `joka migrate snapshot [migration_index]`
-
-Displays the schema snapshot captured after a migration was applied. Shows `CREATE TABLE` statements for all user tables. Omit the index to see the latest snapshot.
-
 ### `joka migrate consolidate --up-to <migration_index>`
 
 Squashes the applied migration history into a single baseline file, dumped by `pg_dump`.
