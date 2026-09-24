@@ -212,6 +212,26 @@ joka entity sync --decayed
 Rewrites every declared column whatever is there and reports no conflicts.
 `_once` columns are still left alone.
 
+## Calling joka from Go
+
+A project that migrates or seeds in its own tests should call the library rather than reimplement
+anything joka does:
+
+```go
+import joka "github.com/apsdsm/joka/jokalib"
+
+joka.Init(ctx, db)
+joka.MigrateUp(ctx, db, "devops/migrations")
+joka.EntitySync(ctx, db, "devops/entities")
+```
+
+Silent by default; `joka.WithOutput(w)` sends progress somewhere. `joka.WithoutLock()` skips the
+advisory lock, which is worth doing against a container the test owns. `EntitySync` fails on a
+conflict and deletes rows no file declares, because there is nobody to ask.
+
+**Do not write your own migration splitter.** `db.SplitSQLStatements` is public, and a private copy
+will disagree with the tool about something — a semicolon inside a comment, for one.
+
 ## Things that will catch you out
 
 **`-e` does not override an exported variable.** If `DATABASE_URL` is already in

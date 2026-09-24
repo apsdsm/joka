@@ -639,6 +639,55 @@ Build order: `plan` first (read-only, useful alone in CI), then root discovery a
 `apply`, then a `--wait` for the container case (`db.Open` pings and fails immediately, so there is
 no retry today).
 
+## The Go library (`github.com/apsdsm/joka/jokalib`)
+
+`joka.Init`, `joka.MigrateUp` and `joka.EntitySync` run joka's operations from Go, so a consuming
+project can migrate and seed in its own tests without shelling out to the binary and without
+reimplementing what the binary does.
+
+**Reimplementing it went wrong in practice**, which is why this exists. jjc2's test helpers wrote
+their own migration splitter; it disagreed with `db.SplitSQLStatements` about a semicolon inside a
+comment, so a migration the tool applied cleanly failed under test — and the rule the team wrote
+down, "no `;` in migration comments", described their splitter rather than joka's.
+`TestMigrateUp/it_splits_statements_the_way_the_tool_does` is that exact file.
+
+- **It lives one level down, and it is not called `joka`.** The root is `package main`, and moving
+  it to `cmd/joka` would change `go install github.com/apsdsm/joka@latest`, which jjc2's
+  `test/docker/go-apis.Dockerfile` already runs. A directory named `joka/` was the first attempt and
+  broke `go build .`: that command writes a binary called `joka` into the repo root and cannot when
+  a directory of that name is there. `.gitignore` swallowed the new package for the same reason —
+  its `/joka` entry is the built binary. Callers who want the short name alias it, which is what the
+  test file does:
+
+  ```go
+  import joka "github.com/apsdsm/joka/jokalib"
+  ```
+- **Silent by default.** `WithOutput(w)` sends progress somewhere; nothing goes to the process
+  stdout otherwise. `RunMigrateUpCommand` and `RunInitCommand` grew an `Output io.Writer` for it,
+  nil meaning `os.Stdout` so the CLI is unchanged.
+- **The lock is on by default**, and `WithoutLock()` turns it off. It costs nothing against a
+  container one test owns and matters against a shared database, so the caller who knows it is
+  private is the one who says so.
+- **A conflict is an error.** `EntitySync` runs `--on-conflict=fail`. Deciding which side wins is a
+  judgement, and a library making it for the caller is how a test helper silently overwrites a
+  database somebody was looking at.
+- **`EntitySync` deletes rows no file declares**, because there is nobody to confirm with — it passes
+  `AllowDelete`, the same bargain `joka reset` makes.
+
+Two things it does not do yet:
+
+- **`EntitySync` ignores `WithOutput`** and writes its plan to stdout. The sync command prints from
+  88 places against migrate up's 9, so threading a writer through it is its own change. Under
+  `go test` the output is buffered and shown only for a failing test, which is why this shipped
+  rather than waiting.
+- **The surface is three functions.** It becomes API the moment anyone imports it, so it grows when
+  something needs it rather than in anticipation.
+
+Already public and worth knowing before adding to this: `db` and `config` are not under `internal/`,
+so `db.SplitSQLStatements`, `db.Open` and the config schema are importable today. So are the
+`cmd/*` command structs, which is what this package calls — it exists to fix their defaults, not to
+reach anything that was locked away.
+
 ## Requests from consuming projects
 
 Raised from jjc2 on 2026-09-24, agreed in this order. The order is by damage prevented, not by size.
@@ -648,7 +697,7 @@ Raised from jjc2 on 2026-09-24, agreed in this order. The order is by damage pre
 | Declined step exits non-zero; a fresh database is quiet | | **Done** |
 | A database remembers which root owns it, and the root is the environment label | 3, 6 | **Done** — see **Root ownership** |
 | Deletion is loud under `--auto` | 4 | Agreed, not built |
-| A Go library entry point | 8 | Agreed, not built |
+| A Go library entry point | 8 | **Done** — see **The Go library** |
 | `--wait` for containers | 9 | Agreed, not built |
 | Detailed exit codes | 11 | Agreed, not built |
 | References resolve across the whole set | 2 | Agreed, not built |
@@ -662,11 +711,10 @@ mappings under exactly that rule. The replacement is `--allow-delete`, required 
 non-interactive run would delete anything, with `reset` exempt. A count cap was considered and
 rejected: it invites arguing about N.
 
-**A Go library entry point** is the cheapest of these and unblocks the most. jjc2's test helpers
-reimplemented migration splitting and got it wrong — the "no `;` in migration comments" rule they
-were working around came from their splitter, not joka's. The logic is under `internal/`, which they
-cannot import, but a facade at the module root can, because `internal/` is importable by anything
-rooted at its parent. Keep the surface minimal; it becomes API the moment it ships.
+**A Go library entry point** is done — see **The Go library** above. One correction to the scoping
+note it was written from: the logic was never locked away. `db`, `config` and `cmd/*` are all
+outside `internal/`, so jjc2 could have called `db.SplitSQLStatements` all along. What the package
+adds is defaults a program wants rather than access it lacked.
 
 **`entities:` accepts a list** has one real problem and it is not the parsing. `State.Files` is keyed
 on path, and two roots can both hold `admin.yaml`. Whether that already works depends on whether the
