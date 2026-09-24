@@ -8,7 +8,7 @@ Joka is a database migration and data management tool for PostgreSQL. It tracks 
 
 ## Install
 
-Build from source (requires Go 1.25+):
+Build from source (requires Go 1.26+):
 
 ```bash
 go install github.com/apsdsm/joka@latest
@@ -37,14 +37,53 @@ Instead of an env var you can declare the connection in `.jokarc.yaml` (see **Co
 Create a `.jokarc.yaml` in your project root to configure paths:
 
 ```yaml
+root: myproject-local       # optional; see "Root ownership" below
 migrations: devops/migrations
 entities: devops/entities
-statefile: joka.state.json    # optional; see "State file" below
+statefile: joka.state.json  # optional; see "State file" below
 ```
 
 All fields are optional. CLI flags override `.jokarc.yaml` values. If neither is provided, defaults
 apply (`devops/migrations`, `devops/entities`, and `joka[.<profile>].state.json` beside the working
 directory).
+
+**`entities:` takes one path or several**, synced as one desired state. Put what every environment
+shares in one directory and what one environment adds in another:
+
+```yaml
+entities:
+  - ../shared/entities
+  - ./entities
+```
+
+A `{{ ref.id }}` resolves across the whole set, whichever directory declares its target. Two roots
+must not overlap: the same directory twice, or one inside another, is refused.
+
+### Root ownership
+
+A configuration may name itself, and the database records which name claimed it:
+
+```yaml
+root: myproject-prod
+```
+
+A second root pointed at the same database is refused on every command that writes, `drop` and
+`reset` included:
+
+```
+this database belongs to a different joka root: it belongs to "myproject-local",
+and this configuration declares "myproject-prod"
+  if you meant to move it, re-run with --adopt-root
+```
+
+This is what stops two environment directories sharing one database and each deleting the other's
+rows. It is stronger than the state file, which is usually gitignored and so absent in CI. Name the
+root after the environment and it doubles as an environment label: a prod directory pointed at a
+test database is the same refusal.
+
+Declaring no root keeps joka behaving exactly as it did, so this is opt-in. Once a database *is*
+claimed, a configuration declaring no root is also refused — otherwise deleting one line would turn
+the protection off.
 
 ### Connection
 
@@ -506,7 +545,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--env` | `-e` | `.env` | Path to the environment file |
 | `--profile` | `-p` | | Config profile to use (from `.jokarc.yaml` `profiles:`) |
 | `--migrations` | `-m` | `devops/migrations` | Path to the migrations directory |
-| `--entities` | | `devops/entities` | Path to the entities directory |
+| `--entities` | | `devops/entities` | Path to an entities directory. Repeat it for several, synced as one desired state |
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`; must be the last applied migration) |
@@ -514,6 +553,88 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--statefile` | | | Path to the state file (default: `joka[.<profile>].state.json` beside the working directory) |
 | `--on-conflict` | | `fail` | What to do when the database changed since joka last wrote: `fail`, `file`, `db` or `ask` (`entity sync`). `db` and `ask` rewrite the seed files where the database wins |
 | `--decayed` | | `false` | Treat the seeded data in the database as stale: rewrite every declared column and report no conflicts (`entity sync`) |
+| `--allow-delete` | | `false` | Let a non-interactive run delete rows no file declares (`entity sync`). The confirmation is the gate otherwise, and `--auto` / `--output json` skip it |
+| `--root` | | | Name of this joka root, overriding `root:` in `.jokarc.yaml` |
+| `--adopt-root` | | `false` | Move this database's root claim to this root |
+| `--wait` | | `0` | Retry the connection for this long before giving up (e.g. `30s`). For container entrypoints |
+
+## Exit codes
+
+| | |
+|---|---|
+| 0 | nothing to do |
+| 1 | joka could not do it, or refused to |
+| 2 | there is work to apply |
+
+`migrate status`, `migrate verify`, `entity sync --dry-run` and `entity diff` return 2 when they find
+work. `joka status` never does — it is an inventory, not a gate. Both 1 and 2 are non-zero, so a
+check for plain failure is unaffected.
+
+```bash
+joka entity sync --dry-run
+case $? in
+  0) echo "seeds are up to date" ;;
+  2) echo "seeds need applying" ;;
+  *) echo "joka could not tell" ;;
+esac
+```
+
+## Per-environment overrides
+
+An entity file may carry an `overrides:` list, setting column values on an entity declared elsewhere
+in the set — so an entity that differs in two fields per environment is declared once and patched,
+rather than copied whole:
+
+```yaml
+overrides:
+  - _id: lgc_client
+    redirect_uri: https://test.example.com/callback
+```
+
+The merge is per column. An override cannot set `_is`, `_has`, `_pk` or `_once` — those say what an
+entity *is*, and an entity that is a different thing per environment is two entities. An override
+naming an `_id` nothing declares is refused, so a typo is not a silent no-op.
+
+## Calling joka from Go
+
+A project that migrates or seeds in its own tests can call the library rather than shell out or
+reimplement what the tool does:
+
+```go
+import joka "github.com/apsdsm/joka/jokalib"
+
+joka.Init(ctx, db)
+joka.MigrateUp(ctx, db, "devops/migrations")
+joka.EntitySync(ctx, db, []string{"devops/entities"})
+```
+
+Silent by default; `joka.WithOutput(w)` sends progress somewhere and `joka.WithoutLock()` skips the
+advisory lock, which is worth doing against a container one test owns. `EntitySync` fails on a
+conflict and deletes rows no file declares, because there is nobody to ask.
+
+## Reaching a database through a tunnel
+
+When the database is in a private subnet, joka can open the port forward itself:
+
+```yaml
+connection:
+  source: secret
+  host: db.private.example.com
+  port: 5432
+  secret:
+    secret_id: prod/db
+    region: ap-northeast-1
+  tunnel:
+    target: i-0123456789abcdef0
+```
+
+`remote_host` and `remote_port` default to the connection's own, and then to the host in the
+resolved DSN, so the database is named once. Needs `aws` and `session-manager-plugin` on `PATH`;
+joka names whichever is missing. The forward is closed on the way out, whether the command succeeded
+or not.
+
+Secrets and tunnels are both provider-backed (`internal/providers`). joka ships AWS; adding another
+vendor is adding a package that implements the same two interfaces.
 
 ## How It Works
 

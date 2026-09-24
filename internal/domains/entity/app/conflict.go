@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -145,7 +144,7 @@ func KeepFromResolutions(conflicts []RowConflict, resolutions []Resolution) map[
 // entitiesDir is where the declared files live; Resolution.File is relative to
 // it, the way every other path in the domain is. It returns the files it
 // changed, so the caller can say which ones to look at in a diff.
-func ApplyResolutions(entitiesDir string, resolutions []Resolution) ([]string, error) {
+func ApplyResolutions(fullPath map[string]string, resolutions []Resolution) ([]string, error) {
 	var changed []string
 	seen := make(map[string]bool)
 
@@ -154,7 +153,11 @@ func ApplyResolutions(entitiesDir string, resolutions []Resolution) ([]string, e
 			continue
 		}
 
-		path := filepath.Join(entitiesDir, r.File)
+		path, known := fullPath[r.File]
+		if !known {
+			return changed, fmt.Errorf("no entity file loaded for %q", r.File)
+		}
+
 		if err := SetEntityColumn(path, r.RefID, r.Column, r.Value); err != nil {
 			return changed, err
 		}
@@ -301,4 +304,55 @@ func adoptedBaseline(c ColumnChange) string {
 		return ""
 	}
 	return c.LiveHash
+}
+
+// DeleteRefusedError is what a non-interactive run gets when its plan would
+// delete rows and nothing said that was allowed.
+//
+// It names every row rather than counting them. The rows are about to be gone
+// and the reader is deciding whether that is right, which is not a question a
+// number answers — and in the case this exists for, the count was the only
+// thing said and 16 rows went with it.
+func DeleteRefusedError(deletes []domain.TrackedRow) error {
+	if len(deletes) == 0 {
+		return nil
+	}
+
+	ordered := make([]domain.TrackedRow, len(deletes))
+	copy(ordered, deletes)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].RefID < ordered[j].RefID })
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s, and no file declares them any more",
+		countOf(len(deletes), "row", "rows"))
+
+	for _, row := range ordered {
+		fmt.Fprintf(&b, "\n  %s  %s %s %d  (last declared in %s)",
+			row.RefID, row.TableName, row.PKColumn, row.RowPK, row.EntityFile)
+	}
+
+	b.WriteString("\n  Nothing was written. Pass --allow-delete if that is what you meant," +
+		" or run without --auto to confirm it interactively.")
+
+	// One wrap at the end: Fprintf does not understand %w, so the sentinel
+	// cannot go into the builder.
+	return fmt.Errorf("%w: %s", domain.ErrDeleteNotAllowed, b.String())
+}
+
+// DeleteRefusedSummary is the text-output counterpart of DeleteRefusedError:
+// it counts the rows and points at the list rather than printing it again.
+//
+// The same split as ConflictSummary and ConflictError, for the same reason.
+// The plan has already named every row, first, in a layout an error string
+// cannot match, and repeating them under `Error:` says it twice. JSON, which
+// has no plan in front of it, still gets the full list.
+func DeleteRefusedSummary(deletes []domain.TrackedRow) error {
+	if len(deletes) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s (listed above)."+
+		" Pass --allow-delete if that is what you meant, or run without --auto to confirm"+
+		" them one plan at a time",
+		domain.ErrDeleteNotAllowed, countOf(len(deletes), "row", "rows"))
 }

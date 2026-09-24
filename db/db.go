@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -61,3 +62,65 @@ func TableExists(ctx context.Context, db *sql.DB, tableName string) (bool, error
 	}
 	return exists == 1, nil
 }
+
+// OpenWait is Open, retrying the ping until it succeeds or the deadline
+// passes.
+//
+// It exists for the container case. A compose stack starts joka beside the
+// database it is meant to migrate, and Open pings once and fails, so every
+// entrypoint script in every consuming project grew its own readiness loop —
+// each one reimplementing the same wait against a different tool (pg_isready,
+// nc, a psql call) with a different idea of how long to allow.
+//
+// A zero or negative wait is Open, so the caller does not special-case it.
+//
+// The retry is on the ping rather than on sql.Open, which does not connect. A
+// DSN joka refuses is refused immediately: waiting out a timeout for a URL
+// that can never work is the opposite of helpful.
+func OpenWait(ctx context.Context, dsn string, wait time.Duration) (*sql.DB, error) {
+	if wait <= 0 {
+		return Open(dsn)
+	}
+
+	if !IsPostgresDSN(dsn) {
+		return nil, fmt.Errorf("%w: the connection URL must start with postgres:// or postgresql://", ErrUnsupportedDriver)
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	deadline := time.Now().Add(wait)
+	var lastErr error
+
+	for {
+		if lastErr = db.PingContext(ctx); lastErr == nil {
+			return db, nil
+		}
+
+		// The context going away is the caller giving up, which is not the
+		// same as the database being slow, and must not be retried.
+		if ctx.Err() != nil {
+			db.Close()
+			return nil, ctx.Err()
+		}
+
+		if !time.Now().Add(pingInterval).Before(deadline) {
+			db.Close()
+			return nil, fmt.Errorf("database not reachable after %s: %w", wait, lastErr)
+		}
+
+		select {
+		case <-ctx.Done():
+			db.Close()
+			return nil, ctx.Err()
+		case <-time.After(pingInterval):
+		}
+	}
+}
+
+// pingInterval is how often OpenWait retries. Half a second is short enough
+// that a database that comes up quickly is not kept waiting and long enough
+// not to spin.
+const pingInterval = 500 * time.Millisecond

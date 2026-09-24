@@ -19,9 +19,9 @@ type Resolver struct {
 	cache   map[string]map[string]string
 }
 
-// New builds a Resolver over the configured sources using the default AWS
-// Secrets Manager fetcher (created lazily on first fetch, so constructing a
-// Resolver never touches AWS).
+// New builds a Resolver over the configured sources. The provider is looked up
+// per source on first fetch, lazily, so constructing a Resolver never reaches
+// a vendor, and per source because two sources may live with two providers.
 func New(sources map[string]config.Secret) *Resolver {
 	return NewWithFetcher(sources, nil)
 }
@@ -48,11 +48,16 @@ func (r *Resolver) Resolve(ctx context.Context, source, key string) (string, err
 			return "", fmt.Errorf("secret source %q has no secret_id", source)
 		}
 
-		if r.fetcher == nil {
-			r.fetcher = connection.NewAWSSecretsManager()
+		fetcher := r.fetcher
+		if fetcher == nil {
+			f, err := connection.FetcherFor(&sec)
+			if err != nil {
+				return "", err
+			}
+			fetcher = f
 		}
 
-		fetched, err := r.fetcher.Fetch(ctx, sec.SecretID, sec.Region)
+		fetched, err := fetcher.Fetch(ctx, connection.RefFor(&sec))
 		if err != nil {
 			return "", fmt.Errorf("fetching secret source %q: %w", source, err)
 		}

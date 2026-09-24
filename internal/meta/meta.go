@@ -72,6 +72,23 @@ const (
 	// same database, at an earlier version.
 	KeyStateIdentity = "state_identity"
 
+	// KeyStateRoot names the joka root that owns this database — the value of
+	// `root:` in the configuration the owning directory holds.
+	//
+	// It exists because state_identity could not carry this. That identity
+	// lives in joka_meta and is compared against a copy in the state file, and
+	// the state file is generally gitignored — so in CI there is no file, the
+	// audit returns no_file, and nothing refuses. Two roots then sync one
+	// database and each deletes the other's entities as declared nowhere,
+	// under --auto, without a word. That is how jjc2's CI lost 16 rows.
+	//
+	// The root is declared in a committed file instead, so the comparison
+	// survives a checkout with no state file in it. It doubles as the
+	// environment label: in a devops/joka/{local,test,prod} layout the root
+	// name is the environment, and a prod root pointed at a test database is
+	// the same disagreement.
+	KeyStateRoot = "state_root"
+
 	// KeyStateVersion counts the times joka has written the entity state,
 	// incremented in the same transaction as the write.
 	//
@@ -100,6 +117,10 @@ type State struct {
 	// here. StateVersion counts the writes.
 	StateIdentity string `json:"state_identity,omitempty"`
 	StateVersion  int    `json:"state_version,omitempty"`
+
+	// StateRoot is the joka root that claimed this database; empty when no
+	// root has, which is every database until a configuration declares one.
+	StateRoot string `json:"state_root,omitempty"`
 }
 
 // Read returns what the database records. It creates nothing, so it is safe for
@@ -112,6 +133,20 @@ func Read(ctx context.Context, db *sql.DB) (State, error) {
 		return state, err
 	}
 	if !exists {
+		// A database with no joka table at all is a new one, not an old one.
+		// PreMarkerVersion says "written before the marker existed", and
+		// nothing has written here, so there is no bookkeeping to be behind.
+		// Reading it as pre-marker made every fresh database announce the two
+		// tracking upgrades on its first mutating command — upgrades of
+		// entity tracking that did not exist, applied as no-ops, reported as
+		// though something had moved.
+		bare, err := isBare(ctx, db)
+		if err != nil {
+			return state, err
+		}
+		if bare {
+			state.TrackingVersion = TrackingVersion
+		}
 		return state, nil
 	}
 	state.Present = true
@@ -145,6 +180,8 @@ func Read(ctx context.Context, db *sql.DB) (State, error) {
 			state.JokaVersion = value
 		case KeyStateIdentity:
 			state.StateIdentity = value
+		case KeyStateRoot:
+			state.StateRoot = value
 		case KeyStateVersion:
 			// Unparseable is treated as zero rather than as an error: the
 			// counter is for comparing against a file, and refusing to read
@@ -271,5 +308,117 @@ func EnsureTable(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("creating %s: %w", Table, err)
 	}
+	return nil
+}
+
+// preMarkerTables are the joka tables a build older than joka_meta could have
+// left behind. A database holding none of them has no bookkeeping to upgrade.
+//
+// joka_lock is not among them: it is a visibility row for a lock that is
+// released at the end of every run, so it says nothing about what wrote here.
+var preMarkerTables = []string{
+	"joka_migrations",
+	"joka_snapshots",
+	"joka_entities",
+	"joka_entity_rows",
+	"joka_state",
+}
+
+// isBare reports whether a database with no joka_meta also has no tracking to
+// be behind — a database joka has never written to.
+func isBare(ctx context.Context, db *sql.DB) (bool, error) {
+	for _, table := range preMarkerTables {
+		exists, err := jokadb.TableExists(ctx, db, table)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// ErrWrongRoot means the database is owned by a joka root other than the one
+// running, so writing to it would converge it against the wrong desired state.
+var ErrWrongRoot = errors.New("this database belongs to a different joka root")
+
+// CheckRoot decides whether a root may write to this database.
+//
+// Existence has a truth table and so does ownership:
+//
+//	| recorded | declared |                                              |
+//	|----------|----------|----------------------------------------------|
+//	| absent   | absent   | nothing; joka worked this way before roots   |
+//	| absent   | declared | the root claims it on the way out            |
+//	| present  | absent   | refuse — a claimed database must be named    |
+//	| present  | same     | proceed                                      |
+//	| present  | other    | refuse, naming both                          |
+//
+// The third row is what makes the guard hold. If an undeclared root were
+// allowed through, deleting one line from a configuration would turn the
+// protection off, and the failure it protects against — a second root deleting
+// the first root's rows as declared nowhere — is silent and destructive.
+//
+// Adoption is opt-in as a consequence: a database is only ever claimed once
+// some configuration declares a root, so an existing project that declares
+// none carries on exactly as it did.
+func CheckRoot(recorded, declared string, adopt bool) error {
+	switch {
+	case recorded == "":
+		return nil
+	case adopt:
+		return nil
+	case declared == recorded:
+		return nil
+	case declared == "":
+		return fmt.Errorf("%w: it belongs to %q, and this configuration declares no root\n"+
+			"  add `root: %s` to %s, or pass --root",
+			ErrWrongRoot, recorded, recorded, ConfigFileName)
+	}
+
+	return fmt.Errorf("%w: it belongs to %q, and this configuration declares %q\n"+
+		"  if you meant to move it, re-run with --adopt-root",
+		ErrWrongRoot, recorded, declared)
+}
+
+// ConfigFileName is named here only so the refusal above can point at it. The
+// config package owns the file; meta owns the marker.
+const ConfigFileName = ".jokarc.yaml"
+
+// ClaimRoot records the root that owns this database, if nothing has claimed
+// it yet. Nothing happens when the root is empty or already recorded.
+//
+// DO NOTHING rather than DO UPDATE: a claim is made once, and a second root
+// writing its own name over the first is precisely what CheckRoot exists to
+// stop.
+func ClaimRoot(ctx context.Context, db *sql.DB, root string) error {
+	return writeRoot(ctx, db, root, `ON CONFLICT (key) DO NOTHING`)
+}
+
+// AdoptRoot moves the claim to this root, overwriting whatever held it. It is
+// what --adopt-root does, and it is the only way a claim ever changes.
+func AdoptRoot(ctx context.Context, db *sql.DB, root string) error {
+	return writeRoot(ctx, db, root,
+		`ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`)
+}
+
+func writeRoot(ctx context.Context, db *sql.DB, root, onConflict string) error {
+	if root == "" {
+		return nil
+	}
+
+	if err := EnsureTable(ctx, db); err != nil {
+		return err
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO `+Table+` (key, value, updated_at)
+		VALUES ($1, $2, CURRENT_TIMESTAMP)
+		`+onConflict, KeyStateRoot, root); err != nil {
+		return fmt.Errorf("recording %s: %w", KeyStateRoot, err)
+	}
+
 	return nil
 }

@@ -23,9 +23,9 @@ import (
 // Read-only: it acquires no lock and writes nothing, including the tracking
 // tables (a file that has never been synced is something to report).
 type RunEntityDiffCommand struct {
-	DB          *sql.DB
-	EntitiesDir string
-	FilePath    string
+	DB           *sql.DB
+	EntitiesDirs []string
+	FilePath     string
 	// SkipValues turns off the per-row column comparison (--no-values).
 
 	SkipValues   bool
@@ -36,19 +36,12 @@ func (r RunEntityDiffCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
 	fail := func(err error) error {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
 		return err
 	}
 
 	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	fullPath := filepath.Join(r.EntitiesDir, r.FilePath)
-	onDisk := true
-	if _, err := os.Stat(fullPath); err != nil {
-		onDisk = false
-	}
+	fullPath, onDisk := locateEntityFile(r.EntitiesDirs, r.FilePath)
 
 	// Tracking is read, never created: a file that has never been synced is a
 	// finding, and diff is the command you reach for on a database where
@@ -96,11 +89,12 @@ func (r RunEntityDiffCommand) Execute(ctx context.Context) error {
 			Status string `json:"status"`
 			*app.EntityDiff
 		}{Status: "ok", EntityDiff: diff})
-		return nil
+		return pendingIfDifferent(diff)
 	}
 
 	renderDiff(os.Stdout, diff)
-	return nil
+
+	return pendingIfDifferent(diff)
 }
 
 // renderDiff writes the alignment.
@@ -409,4 +403,40 @@ func hasFollowingSibling(lines []app.DiffLine, i, depth int) bool {
 		}
 	}
 	return false
+}
+
+// pendingIfDifferent reports a file that disagrees with the database as
+// ExitPending. The diff has just been printed, so there is nothing to add; the
+// exit status is what makes the command usable as a check rather than only as
+// something to read.
+func pendingIfDifferent(diff *app.EntityDiff) error {
+	if diff.HasDifferences() {
+		return shared.ErrPendingReported
+	}
+
+	return nil
+}
+
+// locateEntityFile finds the named file under the entity roots, in the order
+// they are declared.
+//
+// The argument is a path relative to a root, which is what a reader has in
+// front of them, so with several roots joka looks in each rather than making
+// them work out which one to spell out. A name that matches in two roots
+// resolves to the first — the same precedence the declared order carries
+// everywhere else. When nothing matches, the first root is used for the
+// message, so it names a path rather than nothing.
+func locateEntityFile(roots []string, rel string) (string, bool) {
+	for _, root := range roots {
+		candidate := filepath.Join(root, rel)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+	}
+
+	if len(roots) == 0 {
+		return rel, false
+	}
+
+	return filepath.Join(roots[0], rel), false
 }

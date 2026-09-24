@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/apsdsm/joka/cmd/shared"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
@@ -24,6 +26,17 @@ type RunMigrateUpCommand struct {
 	// SkipLock skips advisory lock acquisition. Used when an outer command
 	// (e.g. `joka reset`) already holds the lock.
 	SkipLock bool
+	// Output is where progress is written. Nil means os.Stdout, which is what
+	// the CLI wants; the library facade passes io.Discard, because a package a
+	// test helper calls has no business writing to the process stdout.
+	Output io.Writer
+}
+
+func (r RunMigrateUpCommand) out() io.Writer {
+	if r.Output != nil {
+		return r.Output
+	}
+	return os.Stdout
 }
 
 // Execute acquires an advisory lock, applies all pending migrations in a
@@ -35,16 +48,13 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		// Acquire advisory lock to prevent concurrent migration runs.
 		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 		if err := lockAdapter.Acquire(ctx, "migrate up"); err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
 			return err
 		}
 		defer lockAdapter.Release(ctx)
 	}
 
 	if !jsonOut {
-		color.Green("Checking migration chain...")
+		color.New(color.FgGreen).Fprintln(r.out(), "Checking migration chain...")
 	}
 
 	adapter := infra.NewPostgresDBAdapter(r.DB)
@@ -54,20 +64,20 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 	}.Execute(ctx)
 
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
+		// Returned, not printed. main renders whatever a command returns, so a
+		// command that also prints its error says it twice — which is what
+		// `migrate verify` on a database with no snapshot was doing, and every
+		// other command with it. Anything worth adding is added to the error.
 		if errors.Is(err, domain.ErrNoMigrationTable) {
-			color.Red("Migrations table does not exist.")
-			return err
+			return fmt.Errorf("%w: run 'joka init' first", err)
 		}
-		color.Red("Error applying migrations: %v", err)
-		return err
+
+		return fmt.Errorf("applying migrations: %w", err)
 	}
 
 	if !jsonOut {
 		for _, m := range chain {
-			fmt.Printf("Migration %s - Status: %s\n", m.MigrationIndex, m.Status)
+			fmt.Fprintf(r.out(), "Migration %s - Status: %s\n", m.MigrationIndex, m.Status)
 		}
 	}
 
@@ -83,21 +93,21 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 			shared.PrintJSON(map[string]any{"status": "ok", "applied": []string{}, "message": "no pending migrations"})
 			return nil
 		}
-		fmt.Println("No pending migrations to apply.")
+		fmt.Fprintln(r.out(), "No pending migrations to apply.")
 		return nil
 	}
 
 	if !r.AutoConfirm && !jsonOut {
 		if !shared.Confirm(fmt.Sprintf("%d pending migrations found. Apply now? (only 'yes' will apply): ", len(pending))) {
-			fmt.Println("Migration aborted by user.")
-			return nil
+			fmt.Fprintln(r.out(), "Migration aborted by user.")
+			return shared.ErrCancelled
 		}
 	}
 
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("starting transaction: %w", err))
+			return fmt.Errorf("starting transaction: %w", err)
 		}
 		return fmt.Errorf("starting transaction: %w", err)
 	}
@@ -109,7 +119,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '15s'"); err != nil {
 			tx.Rollback()
 			if jsonOut {
-				return shared.PrintErrorJSON(fmt.Errorf("setting lock_timeout: %w", err))
+				return fmt.Errorf("setting lock_timeout: %w", err)
 			}
 			return fmt.Errorf("setting lock_timeout: %w", err)
 		}
@@ -120,7 +130,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 	var applied []string
 	for _, m := range pending {
 		if !jsonOut {
-			fmt.Printf("Applying migration %s...\n", m.MigrationIndex)
+			fmt.Fprintf(r.out(), "Applying migration %s...\n", m.MigrationIndex)
 		}
 		err = app.ApplyAction{
 			DB:        txAdapter,
@@ -130,9 +140,9 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		if err != nil {
 			tx.Rollback()
 			if jsonOut {
-				return shared.PrintErrorJSON(err)
+				return err
 			}
-			color.Red("Error applying migrations: %v", err)
+			color.New(color.FgRed).Fprintf(r.out(), "Error applying migrations: %v\n", err)
 			return err
 		}
 		applied = append(applied, m.MigrationIndex)
@@ -140,7 +150,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 
 	if err := tx.Commit(); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("committing transaction: %w", err))
+			return fmt.Errorf("committing transaction: %w", err)
 		}
 		return fmt.Errorf("committing transaction: %w", err)
 	}
@@ -150,6 +160,6 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	color.Green("All migrations applied successfully.")
+	color.New(color.FgGreen).Fprintln(r.out(), "All migrations applied successfully.")
 	return nil
 }

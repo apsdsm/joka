@@ -403,3 +403,39 @@ func TestResolveColumns(t *testing.T) {
 		}
 	})
 }
+
+func TestSecretRefPrefixes(t *testing.T) {
+	t.Run("both spellings name the same source and key", func(t *testing.T) {
+		// asm. is written into seed files already, and a template prefix is
+		// not something a database migration can rewrite, so it is kept for
+		// ever. secret. is the name to use.
+		for _, ref := range []string{"secret.seed.admin_key", "asm.seed.admin_key"} {
+			source, key, ok := parseSecretRef(ref)
+			if !ok {
+				t.Fatalf("expected %q to parse", ref)
+			}
+			if source != "seed" || key != "admin_key" {
+				t.Errorf("%q gave source %q key %q", ref, source, key)
+			}
+		}
+	})
+
+	t.Run("both are recognised as secret references", func(t *testing.T) {
+		for _, ref := range []string{"secret.a.b", "asm.a.b"} {
+			if !isSecretRef(ref) {
+				t.Errorf("expected %q to be a secret reference", ref)
+			}
+		}
+		for _, ref := range []string{"now", "lookup|t,id,c=1", "handle.id"} {
+			if isSecretRef(ref) {
+				t.Errorf("expected %q not to be a secret reference", ref)
+			}
+		}
+	})
+
+	t.Run("another prefix is not a secret reference", func(t *testing.T) {
+		if _, _, ok := parseSecretRef("gcp.a.b"); ok {
+			t.Error("expected an unknown prefix to be refused")
+		}
+	})
+}

@@ -57,6 +57,8 @@ reordered, or be renamed without losing its row.
 | `joka status` | Read-only inventory. Start here. |
 | `joka entity sync` | Apply the seed files. The only path by which data is seeded. |
 | `joka entity sync --dry-run` | The plan, without applying or taking the lock. |
+| `joka entity sync --allow-delete` | Lets a `--auto` / `--output json` run delete rows no file declares. |
+| `--wait <duration>` | Retry the connection until the deadline. For container entrypoints. |
 | `joka entity diff <file>` | Declared vs tracked vs live, per row, for one file. |
 | `joka migrate status` | Applied vs pending. |
 | `joka migrate up` | Apply pending migrations — all in one transaction. |
@@ -139,6 +141,34 @@ Add an `_id` to every entity it names and sync again. Adoption finds each existi
 key and claims it: no duplicates, nothing deleted. Do **not** wipe `joka_migrations` or the tracking
 tables — that throws away the migration history to fix a problem in the YAML.
 
+### Say which root a directory is
+
+A `.jokarc.yaml` may name itself, and the database remembers which name claimed it:
+
+```yaml
+root: myproject-prod
+```
+
+A second root pointed at the same database is refused rather than allowed to converge it against the
+wrong seed files:
+
+```
+this database belongs to a different joka root: it belongs to "myproject-local", and this
+configuration declares "myproject-prod"
+  if you meant to move it, re-run with --adopt-root
+```
+
+This is what stops two environment directories sharing one database and each deleting the other's
+rows as declared nowhere. It is stronger than the state file, which is usually gitignored and so
+absent in CI. It doubles as the environment label: name the root after the environment and a prod
+directory pointed at a test database is the same refusal.
+
+- Declaring no root keeps joka behaving exactly as before, so this is opt-in.
+- Once a database is claimed, a configuration that declares **no** root is also refused. Add the
+  line, or pass `--root`.
+- `drop` and `reset` are gated on this too, unlike the other refusals.
+- `joka status` names the owner on its database line.
+
 ### Rename an entity's `_id`
 
 Usually nothing to do: joka finds the row again by its unique key and re-keys the
@@ -183,6 +213,95 @@ joka entity sync --decayed
 Rewrites every declared column whatever is there and reports no conflicts.
 `_once` columns are still left alone.
 
+## Calling joka from Go
+
+A project that migrates or seeds in its own tests should call the library rather than reimplement
+anything joka does:
+
+```go
+import joka "github.com/apsdsm/joka/jokalib"
+
+joka.Init(ctx, db)
+joka.MigrateUp(ctx, db, "devops/migrations")
+joka.EntitySync(ctx, db, []string{"devops/entities"})
+```
+
+Silent by default; `joka.WithOutput(w)` sends progress somewhere. `joka.WithoutLock()` skips the
+advisory lock, which is worth doing against a container the test owns. `EntitySync` fails on a
+conflict and deletes rows no file declares, because there is nobody to ask.
+
+**Do not write your own migration splitter.** `db.SplitSQLStatements` is public, and a private copy
+will disagree with the tool about something — a semicolon inside a comment, for one.
+
+## Exit codes
+
+| | |
+|---|---|
+| 0 | nothing to do |
+| 1 | joka could not do it, or refused to |
+| 2 | there is work to apply |
+
+`migrate status`, `migrate verify`, `entity sync --dry-run` and `entity diff` return 2 when they
+find work. `joka status` never does — it is an inventory, not a gate. Both 1 and 2 are non-zero, so
+a check for plain failure is unaffected.
+
+```bash
+joka entity sync --dry-run; case $? in
+  0) echo "seeds are up to date" ;;
+  2) echo "seeds need applying" ;;
+  *) echo "joka could not tell" ;;
+esac
+```
+
+## Waiting for the database
+
+`--wait 30s` retries the connection until the deadline instead of failing on the first attempt. Use
+it in a container entrypoint rather than writing a readiness loop around joka. A DSN joka cannot use
+is still refused immediately.
+
+### Share seeds between environments
+
+`entities:` takes a list, synced as one desired state, and a reference resolves across all of it:
+
+```yaml
+entities:
+  - ../shared/entities
+  - ./entities
+```
+
+Put what every environment has in the shared root, and in the environment's own root put the
+fixtures only it needs — plus an `overrides:` block for the handful of fields that differ:
+
+```yaml
+overrides:
+  - _id: lgc_client
+    redirect_uri: https://test.example.com/callback
+```
+
+An override sets column values on an entity declared elsewhere in the set, merging per column. It
+cannot change `_is`, `_has`, `_pk` or `_once`: those say what an entity is, and an entity that is a
+different thing per environment is two entities. An override naming an `_id` nothing declares is
+refused, so a typo is not a silent no-op.
+
+Two roots must not overlap — the same directory twice, or one inside another, is refused, because
+every file in it would be declared twice.
+
+### Reach a database in a private subnet
+
+```yaml
+connection:
+  source: secret
+  host: db.private.example.com
+  port: 5432
+  secret: { secret_id: prod/db, region: ap-northeast-1 }
+  tunnel:
+    target: i-0123456789abcdef0
+```
+
+joka opens the port forward, connects through it and closes it on the way out. Needs `aws` and
+`session-manager-plugin` on PATH; it names whichever is missing. `remote_host` and `remote_port`
+default to the connection's own, so the database is named once.
+
 ## Things that will catch you out
 
 **`-e` does not override an exported variable.** If `DATABASE_URL` is already in
@@ -194,9 +313,25 @@ will each delete the other's rows, because the other's entities are tracked and
 declared nowhere. Per-environment trees (`entities/local`, `entities/dev1`) are
 selected by `--entities` or a profile, and only one is ever loaded.
 
-**`--auto` and `--output json` skip the confirmation.** That includes the
-confirmation for deletions. In CI, a seed file deleted by mistake takes its rows
-with it.
+**`--auto` and `--output json` need `--allow-delete` before they may delete.** The confirmation is
+what gates deletion interactively, and those two skip it, so a run with nobody watching refuses
+rather than removing rows a mistake left undeclared:
+
+```
+this run would delete rows and nothing said that was allowed: 2 rows (listed above).
+Pass --allow-delete if that is what you meant, or run without --auto to confirm them
+one plan at a time
+```
+
+A `removed:` entry is exempt — somebody wrote the `_id` down and a reviewer saw it. `joka reset` is
+exempt too.
+
+**A declined prompt exits non-zero.** `joka migrate up && joka entity sync` stops if you answer
+anything but `yes` to the migration, rather than syncing against a schema that was never migrated.
+
+**joka must be run from the directory holding its config.** It reads `.jokarc.yaml` from the working
+directory and never searches upward. From anywhere else it refuses before opening a connection, so
+nothing is written to whatever `DATABASE_URL` happened to point at.
 
 **Deleting a seed file deletes its rows.** This is the point, but it surprises
 people. Use `removed: … keep: true` if you meant to keep them.
@@ -244,6 +379,8 @@ value back.
 | Message | What it means |
 |---|---|
 | `the database changed since joka last wrote` | A conflict. Decide with `--on-conflict`. |
+| `this database belongs to a different joka root` | Another joka root claimed this database. Check you are in the right directory; `--adopt-root` moves the claim deliberately. |
+| `not a joka directory` | You are not in the directory holding the `.jokarc.yaml`. Nothing was written. |
 | `the state file describes a different database` | The identity in `joka.state.json` disagrees with the database. Either the connection is wrong, or the state file is stale — remove it or point `--statefile` elsewhere. Read-only commands still work. |
 | `entity set is not valid` | An `_id` is missing, claimed twice, or contradicted by a `removed:`/`moved:` entry. It lists every problem, not just the first. |
 | `tracking upgrade is blocked` | Two tracked rows claim one `_id`. No joka command can fix it — drop the losing claim from `joka_entity_rows` directly. |

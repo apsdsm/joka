@@ -22,7 +22,7 @@ type RunResetCommand struct {
 	// against the `secrets:` sources in .jokarc.yaml.
 	Secrets       entityapp.SecretResolver
 	MigrationsDir string
-	EntitiesDir   string
+	EntitiesDirs  []string
 	AutoConfirm   bool
 	OutputFormat  string
 	StateFile     string
@@ -38,9 +38,6 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	// Single outer lock covers the whole reset.
 	lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 	if err := lockAdapter.Acquire(ctx, "reset"); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
 		return err
 	}
 	defer lockAdapter.Release(ctx) //nolint:errcheck
@@ -57,7 +54,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		if !r.AutoConfirm {
 			if !shared.Confirm("This is destructive. Type 'yes' to proceed: ") {
 				color.Yellow("Reset cancelled.")
-				return nil
+				return shared.ErrCancelled
 			}
 		}
 	}
@@ -73,7 +70,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		SkipLock:     true,
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("drop: %w", err))
+			return fmt.Errorf("drop: %w", err)
 		}
 		return fmt.Errorf("drop: %w", err)
 	}
@@ -87,7 +84,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		OutputFormat: "text",
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("init: %w", err))
+			return fmt.Errorf("init: %w", err)
 		}
 		return fmt.Errorf("init: %w", err)
 	}
@@ -104,7 +101,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		SkipLock:      true,
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("migrate up: %w", err))
+			return fmt.Errorf("migrate up: %w", err)
 		}
 		return fmt.Errorf("migrate up: %w", err)
 	}
@@ -116,8 +113,12 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	if err := (entity.RunEntitySyncCommand{
 		DB:           r.DB,
 		Secrets:      r.Secrets,
-		EntitiesDir:  r.EntitiesDir,
+		EntitiesDirs: r.EntitiesDirs,
 		AutoConfirm:  true,
+		// Exempt from the delete gate. reset dropped every table a moment ago by
+		// design, so there is nothing left for it to protect and a tracked row
+		// nothing declares is debris from the database that used to be here.
+		AllowDelete:  true,
 		OutputFormat: "text",
 		SkipLock:     true,
 		StateFile:    r.StateFile,
@@ -129,7 +130,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		OnConflict: entityapp.ConflictFile,
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("entity sync: %w", err))
+			return fmt.Errorf("entity sync: %w", err)
 		}
 		return fmt.Errorf("entity sync: %w", err)
 	}

@@ -19,13 +19,48 @@ import (
 
 	"github.com/apsdsm/joka/config"
 	jokadb "github.com/apsdsm/joka/db"
+	"github.com/apsdsm/joka/internal/providers"
 )
 
-// SecretFetcher fetches a secret by id and returns its values. A secret stored
-// as a JSON object yields its fields; a plain-string secret yields a single
-// entry under the "" key. Implementations let tests stub out the provider.
+// SecretFetcher fetches a secret by id and returns its values.
+//
+// It is joka's own narrowing of providers.Secrets, kept because the resolver
+// and the tests stub it, and because the caller already knows which source it
+// is asking about. A provider is reached through the registry; see
+// internal/providers.
 type SecretFetcher interface {
-	Fetch(ctx context.Context, secretID, region string) (map[string]string, error)
+	Fetch(ctx context.Context, ref providers.SecretRef) (map[string]string, error)
+}
+
+// FetcherFor returns the secrets provider a Secret block names, defaulting to
+// AWS — which is what every config written before there was a choice means.
+func FetcherFor(sec *config.Secret) (SecretFetcher, error) {
+	name := defaultProvider
+	if sec != nil && sec.Provider != "" {
+		name = sec.Provider
+	}
+
+	return providers.LookupSecrets(name)
+}
+
+// RefFor renders a Secret block as a provider-neutral reference. Anything a
+// particular vendor needs travels in Params rather than in the signature.
+func RefFor(sec *config.Secret) providers.SecretRef {
+	params := make(map[string]string, len(sec.Params)+1)
+	for k, v := range sec.Params {
+		params[k] = v
+	}
+	// `region:` predates params: and stays a key of its own, so it is merged
+	// rather than being a second thing to write.
+	if sec.Region != "" {
+		params["region"] = sec.Region
+	}
+
+	if len(params) == 0 {
+		params = nil
+	}
+
+	return providers.SecretRef{ID: sec.SecretID, Params: params}
 }
 
 // Resolve turns a Connection into a DSN string suitable for db.Open. A nil
@@ -33,6 +68,56 @@ type SecretFetcher interface {
 // secret-backed source needs a fetcher and none is supplied, the default AWS
 // Secrets Manager fetcher is used.
 func Resolve(ctx context.Context, conn *config.Connection, fetcher SecretFetcher) (string, error) {
+	dsn, closeTunnel, err := ResolveWithTunnel(ctx, conn, fetcher)
+	if err != nil {
+		return "", err
+	}
+	// A caller that does not take the closer cannot be holding a tunnel open:
+	// a connection with no `tunnel:` block returns a closer that does nothing.
+	_ = closeTunnel
+
+	return dsn, nil
+}
+
+// ResolveWithTunnel is Resolve, plus the port forward a connection may declare.
+//
+// The returned closer is always non-nil and always safe to call, so a caller
+// defers it without asking whether a tunnel was opened. It must be deferred:
+// the forward is a child process, and dropping it leaks the process and the
+// port.
+func ResolveWithTunnel(ctx context.Context, conn *config.Connection, fetcher SecretFetcher) (string, func() error, error) {
+	noop := func() error { return nil }
+
+	// The DSN is resolved first, and the tunnel takes its defaults from it.
+	//
+	// The other way round, `tunnel:` had to repeat a host the DSN already
+	// carried — obvious with source: env, where the connection block has no
+	// host at all and DATABASE_URL has the only copy. Resolving first costs
+	// nothing: a secrets API is reached over the public internet, not through
+	// the tunnel that is about to be opened for the database.
+	dsn, err := resolveDSN(ctx, conn, fetcher)
+	if err != nil {
+		return "", noop, err
+	}
+
+	session, closeTunnel, err := openTunnel(ctx, conn, dsn)
+	if err != nil {
+		return "", closeTunnel, err
+	}
+
+	// Redirect the finished string rather than the config: the DSN may come
+	// from a secret or a literal url: that carries the real host inside it, and
+	// only the finished string is sure to name where joka is about to connect.
+	dsn, err = redirectDSN(dsn, session)
+	if err != nil {
+		closeTunnel()
+		return "", noop, err
+	}
+
+	return dsn, closeTunnel, nil
+}
+
+func resolveDSN(ctx context.Context, conn *config.Connection, fetcher SecretFetcher) (string, error) {
 	// Check the driver before anything reaches the network: a config still
 	// asking for MySQL should say so, not fail as a Secrets Manager error on
 	// the way to a DSN that would be refused anyway.
@@ -54,14 +139,18 @@ func Resolve(ctx context.Context, conn *config.Connection, fetcher SecretFetcher
 		}
 		return assembleDSN(conn, conn.Password)
 
-	case "aws_secrets_manager":
+	case "secret":
 		if conn.Secret == nil || conn.Secret.SecretID == "" {
-			return "", fmt.Errorf("connection source aws_secrets_manager requires secret.secret_id")
+			return "", fmt.Errorf("a secret connection source requires secret.secret_id")
 		}
 		if fetcher == nil {
-			fetcher = NewAWSSecretsManager()
+			f, err := FetcherFor(conn.Secret)
+			if err != nil {
+				return "", err
+			}
+			fetcher = f
 		}
-		values, err := fetcher.Fetch(ctx, conn.Secret.SecretID, conn.Secret.Region)
+		values, err := fetcher.Fetch(ctx, RefFor(conn.Secret))
 		if err != nil {
 			return "", fmt.Errorf("fetching secret %q: %w", conn.Secret.SecretID, err)
 		}
@@ -80,11 +169,17 @@ func source(conn *config.Connection) string {
 		return "env"
 	}
 	if conn.Source != "" {
+		// The old name for what is now one provider among several. Configs
+		// carrying it outnumber the ones that will ever be rewritten, and a
+		// rename that breaks them buys nothing.
+		if conn.Source == "aws_secrets_manager" {
+			return "secret"
+		}
 		return conn.Source
 	}
 	switch {
 	case conn.Secret != nil:
-		return "aws_secrets_manager"
+		return "secret"
 	case conn.URL != "" || conn.Password != "" || conn.Host != "" || conn.Driver != "":
 		return "literal"
 	default:

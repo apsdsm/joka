@@ -24,7 +24,7 @@ type RunStatusCommand struct {
 	DB            *sql.DB
 	Profile       string
 	MigrationsDir string
-	EntitiesDir   string
+	EntitiesDirs  []string
 	StateFile     string
 	OutputFormat  string
 }
@@ -34,12 +34,12 @@ func (r RunStatusCommand) Execute(ctx context.Context) error {
 		DB:            r.DB,
 		Profile:       r.Profile,
 		MigrationsDir: r.MigrationsDir,
-		EntitiesDir:   r.EntitiesDir,
+		EntitiesDirs:  r.EntitiesDirs,
 		StateFile:     r.StateFile,
 	})
 	if err != nil {
 		if r.OutputFormat == shared.OutputJSON {
-			return shared.PrintErrorJSON(err)
+			return err
 		}
 		return err
 	}

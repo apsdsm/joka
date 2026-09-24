@@ -19,9 +19,32 @@ type SecretResolver interface {
 	Resolve(ctx context.Context, source, key string) (string, error)
 }
 
-// secretRefPrefix marks a template argument as a secret reference of the form
-// asm.<source>.<key> rather than a literal value.
-const secretRefPrefix = "asm."
+// Secret reference prefixes. A template argument starting with one of these
+// names a configured secret source rather than a literal value.
+//
+// `secret.` is the name to use. `asm.` came first, when AWS Secrets Manager was
+// the only provider joka could reach, and it is kept for ever: it is written
+// into seed files, and a template prefix is not something a database migration
+// can rewrite. Both resolve identically: the provider is a property of the
+// source in .jokarc.yaml, not of the reference.
+const (
+	secretRefPrefix = "secret."
+	legacyRefPrefix = "asm."
+)
+
+// isSecretRef reports whether an expression names a secret source.
+func isSecretRef(expr string) bool {
+	return strings.HasPrefix(expr, secretRefPrefix) || strings.HasPrefix(expr, legacyRefPrefix)
+}
+
+// trimSecretRef removes whichever prefix an expression carries.
+func trimSecretRef(expr string) string {
+	if strings.HasPrefix(expr, secretRefPrefix) {
+		return strings.TrimPrefix(expr, secretRefPrefix)
+	}
+
+	return strings.TrimPrefix(expr, legacyRefPrefix)
+}
 
 // resolveColumns processes template expressions in column values. String values
 // containing {{ ... }} are resolved:
@@ -89,8 +112,9 @@ func isNonDeterministicTemplate(v any) bool {
 	}
 	return expr == "now" ||
 		strings.HasPrefix(expr, "argon2id|") ||
-		strings.HasPrefix(expr, secretRefPrefix) ||
-		strings.HasPrefix(expr, "sha256|"+secretRefPrefix)
+		isSecretRef(expr) ||
+		strings.HasPrefix(expr, "sha256|"+secretRefPrefix) ||
+		strings.HasPrefix(expr, "sha256|"+legacyRefPrefix)
 }
 
 // refTemplate returns the referenced handle and true if the raw value is a
@@ -104,7 +128,7 @@ func refTemplate(v any) (string, bool) {
 	if expr == "now" {
 		return "", false
 	}
-	for _, fn := range []string{"argon2id|", "sha256|", "lookup|", secretRefPrefix} {
+	for _, fn := range []string{"argon2id|", "sha256|", "lookup|", secretRefPrefix, legacyRefPrefix} {
 		if strings.HasPrefix(expr, fn) {
 			return "", false
 		}
@@ -159,7 +183,7 @@ func resolveValue(ctx context.Context, s string, refMap map[string]int64, now st
 		return resolveLookup(ctx, expr[len("lookup|"):], db)
 	}
 
-	if strings.HasPrefix(expr, secretRefPrefix) {
+	if isSecretRef(expr) {
 		return resolveSecretRef(ctx, expr, secrets)
 	}
 
@@ -178,32 +202,37 @@ func resolveValue(ctx context.Context, s string, refMap map[string]int64, now st
 }
 
 // resolveHashArg returns an argon2id/sha256 argument as-is unless it is a
-// secret reference (asm.<source>.<key>), in which case the secret value is
-// resolved first.
+// secret reference (secret.<source>.<key> or the legacy asm.), in which case
+// the secret value is resolved first.
 func resolveHashArg(ctx context.Context, raw string, secrets SecretResolver) (string, error) {
-	if !strings.HasPrefix(raw, secretRefPrefix) {
+	if !isSecretRef(raw) {
 		return raw, nil
 	}
 	return resolveSecretRef(ctx, raw, secrets)
 }
 
-// parseSecretRef splits an "asm.<source>.<key>" reference into its source and
-// key. Both must be non-empty and dot-free (the secret_id, which may contain
-// slashes or dots, lives in config — not in the template).
+// parseSecretRef splits a "secret.<source>.<key>" reference (or the legacy
+// "asm." spelling) into its source and key. Both must be non-empty and
+// dot-free: the secret_id, which may contain slashes or dots, lives in config
+// and not in the template.
 func parseSecretRef(s string) (source, key string, ok bool) {
 	parts := strings.Split(s, ".")
-	if len(parts) != 3 || parts[0] != "asm" || parts[1] == "" || parts[2] == "" {
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
 		return "", "", false
 	}
+	if parts[0] != "secret" && parts[0] != "asm" {
+		return "", "", false
+	}
+
 	return parts[1], parts[2], true
 }
 
-// resolveSecretRef resolves an asm.<source>.<key> reference via the configured
+// resolveSecretRef resolves a secret.<source>.<key> reference via the configured
 // secret resolver.
 func resolveSecretRef(ctx context.Context, ref string, secrets SecretResolver) (string, error) {
 	source, key, ok := parseSecretRef(ref)
 	if !ok {
-		return "", fmt.Errorf("%w: %q (want asm.<source>.<key>)", domain.ErrInvalidTemplate, ref)
+		return "", fmt.Errorf("%w: %q (want secret.<source>.<key>)", domain.ErrInvalidTemplate, ref)
 	}
 	if secrets == nil {
 		return "", fmt.Errorf("resolving %q: no secret sources configured (add a `secrets:` map to .jokarc.yaml)", ref)

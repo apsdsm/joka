@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/apsdsm/joka/config"
+	"github.com/apsdsm/joka/internal/providers"
 )
 
 type stubFetcher struct {
@@ -15,7 +16,7 @@ type stubFetcher struct {
 	calls  int
 }
 
-func (s *stubFetcher) Fetch(_ context.Context, _, _ string) (map[string]string, error) {
+func (s *stubFetcher) Fetch(_ context.Context, _ providers.SecretRef) (map[string]string, error) {
 	s.calls++
 	if s.err != nil {
 		return nil, s.err

@@ -21,3 +21,8 @@ do-not-commit
 /joka-dev
 # Local build of the CLI
 /joka
+
+# State files joka writes into the directory it runs from. The jokalib tests
+# call EntitySync, whose working directory is the package.
+joka.state.json
+joka.*.state.json

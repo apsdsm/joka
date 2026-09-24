@@ -25,10 +25,6 @@ func (r RunMakeCommand) Execute(c context.Context) error {
 
 	filename, err := infra.CreateMigrationFile(r.MigrationsDir, r.Name)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Error: %v", err)
 		return err
 	}
 

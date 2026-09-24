@@ -275,7 +275,7 @@ func TestApplyResolutions(t *testing.T) {
 		t.Fatalf("writing the seed file: %v", err)
 	}
 
-	changed, err := ApplyResolutions(dir, []Resolution{
+	changed, err := ApplyResolutions(map[string]string{"a.yaml": filepath.Join(dir, "a.yaml")}, []Resolution{
 		{File: "a.yaml", RefID: "admin", Column: "email", Value: "moved@example.com",
 			KeepDatabase: true, UpdateFile: true},
 		// Kept but not rewritten: a templated column can have the first

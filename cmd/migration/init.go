@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
@@ -16,6 +19,16 @@ import (
 type RunInitCommand struct {
 	DB           *sql.DB
 	OutputFormat string
+	// Output is where progress is written. Nil means os.Stdout — see
+	// RunMigrateUpCommand.Output.
+	Output io.Writer
+}
+
+func (r RunInitCommand) out() io.Writer {
+	if r.Output != nil {
+		return r.Output
+	}
+	return os.Stdout
 }
 
 // Execute creates the migrations tracking table in the database.
@@ -23,7 +36,7 @@ func (r RunInitCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
 	if !jsonOut {
-		color.Green("Initializing migrations system...")
+		color.New(color.FgGreen).Fprintln(r.out(), "Initializing migrations system...")
 	}
 
 	err := app.CreateMigrationTableAction{
@@ -35,19 +48,11 @@ func (r RunInitCommand) Execute(ctx context.Context) error {
 			shared.PrintJSON(map[string]string{"status": "ok", "message": "migrations table already exists"})
 			return nil
 		}
-		color.Yellow("Migrations table already exists.")
+		color.New(color.FgYellow).Fprintln(r.out(), "Migrations table already exists.")
 		return nil
 	} else if errors.Is(err, domain.ErrMigrationTableCreation) {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Error creating migrations table.")
-		return err
+		return fmt.Errorf("creating the migrations table: %w", err)
 	} else if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Unexpected error: %v", err)
 		return err
 	}
 
@@ -56,6 +61,6 @@ func (r RunInitCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	color.Green("Migrations table created successfully.")
+	color.New(color.FgGreen).Fprintln(r.out(), "Migrations table created successfully.")
 	return nil
 }

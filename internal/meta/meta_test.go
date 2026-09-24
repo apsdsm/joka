@@ -24,7 +24,22 @@ func freshDB(t *testing.T) *sql.DB {
 		t.Fatalf("getting test db: %v", err)
 	}
 
-	drop := func() { testlib.DropTablePostgres(t, db, meta.Table) }
+	// Every joka table goes, not just the marker. Read now distinguishes a
+	// database joka has never written from one written before the marker
+	// existed, so a fixture called "fresh" has to actually be bare — otherwise
+	// a table another test in this container left behind decides the answer.
+	drop := func() {
+		for _, table := range []string{
+			meta.Table,
+			"joka_migrations",
+			"joka_snapshots",
+			"joka_entities",
+			"joka_entity_rows",
+			"joka_state",
+		} {
+			testlib.DropTablePostgres(t, db, table)
+		}
+	}
 	drop()
 	t.Cleanup(drop)
 
@@ -42,11 +57,18 @@ func TestReadOnBareDatabase(t *testing.T) {
 	if state.Present {
 		t.Error("expected no marker on a bare database")
 	}
-	// A database with no marker predates the marker, so it reads as the version
-	// that existed then — not as whatever is current, which would make every
-	// un-upgraded database look upgraded.
-	if state.TrackingVersion != meta.PreMarkerVersion {
-		t.Errorf("expected an absent marker to read as version %d, got %d", meta.PreMarkerVersion, state.TrackingVersion)
+	// A database with nothing of joka's in it is a new one, not an old one.
+	// Reading it as pre-marker made every fresh database announce the two
+	// tracking upgrades on its first mutating command, for entity tracking
+	// that had never existed.
+	//
+	// The opposite case — tracking tables present, marker absent — must still
+	// read as pre-marker, or no upgrade ever runs. That is
+	// TestPreMarkerDatabaseIsNotMistakenForCurrent in internal/upgrade, which
+	// builds a real v1 database rather than a bare one.
+	if state.TrackingVersion != meta.TrackingVersion {
+		t.Errorf("expected a bare database to read as the current version %d, got %d",
+			meta.TrackingVersion, state.TrackingVersion)
 	}
 }
 

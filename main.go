@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/apsdsm/joka/cmd/dbtools"
 	"github.com/apsdsm/joka/cmd/entity"
@@ -18,14 +20,15 @@ import (
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 	"github.com/apsdsm/joka/internal/meta"
+	// Registers the AWS secrets and tunnel providers. joka names a vendor in
+	// exactly one place, and this is it.
+	_ "github.com/apsdsm/joka/internal/providers/aws"
 	"github.com/apsdsm/joka/internal/secrets"
 	"github.com/apsdsm/joka/internal/upgrade"
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
-
-const version = "0.14.0"
 
 // annotationMutates marks a command that writes to the database, so the root
 // command knows whether to stamp joka_meta. Read-only commands must not.
@@ -39,8 +42,23 @@ const annotationMutates = "joka:mutates"
 // command that could clear the blockage is itself blocked by it.
 const annotationWipes = "joka:wipes"
 
+// annotationNeeds names the directories a command reads, comma separated:
+// "migrations", "entities", or both. The root checks they are there before it
+// opens a connection — see shared.RequireDir for why that ordering matters.
+const annotationNeeds = "joka:needs"
+
 // mutates is the annotation map for a command that writes.
 var mutates = map[string]string{annotationMutates: "true"}
+
+// needs returns base with a directory list added, so one command can declare
+// both what it writes and what it reads.
+func needs(list string, base map[string]string) map[string]string {
+	merged := map[string]string{annotationNeeds: list}
+	for k, v := range base {
+		merged[k] = v
+	}
+	return merged
+}
 
 // wipes is the annotation map for a command that destroys the tracking.
 var wipes = map[string]string{annotationMutates: "true", annotationWipes: "true"}
@@ -50,11 +68,15 @@ func main() {
 		envFile       string
 		profile       string
 		migrationsDir string
-		entitiesDir   string
+		entitiesDirs  []string
 		stateFile     string
+		rootName      string
+		adoptRoot     bool
 		autoConfirm   bool
+		waitFor       time.Duration
 		outputFormat  string
 		dbConn        *sql.DB
+		closeTunnel   = func() error { return nil }
 		dbDSN         string
 		cfg           *config.Config
 	)
@@ -82,15 +104,27 @@ func main() {
 			if !c.Flags().Changed("migrations") && cfg.Migrations != "" {
 				migrationsDir = cfg.Migrations
 			}
-			if !c.Flags().Changed("entities") && cfg.Entities != "" {
-				entitiesDir = cfg.Entities
+			if !c.Flags().Changed("entities") && len(cfg.Entities) > 0 {
+				entitiesDirs = cfg.Entities
 			}
 			if !c.Flags().Changed("statefile") && cfg.StateFile != "" {
 				stateFile = cfg.StateFile
 			}
+			if !c.Flags().Changed("root") && cfg.Root != "" {
+				rootName = cfg.Root
+			}
 
 			if c.Name() == "version" {
 				return nil
+			}
+
+			// Refuse before a connection is opened when a directory the command
+			// reads is not there. Opening one first meant a command run from
+			// the wrong directory upgraded the tracking and created joka_meta,
+			// joka_state and joka_lock in a database it was never meant to
+			// reach, and only then noticed it had nothing to read.
+			if err := requireDirs(c, migrationsDir, entitiesDirs, cfg); err != nil {
+				return err
 			}
 
 			// Load any --env dotenv first so the "env" connection source (and
@@ -107,14 +141,17 @@ func main() {
 
 			// Resolve the DSN from the connection config (env by default, or a
 			// secret source declared in .jokarc.yaml / the selected profile).
-			dsn, err := connection.Resolve(c.Context(), cfg.Connection, nil)
+			// The tunnel, if one is declared, outlives this function and is
+			// closed in PersistentPostRunE beside the connection it carries.
+			dsn, closer, err := connection.ResolveWithTunnel(c.Context(), cfg.Connection, nil)
 			if err != nil {
 				return err
 			}
+			closeTunnel = closer
 			// Kept for `migrate consolidate`, which hands it to pg_dump.
 			dbDSN = dsn
 
-			dbConn, err = jokadb.Open(dsn)
+			dbConn, err = jokadb.OpenWait(c.Context(), dsn, waitFor)
 			if err != nil {
 				return fmt.Errorf("error connecting to database: %w", err)
 			}
@@ -129,6 +166,29 @@ func main() {
 			// only for commands that write. A
 			// read-only command must leave a bare database bare — that is what
 			// makes a missing tracking table reportable.
+			// The root guard applies to drop and reset as well, which is where
+			// it parts company with the two gates below.
+			//
+			// Those two skip a wiping command for reasons that do not carry
+			// over. The upgrade gate skips because a blocked upgrade would
+			// otherwise have no command left that could clear it. The
+			// wrong-database gate skips because drop takes joka_meta with it,
+			// so a wiped database has no identity while the state file beside
+			// the checkout still has one — which made drop followed by init
+			// fail with nothing left to run.
+			//
+			// Ownership has neither problem. The claim lives in a committed
+			// configuration rather than in a file a wipe destroys, and a root
+			// that genuinely means to take a database over says so with
+			// --adopt-root. Dropping the wrong environment's database is the
+			// worst thing joka can do, so it is the last command that should
+			// skip the check that names the owner.
+			if c.Annotations[annotationMutates] == "true" {
+				if err := refuseWrongRoot(c, dbConn, rootName, adoptRoot); err != nil {
+					return err
+				}
+			}
+
 			if c.Annotations[annotationMutates] == "true" && c.Annotations[annotationWipes] != "true" {
 				if err := refuseWrongDatabase(c, stateFile, profile, dbConn); err != nil {
 					return err
@@ -169,6 +229,24 @@ func main() {
 				}
 			}
 
+			// The claim is made on the way out, for the same reason the wipe
+			// stamp is: a root owns a database once it has successfully written
+			// to it, and cobra runs PersistentPostRunE only on success. A run
+			// that failed has not taken ownership of anything.
+			//
+			// This covers drop and reset too. They take joka_meta with them, so
+			// without a re-claim here a wipe would quietly release a database
+			// its own root had claimed.
+			if c.Annotations[annotationMutates] == "true" {
+				claim := meta.ClaimRoot
+				if adoptRoot {
+					claim = meta.AdoptRoot
+				}
+				if err := claim(c.Context(), dbConn, rootName); err != nil {
+					return err
+				}
+			}
+
 			return nil
 		},
 	}
@@ -176,9 +254,14 @@ func main() {
 	root.PersistentFlags().StringVarP(&envFile, "env", "e", ".env", "Path to the environment file")
 	root.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Config profile to use (from .jokarc.yaml profiles)")
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
-	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")
+	root.PersistentFlags().StringArrayVar(&entitiesDirs, "entities", []string{"devops/entities"},
+		"Path to an entities directory; repeat the flag for several, synced as one desired state")
 	root.PersistentFlags().StringVar(&stateFile, "statefile", "", "Path to the state file (default: joka[.<profile>].state.json beside the working directory)")
+	root.PersistentFlags().StringVar(&rootName, "root", "", "Name of this joka root (default: the 'root:' key in .jokarc.yaml)")
+	root.PersistentFlags().BoolVar(&adoptRoot, "adopt-root", false, "Move this database's root claim to this root")
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
+	root.PersistentFlags().DurationVar(&waitFor, "wait", 0,
+		"Retry the connection for this long before giving up (e.g. 30s); 0 tries once")
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 
 	// No annotation. Status is read-only, so it stays out of the upgrade gate,
@@ -199,7 +282,7 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 				DB:            dbConn,
 				Profile:       profile,
 				MigrationsDir: migrationsDir,
-				EntitiesDir:   entitiesDir,
+				EntitiesDirs:  entitiesDirs,
 				StateFile:     stateFile,
 				OutputFormat:  outputFormat,
 			}.Execute(c.Context())
@@ -216,9 +299,10 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	}
 
 	migrateNewCmd := &cobra.Command{
-		Use:   "new [name]",
-		Short: "Create a new migration file",
-		Args:  cobra.ExactArgs(1),
+		Use:         "new [name]",
+		Short:       "Create a new migration file",
+		Annotations: needs("migrations", nil),
+		Args:        cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			return migration.RunMakeCommand{
 				MigrationsDir: migrationsDir,
@@ -236,7 +320,7 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	migrateUpCmd := &cobra.Command{
 		Use:         "up",
 		Short:       "Apply pending migrations",
-		Annotations: mutates,
+		Annotations: needs("migrations", mutates),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateUpCommand{
 				DB:            dbConn,
@@ -248,8 +332,9 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	}
 
 	migrateStatusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show migration status",
+		Use:         "status",
+		Short:       "Show migration status",
+		Annotations: needs("migrations", nil),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateStatusCommand{
 				DB:            dbConn,
@@ -271,7 +356,7 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	migrateConsolidateCmd := &cobra.Command{
 		Use:         "consolidate",
 		Short:       "Squash applied migrations into one baseline dumped by pg_dump (PostgreSQL only)",
-		Annotations: mutates,
+		Annotations: needs("migrations", mutates),
 		RunE: func(c *cobra.Command, _ []string) error {
 			upTo, _ := c.Flags().GetString("up-to")
 			if upTo == "" {
@@ -290,8 +375,9 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	migrateConsolidateCmd.Flags().String("up-to", "", "Migration index to consolidate up to (required; must be the last applied migration)")
 
 	migrateVerifyCmd := &cobra.Command{
-		Use:   "verify",
-		Short: "Detect schema drift against the latest snapshot",
+		Use:         "verify",
+		Short:       "Detect schema drift against the latest snapshot",
+		Annotations: needs("migrations", nil),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunVerifyCommand{
 				DB:           dbConn,
@@ -338,10 +424,11 @@ files are the only version worth keeping: every declared column is rewritten and
 nothing is reported as a conflict. _once is still honoured.
 
 Use --dry-run to print the plan without applying anything.`,
-		Annotations: mutates,
+		Annotations: needs("entities", mutates),
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
 			decayed, _ := c.Flags().GetBool("decayed")
+			allowDelete, _ := c.Flags().GetBool("allow-delete")
 
 			onConflict, _ := c.Flags().GetString("on-conflict")
 			policy, err := entityapp.ParseConflictPolicy(onConflict)
@@ -352,11 +439,12 @@ Use --dry-run to print the plan without applying anything.`,
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
 				Secrets:      secrets.New(cfg.Secrets),
-				EntitiesDir:  entitiesDir,
+				EntitiesDirs: entitiesDirs,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
 				Decayed:      decayed,
+				AllowDelete:  allowDelete,
 				OnConflict:   policy,
 				Profile:      profile,
 				StateFile:    stateFile,
@@ -365,6 +453,8 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
+	entitySyncCmd.Flags().Bool("allow-delete", false,
+		"Permit a non-interactive run (--auto, --output json) to delete rows no file declares")
 	entitySyncCmd.Flags().String("on-conflict", "fail",
 		"What to do when the database changed since joka last wrote: fail, file, db or ask")
 	entitySyncCmd.Flags().Bool("decayed", false,
@@ -373,13 +463,14 @@ Use --dry-run to print the plan without applying anything.`,
 	var diffNoValues bool
 
 	entityDiffCmd := &cobra.Command{
-		Use:   "diff [file]",
-		Short: "Line an entity file's declared graph up against the rows joka tracks and the rows in the database",
-		Args:  cobra.ExactArgs(1),
+		Use:         "diff [file]",
+		Short:       "Line an entity file's declared graph up against the rows joka tracks and the rows in the database",
+		Annotations: needs("entities", nil),
+		Args:        cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			return entity.RunEntityDiffCommand{
 				DB:           dbConn,
-				EntitiesDir:  entitiesDir,
+				EntitiesDirs: entitiesDirs,
 				FilePath:     args[0],
 				SkipValues:   diffNoValues,
 				OutputFormat: outputFormat,
@@ -405,13 +496,13 @@ Use --dry-run to print the plan without applying anything.`,
 	resetCmd := &cobra.Command{
 		Use:         "reset",
 		Short:       "Drop everything and re-run init, migrations and entity sync",
-		Annotations: wipes,
+		Annotations: needs("migrations,entities", wipes),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return dbtools.RunResetCommand{
 				DB:            dbConn,
 				Secrets:       secrets.New(cfg.Secrets),
 				MigrationsDir: migrationsDir,
-				EntitiesDir:   entitiesDir,
+				EntitiesDirs:  entitiesDirs,
 				AutoConfirm:   autoConfirm,
 				OutputFormat:  outputFormat,
 				Profile:       profile,
@@ -437,13 +528,29 @@ Use --dry-run to print the plan without applying anything.`,
 
 	root.AddCommand(initCmd, statusCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
-	if err := root.Execute(); err != nil {
-		if outputFormat == shared.OutputJSON {
+	err := root.Execute()
+
+	// Closed here rather than in PersistentPostRunE, which cobra runs only on
+	// success — a failing command would have left the forward and its child
+	// process behind. It goes after Execute because the connection runs through
+	// it, and it is safe to call whether or not one was ever opened.
+	closeTunnel()
+
+	if err != nil {
+		// Ordered so that "the command already said it" beats the output
+		// format. A dry run under --output json has printed its plan; adding an
+		// error object after it would say the run failed when it did not.
+		switch {
+		case shared.AlreadyReported(err):
+			// Nothing to add. What is still owed is the exit status: a declined
+			// step must stop a `&&` chain, and pending work must be
+			// distinguishable from a joka that could not tell.
+		case outputFormat == shared.OutputJSON:
 			shared.PrintErrorJSON(err)
-		} else {
+		default:
 			color.Red("%v", err)
 		}
-		os.Exit(1)
+		os.Exit(shared.ExitCodeFor(err))
 	}
 }
 
@@ -504,4 +611,68 @@ func identityOrNone(identity string) string {
 		return "a database joka has never written state to"
 	}
 	return identity
+}
+
+// requireDirs checks the directories a command declared it reads, in the order
+// a command that reads both would reach them.
+func requireDirs(c *cobra.Command, migrationsDir string, entitiesDirs []string, cfg *config.Config) error {
+	configured := ""
+	if len(cfg.Entities) > 0 {
+		configured = cfg.Entities[0]
+	}
+
+	for _, kind := range strings.Split(c.Annotations[annotationNeeds], ",") {
+		switch kind {
+		case "migrations":
+			if err := shared.RequireDir(kind, migrationsDir, dirSource(c, kind, cfg.Migrations)); err != nil {
+				return err
+			}
+		case "entities":
+			// Every root, not just the first. A list whose second entry is a
+			// typo would otherwise load the first, find every entity in the
+			// second declared nowhere, and plan to delete them.
+			for _, dir := range entitiesDirs {
+				if err := shared.RequireDir(kind, dir, dirSource(c, kind, configured)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// dirSource says who named a directory. A path somebody named and got wrong is
+// a different mistake from a default that was never right.
+func dirSource(c *cobra.Command, flag, configured string) shared.DirSource {
+	switch {
+	case c.Flags().Changed(flag):
+		return shared.DirFlag
+	case configured != "":
+		return shared.DirConfig
+	}
+
+	return shared.DirDefault
+}
+
+// refuseWrongRoot stops a command that writes when the database was claimed by
+// a joka root other than the one running.
+//
+// It sits beside refuseWrongDatabase and covers the case that one cannot. The
+// state file carries the identity of the database it describes, which catches a
+// directory pointed at the wrong database — but the file is generally
+// gitignored, so a CI checkout has none and the audit returns no_file. The root
+// claim lives in a committed configuration instead, so it is there on a fresh
+// clone, which is exactly where the damage was done.
+//
+// Like the upgrade gate it runs on the mutates annotation, so drop and reset
+// skip it: they destroy the tracking, and being unable to reset a database
+// because of who owns its bookkeeping is the wrong way round.
+func refuseWrongRoot(c *cobra.Command, db *sql.DB, declared string, adopt bool) error {
+	state, err := meta.Read(c.Context(), db)
+	if err != nil {
+		return err
+	}
+
+	return meta.CheckRoot(state.StateRoot, declared, adopt)
 }

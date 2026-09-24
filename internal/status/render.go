@@ -60,6 +60,11 @@ func describeDatabase(r *Report) string {
 	if r.Meta.JokaVersion != "" {
 		parts = append(parts, "written by joka "+r.Meta.JokaVersion)
 	}
+	// Who owns the database is the first thing worth knowing when a write was
+	// refused, and status is the command you reach for after a refusal.
+	if r.Meta.StateRoot != "" {
+		parts = append(parts, "root "+r.Meta.StateRoot)
+	}
 	if r.Profile != "" {
 		parts = append(parts, "profile "+r.Profile)
 	}

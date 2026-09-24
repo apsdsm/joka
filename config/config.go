@@ -18,10 +18,17 @@ import (
 //   - assembly: the secret holds just the password (password_key); host/port/
 //     user/database come from the Connection. joka builds a URL-safe DSN.
 type Secret struct {
+	// Provider names the vendor this secret lives with. Empty means "aws",
+	// which is what every existing config means and the only one joka ships.
+	Provider    string `yaml:"provider"`
 	SecretID    string `yaml:"secret_id"`
 	Region      string `yaml:"region"`
 	URLKey      string `yaml:"url_key"`
 	PasswordKey string `yaml:"password_key"`
+	// Params carries anything the provider needs that joka has no opinion
+	// about - an AWS profile, a GCP project. `region:` above is the one AWS
+	// concern old enough to have its own key, and it is merged in here.
+	Params map[string]string `yaml:"params"`
 }
 
 // Connection describes how joka obtains its database DSN.
@@ -44,21 +51,56 @@ type Connection struct {
 	URL      string            `yaml:"url"`      // literal source: full DSN, used verbatim
 	Params   map[string]string `yaml:"params"`
 	Secret   *Secret           `yaml:"secret"`
+	// Tunnel forwards a local port to the database when it is not directly
+	// reachable. Host and Port are then read from the tunnel's local end.
+	Tunnel *Tunnel `yaml:"tunnel"`
+}
+
+// Tunnel describes a port forward to open before connecting.
+//
+// It exists so `cd devops/joka/prod && joka apply` works against a database in
+// a private subnet without a wrapper script. Every project that needed one had
+// written the same port-forward script, and the script was the only reason most
+// of them existed.
+type Tunnel struct {
+	// Provider names the vendor. Empty means "aws", whose implementation is
+	// Session Manager port forwarding.
+	Provider string `yaml:"provider"`
+	// Target is what to tunnel through — an SSM instance id for aws.
+	Target string `yaml:"target"`
+	// RemoteHost and RemotePort are the database as the target addresses it.
+	// They default to the connection's own host and port, because naming the
+	// database twice is how the two come to disagree.
+	RemoteHost string `yaml:"remote_host"`
+	RemotePort int    `yaml:"remote_port"`
+	// LocalPort is the port to listen on. Zero, the default, picks a free one:
+	// a fixed port collides with whatever else is running and nothing outside
+	// the process needs to predict it.
+	LocalPort int `yaml:"local_port"`
+	// Params carries anything provider-specific, the same way SecretRef does.
+	Params map[string]string `yaml:"params"`
 }
 
 // Profile overlays the base config. Set (non-nil) fields override the base;
 // unset fields inherit it.
 type Profile struct {
+	Root       *string           `yaml:"root"`
 	Migrations *string           `yaml:"migrations"`
-	Entities   *string           `yaml:"entities"`
+	Entities   *PathList         `yaml:"entities"`
 	StateFile  *string           `yaml:"statefile"`
 	Connection *Connection       `yaml:"connection"`
 	Secrets    map[string]Secret `yaml:"secrets"`
 }
 
 type Config struct {
-	Migrations string             `yaml:"migrations"`
-	Entities   string             `yaml:"entities"`
+	// Root names this configuration, and through it the database it owns. See
+	// meta.KeyStateRoot: a database records the root that claimed it, and a
+	// different root is refused rather than allowed to converge it against the
+	// wrong desired state.
+	Root       string `yaml:"root"`
+	Migrations string `yaml:"migrations"`
+	// Entities is one seed directory or several, synced as one desired state.
+	Entities   PathList           `yaml:"entities"`
 	StateFile  string             `yaml:"statefile"`
 	Connection *Connection        `yaml:"connection"`
 	Secrets    map[string]Secret  `yaml:"secrets"`
@@ -104,6 +146,9 @@ func applyProfile(base *Config, p Profile) *Config {
 	merged := *base
 	merged.Profiles = nil
 
+	if p.Root != nil {
+		merged.Root = *p.Root
+	}
 	if p.Migrations != nil {
 		merged.Migrations = *p.Migrations
 	}

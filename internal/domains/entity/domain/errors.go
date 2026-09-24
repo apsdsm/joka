@@ -68,6 +68,11 @@ var (
 	// prevent.
 	ErrEntityConflict = errors.New("the database changed since joka last wrote")
 
+	// ErrDeleteNotAllowed means a non-interactive run planned to delete rows
+	// and nothing authorised it. The confirmation is what gates deletion on an
+	// interactive run, and --auto and --output json skip the confirmation.
+	ErrDeleteNotAllowed = errors.New("this run would delete rows and nothing said that was allowed")
+
 	// ErrStateAmbiguous means the tracking in the database cannot be read as a
 	// state document because one _id is claimed by more than one tracked row.
 	// Tracking version 2's unique index makes this unreachable going forward;

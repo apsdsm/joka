@@ -3,6 +3,7 @@ package lock
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/lock/app"
@@ -26,11 +27,7 @@ func (r RunUnlockCommand) Execute(ctx context.Context) error {
 
 	lock, err := adapter.GetLock(ctx)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Error checking lock: %v", err)
-		return err
+		return fmt.Errorf("checking the lock: %w", err)
 	}
 
 	if lock == nil {
@@ -48,11 +45,7 @@ func (r RunUnlockCommand) Execute(ctx context.Context) error {
 	}
 
 	if err := (app.ReleaseLockAction{Lock: adapter}).Execute(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Error releasing lock: %v", err)
-		return err
+		return fmt.Errorf("releasing the lock: %w", err)
 	}
 
 	if jsonOut {
