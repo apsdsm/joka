@@ -34,6 +34,11 @@ type RunEntitySyncCommand struct {
 	// SkipLock skips advisory lock acquisition. Used when an outer command
 	// (e.g. `joka reset`) already holds the lock.
 	SkipLock bool
+	// AllowDelete permits a non-interactive run to delete rows no file
+	// declares. An interactive run does not need it: the confirmation already
+	// showed the plan and somebody agreed to it. `joka reset` sets it, because
+	// the rows it would be protecting were dropped a moment earlier by design.
+	AllowDelete bool
 	// DryRun computes and prints the plan (inserts + before/after updates)
 	// without applying anything or acquiring the advisory lock.
 	DryRun bool
@@ -48,18 +53,11 @@ type RunEntitySyncCommand struct {
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	fail := func(err error) error {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
-	}
-
 	if !r.SkipLock && !r.DryRun {
 		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 
 		if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
-			return fail(err)
+			return err
 		}
 
 		defer lockAdapter.Release(ctx) //nolint:errcheck
@@ -68,12 +66,12 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
 	if err := infra.NewPostgresStateBackend(r.DB).EnsureStateTable(ctx); err != nil {
-		return fail(err)
+		return err
 	}
 
 	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 
 	if len(relPaths) == 0 {
@@ -89,7 +87,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// depends on the whole set anyway, because an _id can be claimed elsewhere.
 	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 
 	var pending []*domain.EntityFile  // new files to insert
@@ -101,7 +99,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 		hash, err := app.HashFileContent(fullPath)
 		if err != nil {
-			return fail(err)
+			return err
 		}
 
 		// Every file is parsed, including ones the hash says are unchanged.
@@ -110,7 +108,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		// whether a file is written, not whether it is read.
 		file, err := app.ParseEntityAction{Path: fullPath}.Execute()
 		if err != nil {
-			return fail(err)
+			return err
 		}
 		file.Path = rel
 		file.ContentHash = hash
@@ -134,7 +132,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// is only visible across files, and a set that cannot be identified is not
 	// one joka should start writing from.
 	if err := app.EntitySetError(app.ValidateEntitySet(all)); err != nil {
-		return fail(err)
+		return err
 	}
 
 	dirty := make(map[string]bool, len(pending)+len(modified))
@@ -156,7 +154,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		Decayed:  r.Decayed,
 	}.Execute(ctx)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 
 	if !plan.HasChanges() {
@@ -166,7 +164,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		// or the file reads as modified on every run from here on.
 		if len(dirty) > 0 {
 			if err := refreshHashes(ctx, r, all, dirty); err != nil {
-				return fail(err)
+				return err
 			}
 		}
 
@@ -210,6 +208,29 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
+	// A run with nobody watching must be told, once, that it may delete.
+	//
+	// The confirmation is the gate on an interactive run, and --auto and
+	// --output json skip it — so a CI run deleted whatever the plan named,
+	// including rows lost to a mistyped entities directory or a seed file
+	// deleted by accident. jjc2's CI removed 16 mappings that way. The plan
+	// had said so; nothing had required anyone to read it.
+	//
+	// Only plan.Deletes is gated, and the line is whether a human said so in a
+	// file. A delete here is caused by absence — nothing declares the entity
+	// any more — which is what a mistake looks like. A `removed:` entry is
+	// caused by presence: somebody wrote the _id down and a reviewer saw it,
+	// which is the whole reason that block exists. Requiring a flag for the
+	// reviewed form as well would put friction on the path joka wants people
+	// to use. Forgets drop tracking and delete no row.
+	if len(plan.Deletes) > 0 && !r.AllowDelete && (jsonOut || r.AutoConfirm) {
+		if !jsonOut {
+			printPlan(plan)
+			return app.DeleteRefusedSummary(plan.Deletes)
+		}
+		return app.DeleteRefusedError(plan.Deletes)
+	}
+
 	// A conflict is the database holding a value joka did not write. Applying
 	// the declaration over it would discard a change joka cannot account for,
 	// so by default nothing is written and the run exits non-zero — which is
@@ -219,7 +240,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			printPlan(plan)
 			return app.ConflictSummary(plan.Conflicts)
 		}
-		return fail(app.ConflictError(plan.Conflicts))
+		return app.ConflictError(plan.Conflicts)
 	}
 
 	// A conceded column is left alone in the database and its declaration is
@@ -231,8 +252,8 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictAsk {
 		if jsonOut || r.AutoConfirm {
-			return fail(fmt.Errorf(
-				"--on-conflict=ask needs someone to ask: use fail, file or db with --auto or --output json"))
+			return fmt.Errorf(
+				"--on-conflict=ask needs someone to ask: use fail, file or db with --auto or --output json")
 		}
 
 		printPlan(plan)
@@ -275,14 +296,14 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	if len(resolutions) > 0 {
 		rewritten, err = app.ApplyResolutions(r.EntitiesDir, resolutions)
 		if err != nil {
-			return fail(err)
+			return err
 		}
 
 		// A rewritten file's content hash moved, and the copy in memory is the
 		// one joka is about to record. Left stale, the next run would report
 		// the file modified because of an edit joka made itself.
 		if err := reloadFiles(r.EntitiesDir, all, rewritten); err != nil {
-			return fail(err)
+			return err
 		}
 
 		// A file joka has just rewritten is dirty by definition, and its hash has
@@ -304,7 +325,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return fail(fmt.Errorf("starting transaction: %w", err))
+		return fmt.Errorf("starting transaction: %w", err)
 	}
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
@@ -326,11 +347,11 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
-		return fail(err)
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fail(fmt.Errorf("committing transaction: %w", err))
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 
 	if err := materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion); err != nil {
@@ -444,6 +465,11 @@ func printPlan(plan *app.SyncPlan) {
 	red := color.New(color.FgRed)
 	green := color.New(color.FgGreen)
 
+	// Deletions lead. They are the only irreversible thing a sync does, and a
+	// plan that opens with forty inserts buries them — jjc2's CI deleted 16
+	// rows that were in the output all along, below everything else.
+	printDeletes(plan.Deletes, plan.Forgets)
+
 	hasInserts := false
 	for _, f := range plan.Inserts {
 		if len(f.Rows) > 0 {
@@ -478,7 +504,6 @@ func printPlan(plan *app.SyncPlan) {
 	}
 
 	printAdoptions(plan.Adopted)
-	printDeletes(plan.Deletes, plan.Forgets)
 	printRekeyed(plan.Rekeyed)
 	printRemovals(plan.Removals)
 	printMoves(plan.Moves)

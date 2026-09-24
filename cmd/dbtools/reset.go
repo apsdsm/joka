@@ -114,10 +114,14 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		color.Cyan("\n[4/4] Syncing entities...")
 	}
 	if err := (entity.RunEntitySyncCommand{
-		DB:           r.DB,
-		Secrets:      r.Secrets,
-		EntitiesDir:  r.EntitiesDir,
-		AutoConfirm:  true,
+		DB:          r.DB,
+		Secrets:     r.Secrets,
+		EntitiesDir: r.EntitiesDir,
+		AutoConfirm: true,
+		// Exempt from the delete gate. reset dropped every table a moment ago by
+		// design, so there is nothing left for it to protect and a tracked row
+		// nothing declares is debris from the database that used to be here.
+		AllowDelete:  true,
 		OutputFormat: "text",
 		SkipLock:     true,
 		StateFile:    r.StateFile,

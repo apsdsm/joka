@@ -1054,8 +1054,8 @@ is the plan and the confirmation, the way terraform does it.
   apart from one without being told.
 - **Deleting is the only irreversible thing sync does**, so `ApplySetAction` executes the list the
   plan produced rather than recomputing it — the same reason it executes `ColumnsToWrite`. The plan
-  names every row; `--auto` and `--output json` skip the confirmation, so a reset or a CI run deletes
-  without being asked.
+  names every row, and names them **first** — see **`--allow-delete`** below, which is also what a
+  non-interactive run needs before it may delete at all.
 - **Children before parents.** `Order` is the insertion position, and deletes are sorted by file then
   descending order so a foreign key inside the seeded set is satisfied. A foreign key from outside it
   is not something joka can order around: the delete fails with `ErrForeignKeyConflict` and the
@@ -1198,6 +1198,38 @@ upgrade gate and refuses every writing command when the state file's identity di
 `joka_meta` (`StateAudit.BlocksWrite`, `domain.ErrWrongDatabase`). Only the identity refuses — a
 version disagreement does not change what a run does, because joka loads what it applies from the
 database. `drop` and `reset` skip it, the same way they skip the upgrade.
+
+### `--allow-delete`
+
+A run with nobody watching must be told, once, that it may delete.
+
+The confirmation is what gates deletion on an interactive run, and `--auto` and `--output json` skip
+the confirmation — so a CI run deleted whatever the plan named, including rows lost to a mistyped
+entities directory or a seed file deleted by accident. jjc2's CI removed 16 mappings that way. The
+plan had said so; nothing required anyone to read it.
+
+- **Only rows nothing declares are gated, and the line is whether a human said so in a file.** A
+  delete in `plan.Deletes` is caused by *absence* — no file declares the entity any more — which is
+  what a mistake looks like. A `removed:` entry is caused by *presence*: somebody wrote the `_id`
+  down and a reviewer saw it, which is the whole reason that block exists. Gating the reviewed form
+  too would put friction on the path joka wants people to use. `Forgets` drop tracking and delete no
+  row.
+- **An interactive run needs nothing.** The plan was printed and somebody typed `yes`.
+- **`reset` sets it internally.** It dropped every table a moment earlier by design, so there is
+  nothing left to protect and a tracked row nothing declares is debris from the database that used
+  to be there.
+- **Deletions lead the plan.** `printPlan` prints them before inserts, updates and everything else.
+  A plan that opens with forty inserts buries the two rows that are about to be gone.
+- **The refusal names every row** (`app.DeleteRefusedError`), because the rows are about to be gone
+  and the reader is deciding whether that is right — which is not a question a count answers, and a
+  count was exactly what jjc2's CI printed. Text output gets `app.DeleteRefusedSummary` instead,
+  which counts and points at the list the plan already printed: the same split as `ConflictSummary`
+  against `ConflictError`, for the same reason.
+
+While this landed, `entity sync`'s `fail` closure went. It called `shared.PrintErrorJSON` and
+returned the error, and `main` prints the same JSON for any error it gets — so every JSON error from
+a sync was printed twice. All seventeen call sites were `return fail(err)`, so removing it leaves
+`main` as the one place an error is rendered.
 
 ### `--decayed`
 

@@ -57,6 +57,7 @@ reordered, or be renamed without losing its row.
 | `joka status` | Read-only inventory. Start here. |
 | `joka entity sync` | Apply the seed files. The only path by which data is seeded. |
 | `joka entity sync --dry-run` | The plan, without applying or taking the lock. |
+| `joka entity sync --allow-delete` | Lets a `--auto` / `--output json` run delete rows no file declares. |
 | `joka entity diff <file>` | Declared vs tracked vs live, per row, for one file. |
 | `joka migrate status` | Applied vs pending. |
 | `joka migrate up` | Apply pending migrations — all in one transaction. |
@@ -222,9 +223,18 @@ will each delete the other's rows, because the other's entities are tracked and
 declared nowhere. Per-environment trees (`entities/local`, `entities/dev1`) are
 selected by `--entities` or a profile, and only one is ever loaded.
 
-**`--auto` and `--output json` skip the confirmation.** That includes the
-confirmation for deletions. In CI, a seed file deleted by mistake takes its rows
-with it.
+**`--auto` and `--output json` need `--allow-delete` before they may delete.** The confirmation is
+what gates deletion interactively, and those two skip it, so a run with nobody watching refuses
+rather than removing rows a mistake left undeclared:
+
+```
+this run would delete rows and nothing said that was allowed: 2 rows (listed above).
+Pass --allow-delete if that is what you meant, or run without --auto to confirm them
+one plan at a time
+```
+
+A `removed:` entry is exempt — somebody wrote the `_id` down and a reviewer saw it. `joka reset` is
+exempt too.
 
 **A declined prompt exits non-zero.** `joka migrate up && joka entity sync` stops if you answer
 anything but `yes` to the migration, rather than syncing against a schema that was never migrated.

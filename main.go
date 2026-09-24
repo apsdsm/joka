@@ -419,6 +419,7 @@ Use --dry-run to print the plan without applying anything.`,
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
 			decayed, _ := c.Flags().GetBool("decayed")
+			allowDelete, _ := c.Flags().GetBool("allow-delete")
 
 			onConflict, _ := c.Flags().GetString("on-conflict")
 			policy, err := entityapp.ParseConflictPolicy(onConflict)
@@ -434,6 +435,7 @@ Use --dry-run to print the plan without applying anything.`,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
 				Decayed:      decayed,
+				AllowDelete:  allowDelete,
 				OnConflict:   policy,
 				Profile:      profile,
 				StateFile:    stateFile,
@@ -442,6 +444,8 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
+	entitySyncCmd.Flags().Bool("allow-delete", false,
+		"Permit a non-interactive run (--auto, --output json) to delete rows no file declares")
 	entitySyncCmd.Flags().String("on-conflict", "fail",
 		"What to do when the database changed since joka last wrote: fail, file, db or ask")
 	entitySyncCmd.Flags().Bool("decayed", false,
