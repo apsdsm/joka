@@ -90,7 +90,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 	if !r.AutoConfirm && !jsonOut {
 		if !shared.Confirm(fmt.Sprintf("%d pending migrations found. Apply now? (only 'yes' will apply): ", len(pending))) {
 			fmt.Println("Migration aborted by user.")
-			return nil
+			return shared.ErrCancelled
 		}
 	}
 

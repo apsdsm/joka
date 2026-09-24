@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/apsdsm/joka/cmd/dbtools"
 	"github.com/apsdsm/joka/cmd/entity"
@@ -39,8 +41,23 @@ const annotationMutates = "joka:mutates"
 // command that could clear the blockage is itself blocked by it.
 const annotationWipes = "joka:wipes"
 
+// annotationNeeds names the directories a command reads, comma separated:
+// "migrations", "entities", or both. The root checks they are there before it
+// opens a connection — see shared.RequireDir for why that ordering matters.
+const annotationNeeds = "joka:needs"
+
 // mutates is the annotation map for a command that writes.
 var mutates = map[string]string{annotationMutates: "true"}
+
+// needs returns base with a directory list added, so one command can declare
+// both what it writes and what it reads.
+func needs(list string, base map[string]string) map[string]string {
+	merged := map[string]string{annotationNeeds: list}
+	for k, v := range base {
+		merged[k] = v
+	}
+	return merged
+}
 
 // wipes is the annotation map for a command that destroys the tracking.
 var wipes = map[string]string{annotationMutates: "true", annotationWipes: "true"}
@@ -91,6 +108,15 @@ func main() {
 
 			if c.Name() == "version" {
 				return nil
+			}
+
+			// Refuse before a connection is opened when a directory the command
+			// reads is not there. Opening one first meant a command run from
+			// the wrong directory upgraded the tracking and created joka_meta,
+			// joka_state and joka_lock in a database it was never meant to
+			// reach, and only then noticed it had nothing to read.
+			if err := requireDirs(c, migrationsDir, entitiesDir, cfg); err != nil {
+				return err
 			}
 
 			// Load any --env dotenv first so the "env" connection source (and
@@ -216,9 +242,10 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	}
 
 	migrateNewCmd := &cobra.Command{
-		Use:   "new [name]",
-		Short: "Create a new migration file",
-		Args:  cobra.ExactArgs(1),
+		Use:         "new [name]",
+		Short:       "Create a new migration file",
+		Annotations: needs("migrations", nil),
+		Args:        cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			return migration.RunMakeCommand{
 				MigrationsDir: migrationsDir,
@@ -236,7 +263,7 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	migrateUpCmd := &cobra.Command{
 		Use:         "up",
 		Short:       "Apply pending migrations",
-		Annotations: mutates,
+		Annotations: needs("migrations", mutates),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateUpCommand{
 				DB:            dbConn,
@@ -248,8 +275,9 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	}
 
 	migrateStatusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show migration status",
+		Use:         "status",
+		Short:       "Show migration status",
+		Annotations: needs("migrations", nil),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateStatusCommand{
 				DB:            dbConn,
@@ -271,7 +299,7 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	migrateConsolidateCmd := &cobra.Command{
 		Use:         "consolidate",
 		Short:       "Squash applied migrations into one baseline dumped by pg_dump (PostgreSQL only)",
-		Annotations: mutates,
+		Annotations: needs("migrations", mutates),
 		RunE: func(c *cobra.Command, _ []string) error {
 			upTo, _ := c.Flags().GetString("up-to")
 			if upTo == "" {
@@ -290,8 +318,9 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 	migrateConsolidateCmd.Flags().String("up-to", "", "Migration index to consolidate up to (required; must be the last applied migration)")
 
 	migrateVerifyCmd := &cobra.Command{
-		Use:   "verify",
-		Short: "Detect schema drift against the latest snapshot",
+		Use:         "verify",
+		Short:       "Detect schema drift against the latest snapshot",
+		Annotations: needs("migrations", nil),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunVerifyCommand{
 				DB:           dbConn,
@@ -338,7 +367,7 @@ files are the only version worth keeping: every declared column is rewritten and
 nothing is reported as a conflict. _once is still honoured.
 
 Use --dry-run to print the plan without applying anything.`,
-		Annotations: mutates,
+		Annotations: needs("entities", mutates),
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
 			decayed, _ := c.Flags().GetBool("decayed")
@@ -373,9 +402,10 @@ Use --dry-run to print the plan without applying anything.`,
 	var diffNoValues bool
 
 	entityDiffCmd := &cobra.Command{
-		Use:   "diff [file]",
-		Short: "Line an entity file's declared graph up against the rows joka tracks and the rows in the database",
-		Args:  cobra.ExactArgs(1),
+		Use:         "diff [file]",
+		Short:       "Line an entity file's declared graph up against the rows joka tracks and the rows in the database",
+		Annotations: needs("entities", nil),
+		Args:        cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			return entity.RunEntityDiffCommand{
 				DB:           dbConn,
@@ -405,7 +435,7 @@ Use --dry-run to print the plan without applying anything.`,
 	resetCmd := &cobra.Command{
 		Use:         "reset",
 		Short:       "Drop everything and re-run init, migrations and entity sync",
-		Annotations: wipes,
+		Annotations: needs("migrations,entities", wipes),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return dbtools.RunResetCommand{
 				DB:            dbConn,
@@ -438,9 +468,14 @@ Use --dry-run to print the plan without applying anything.`,
 	root.AddCommand(initCmd, statusCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
-		if outputFormat == shared.OutputJSON {
+		switch {
+		case outputFormat == shared.OutputJSON:
 			shared.PrintErrorJSON(err)
-		} else {
+		case errors.Is(err, shared.ErrCancelled):
+			// The command already said it stopped, in its own words. What it
+			// still owes the shell is a non-zero exit, so a `&&` chain does not
+			// carry on past a step the operator declined.
+		default:
 			color.Red("%v", err)
 		}
 		os.Exit(1)
@@ -504,4 +539,36 @@ func identityOrNone(identity string) string {
 		return "a database joka has never written state to"
 	}
 	return identity
+}
+
+// requireDirs checks the directories a command declared it reads, in the order
+// a command that reads both would reach them.
+func requireDirs(c *cobra.Command, migrationsDir, entitiesDir string, cfg *config.Config) error {
+	for _, kind := range strings.Split(c.Annotations[annotationNeeds], ",") {
+		switch kind {
+		case "migrations":
+			if err := shared.RequireDir(kind, migrationsDir, dirSource(c, kind, cfg.Migrations)); err != nil {
+				return err
+			}
+		case "entities":
+			if err := shared.RequireDir(kind, entitiesDir, dirSource(c, kind, cfg.Entities)); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// dirSource says who named a directory. A path somebody named and got wrong is
+// a different mistake from a default that was never right.
+func dirSource(c *cobra.Command, flag, configured string) shared.DirSource {
+	switch {
+	case c.Flags().Changed(flag):
+		return shared.DirFlag
+	case configured != "":
+		return shared.DirConfig
+	}
+
+	return shared.DirDefault
 }

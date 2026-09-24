@@ -69,7 +69,7 @@ func (r RunDropCommand) Execute(ctx context.Context) error {
 		if !r.AutoConfirm {
 			if !shared.Confirm("This is destructive. Type 'yes' to proceed: ") {
 				color.Yellow("Drop cancelled.")
-				return nil
+				return shared.ErrCancelled
 			}
 		}
 	}

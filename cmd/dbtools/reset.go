@@ -57,7 +57,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		if !r.AutoConfirm {
 			if !shared.Confirm("This is destructive. Type 'yes' to proceed: ") {
 				color.Yellow("Reset cancelled.")
-				return nil
+				return shared.ErrCancelled
 			}
 		}
 	}

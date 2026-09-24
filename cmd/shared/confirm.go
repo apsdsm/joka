@@ -2,6 +2,7 @@ package shared
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -28,3 +29,16 @@ func Confirm(prompt string) bool {
 
 	return strings.TrimSpace(line) == "yes"
 }
+
+// ErrCancelled is what a command returns when the operator declined its
+// confirmation.
+//
+// Declining has to be an error rather than a clean return. `joka migrate up &&
+// joka entity sync` carried on into the sync after the migration was declined,
+// because the declined migration exited 0 — and the sync then ran against a
+// schema that had not been migrated, failing on a table the pending migration
+// would have created. Not proceeding is a decision the shell has to hear.
+//
+// The command prints why it stopped in its own words before returning this, so
+// main prints nothing further for it.
+var ErrCancelled = errors.New("cancelled")

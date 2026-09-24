@@ -112,6 +112,20 @@ func Read(ctx context.Context, db *sql.DB) (State, error) {
 		return state, err
 	}
 	if !exists {
+		// A database with no joka table at all is a new one, not an old one.
+		// PreMarkerVersion says "written before the marker existed", and
+		// nothing has written here, so there is no bookkeeping to be behind.
+		// Reading it as pre-marker made every fresh database announce the two
+		// tracking upgrades on its first mutating command — upgrades of
+		// entity tracking that did not exist, applied as no-ops, reported as
+		// though something had moved.
+		bare, err := isBare(ctx, db)
+		if err != nil {
+			return state, err
+		}
+		if bare {
+			state.TrackingVersion = TrackingVersion
+		}
 		return state, nil
 	}
 	state.Present = true
@@ -272,4 +286,33 @@ func EnsureTable(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("creating %s: %w", Table, err)
 	}
 	return nil
+}
+
+// preMarkerTables are the joka tables a build older than joka_meta could have
+// left behind. A database holding none of them has no bookkeeping to upgrade.
+//
+// joka_lock is not among them: it is a visibility row for a lock that is
+// released at the end of every run, so it says nothing about what wrote here.
+var preMarkerTables = []string{
+	"joka_migrations",
+	"joka_snapshots",
+	"joka_entities",
+	"joka_entity_rows",
+	"joka_state",
+}
+
+// isBare reports whether a database with no joka_meta also has no tracking to
+// be behind — a database joka has never written to.
+func isBare(ctx context.Context, db *sql.DB) (bool, error) {
+	for _, table := range preMarkerTables {
+		exists, err := jokadb.TableExists(ctx, db, table)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }

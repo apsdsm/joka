@@ -133,7 +133,7 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 	if !r.AutoConfirm && !jsonOut {
 		if !shared.Confirm("Proceed with consolidation? This will delete the original migration files. (only 'yes' will proceed): ") {
 			fmt.Println("Consolidation aborted by user.")
-			return nil
+			return shared.ErrCancelled
 		}
 	}
 

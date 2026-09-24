@@ -261,7 +261,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		if !r.AutoConfirm {
 			if !shared.Confirm("Proceed with entity sync? (only 'yes' will confirm): ") {
 				color.Yellow("Entity sync cancelled.")
-				return nil
+				return shared.ErrCancelled
 			}
 		}
 	}
