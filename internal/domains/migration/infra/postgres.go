@@ -15,19 +15,18 @@ import (
 
 // PostgresDBAdapter implements the app.DBAdapter interface for PostgreSQL databases.
 type PostgresDBAdapter struct {
-	db     DBTX
-	conn   *sql.DB
-	driver jokadb.Driver
+	db   DBTX
+	conn *sql.DB
 }
 
 // NewPostgresDBAdapter creates a new PostgresDBAdapter using a direct database connection.
 func NewPostgresDBAdapter(conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: conn, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: conn, conn: conn}
 }
 
 // NewPostgresTxDBAdapter creates a new PostgresDBAdapter using a transaction.
 func NewPostgresTxDBAdapter(tx *sql.Tx, conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: tx, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: tx, conn: conn}
 }
 
 // GetAppliedMigrations retrieves the list of applied migrations from the database.
@@ -85,7 +84,7 @@ func (p *PostgresDBAdapter) RecordMigrationApplied(ctx context.Context, migratio
 
 // HasMigrationsTable checks if the migrations table exists in the database.
 func (p *PostgresDBAdapter) HasMigrationsTable(ctx context.Context) (bool, error) {
-	return jokadb.TableExists(ctx, p.conn, p.driver, "joka_migrations")
+	return jokadb.TableExists(ctx, p.conn, "joka_migrations")
 }
 
 // CreateMigrationsTable creates the migrations table if it does not already exist.
@@ -113,7 +112,7 @@ func (p *PostgresDBAdapter) CreateMigrationsTable(ctx context.Context) error {
 
 // EnsureSnapshotsTable creates the joka_snapshots table if it doesn't already exist.
 func (p *PostgresDBAdapter) EnsureSnapshotsTable(ctx context.Context) error {
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, "joka_snapshots")
+	exists, err := jokadb.TableExists(ctx, p.conn, "joka_snapshots")
 	if err != nil {
 		return err
 	}

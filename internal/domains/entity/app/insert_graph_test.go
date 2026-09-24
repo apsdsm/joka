@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
@@ -10,17 +12,27 @@ import (
 
 // mockDBAdapter is a hand-rolled mock for the DBAdapter interface.
 type mockDBAdapter struct {
-	insertedRows    []mockInsertCall
-	nextID          int64
-	trackingRows    []string
-	synced          map[string]bool
-	lookupData      map[string]any // keyed by "table.returnCol.whereCol=whereVal"
-	entityRows      []domain.TrackedRow
-	entityHashes    map[string]string
-	deletedRows     []mockDeleteCall
-	deletedTracking []string
-	updatedRows     []mockUpdateCall
-	currentRows     map[string]map[string]any // key: "table|pkValue" -> column values
+	insertedRows  []mockInsertCall
+	nextID        int64
+	lookupData    map[string]any // keyed by "table.returnCol.whereCol=whereVal"
+	deletedRows   []mockDeleteCall
+	updatedRows   []mockUpdateCall
+	currentRows   map[string]map[string]any // key: "table|pkValue" -> column values
+	missingTables map[string]bool           // tables the mock reports as dropped
+
+	// uniqueKeys are the unique indexes per table, narrowest first, as
+	// UniqueKeys returns them. Empty means a table adoption cannot search, which
+	// is the default so existing fixtures keep inserting.
+	uniqueKeys map[string][][]string
+
+	// uniqueKeyCalls counts catalog reads, so a test can assert the per-run
+	// cache is doing its job.
+	uniqueKeyCalls int
+
+	// state is the tracking, and the only record of it: the adapter carries no
+	// tracking methods any more. A fixture sets it up with track, a test reads
+	// it back with fileHash or trackedRows.
+	state *domain.State
 }
 
 // mockInsertCall records the arguments passed to InsertRow.
@@ -45,106 +57,125 @@ type mockUpdateCall struct {
 
 func newMockDBAdapter() *mockDBAdapter {
 	return &mockDBAdapter{
-		nextID:       1,
-		synced:       make(map[string]bool),
-		lookupData:   make(map[string]any),
-		entityHashes: make(map[string]string),
-		currentRows:  make(map[string]map[string]any),
+		nextID:      1,
+		lookupData:  make(map[string]any),
+		currentRows: make(map[string]map[string]any),
+		state:       domain.NewState(),
 	}
 }
 
-func (m *mockDBAdapter) EnsureTrackingTable(_ context.Context) error    { return nil }
-func (m *mockDBAdapter) EnsureRowTrackingTable(_ context.Context) error { return nil }
-func (m *mockDBAdapter) EnsureContentHashColumn(_ context.Context) error {
+// backend hands the actions the mock's own state, so an action that loads,
+// mutates and saves round-trips through the fixture the test set up and the
+// test can assert on it afterwards.
+func (m *mockDBAdapter) backend() StateBackend { return mockStateBackend{m: m} }
+
+type mockStateBackend struct{ m *mockDBAdapter }
+
+func (b mockStateBackend) Load(context.Context) (*domain.State, error) { return b.m.state, nil }
+
+func (b mockStateBackend) Save(_ context.Context, s *domain.State) error {
+	b.m.state = s
 	return nil
 }
 
-func (m *mockDBAdapter) IsEntitySynced(_ context.Context, filePath string) (bool, error) {
-	return m.synced[filePath], nil
+// track records a synced file and the rows tracked against it, under a fixed
+// hash. It says nothing about whether those rows are still in the database.
+func (m *mockDBAdapter) track(path string, rows ...domain.TrackedRow) {
+	m.trackHash(path, "hash", rows...)
 }
 
-func (m *mockDBAdapter) RecordEntitySynced(_ context.Context, filePath string) error {
-	m.trackingRows = append(m.trackingRows, filePath)
-	m.synced[filePath] = true
-	return nil
-}
+// trackHash is track for a test that cares what hash was recorded.
+func (m *mockDBAdapter) trackHash(path, hash string, rows ...domain.TrackedRow) {
+	m.state.TrackFile(path, hash)
 
-func (m *mockDBAdapter) RecordEntitySyncedWithHash(_ context.Context, filePath, contentHash string) error {
-	m.trackingRows = append(m.trackingRows, filePath)
-	m.synced[filePath] = true
-	m.entityHashes[filePath] = contentHash
-	return nil
-}
+	for _, r := range rows {
+		r.EntityFile = path
 
-func (m *mockDBAdapter) UpdateEntitySynced(_ context.Context, filePath, contentHash string) error {
-	m.entityHashes[filePath] = contentHash
-	return nil
-}
-
-func (m *mockDBAdapter) GetEntityHash(_ context.Context, filePath string) (string, error) {
-	return m.entityHashes[filePath], nil
-}
-
-func (m *mockDBAdapter) GetAllSyncedEntities(_ context.Context) (map[string]string, error) {
-	result := make(map[string]string)
-	for k, v := range m.entityHashes {
-		result[k] = v
-	}
-	return result, nil
-}
-
-func (m *mockDBAdapter) RecordEntityRow(_ context.Context, row domain.TrackedRow) error {
-	m.entityRows = append(m.entityRows, row)
-	return nil
-}
-
-func (m *mockDBAdapter) GetTrackedRows(_ context.Context, entityFile string) ([]domain.TrackedRow, error) {
-	var rows []domain.TrackedRow
-	for i := len(m.entityRows) - 1; i >= 0; i-- {
-		if m.entityRows[i].EntityFile == entityFile {
-			rows = append(rows, m.entityRows[i])
+		if r.RefID == "" {
+			m.state.Unkeyed = append(m.state.Unkeyed, r)
+			continue
 		}
+
+		m.state.Track(r.RefID, domain.EntityState{
+			Table:    r.TableName,
+			PKColumn: r.PKColumn,
+			PKValue:  r.RowPK,
+			File:     path,
+			Order:    r.InsertionOrder,
+		})
 	}
-	return rows, nil
 }
 
-func (m *mockDBAdapter) DeleteTrackedRows(_ context.Context, entityFile string) error {
-	m.deletedTracking = append(m.deletedTracking, entityFile)
-	var remaining []domain.TrackedRow
-	for _, r := range m.entityRows {
-		if r.EntityFile != entityFile {
-			remaining = append(remaining, r)
-		}
-	}
-	m.entityRows = remaining
-	return nil
+// fileHash reports the hash recorded for a file and whether it is tracked.
+func (m *mockDBAdapter) fileHash(path string) (string, bool) { return m.state.FileHash(path) }
+
+// isTracked reports whether a file has a tracking record.
+func (m *mockDBAdapter) isTracked(path string) bool {
+	_, ok := m.state.FileHash(path)
+	return ok
 }
 
-func (m *mockDBAdapter) DeleteRow(_ context.Context, table, pkColumn string, pkValue int64) error {
-	m.deletedRows = append(m.deletedRows, mockDeleteCall{Table: table, PKColumn: pkColumn, PKValue: pkValue})
-	return nil
+// trackedRows is every row the mock tracks, in a stable order.
+func (m *mockDBAdapter) trackedRows() []domain.TrackedRow { return m.state.AllRows() }
+
+// TableExists reports every table as present unless the test marks it missing.
+func (m *mockDBAdapter) TableExists(_ context.Context, table string) (bool, error) {
+	return !m.missingTables[table], nil
 }
 
-func (m *mockDBAdapter) DeleteEntityRecord(_ context.Context, filePath string) error {
-	delete(m.synced, filePath)
-	delete(m.entityHashes, filePath)
-	return nil
+// RowExists reports a row live when currentRows holds it. Tests that care
+// about liveness seed currentRows; everything else reads as "already gone",
+// which is the state entity forget is normally used on.
+func (m *mockDBAdapter) RowExists(_ context.Context, table, _ string, pkValue int64) (bool, error) {
+	_, ok := m.currentRows[fmt.Sprintf("%s|%d", table, pkValue)]
+	return ok, nil
 }
 
+// InsertRow records the call and makes the row live, so a test that goes on to
+// compare against the database sees what the insert put there.
 func (m *mockDBAdapter) InsertRow(_ context.Context, table string, columns map[string]any, _ string) (int64, error) {
 	m.insertedRows = append(m.insertedRows, mockInsertCall{Table: table, Columns: columns})
+
 	id := m.nextID
 	m.nextID++
+
+	live := make(map[string]any, len(columns))
+	for k, v := range columns {
+		live[k] = v
+	}
+	m.currentRows[fmt.Sprintf("%s|%d", table, id)] = live
+
 	return id, nil
 }
 
+// UpdateRow records the call and applies it to the live row. Without this the
+// mock would leave the database disagreeing with the baseline joka just
+// recorded, and every three-way comparison after an apply would read as drift.
 func (m *mockDBAdapter) UpdateRow(_ context.Context, table, pkColumn string, pkValue int64, columns map[string]any) error {
 	m.updatedRows = append(m.updatedRows, mockUpdateCall{Table: table, PKColumn: pkColumn, PKValue: pkValue, Columns: columns})
+
+	key := fmt.Sprintf("%s|%d", table, pkValue)
+	live, ok := m.currentRows[key]
+	if !ok {
+		live = make(map[string]any, len(columns))
+		m.currentRows[key] = live
+	}
+	for k, v := range columns {
+		live[k] = v
+	}
+
 	return nil
 }
 
-func (m *mockDBAdapter) GetRow(_ context.Context, table string, columns []string, _ string, pkValue int64) (map[string]any, error) {
-	row := m.currentRows[fmt.Sprintf("%s|%d", table, pkValue)]
+// GetRow reports a row that is not in currentRows the way the real adapter
+// does. Returning an empty map instead hid a real bug: a tracked row somebody
+// deleted read as every column being NULL.
+func (m *mockDBAdapter) GetRow(_ context.Context, table string, columns []string, pkColumn string, pkValue int64) (map[string]any, error) {
+	row, live := m.currentRows[fmt.Sprintf("%s|%d", table, pkValue)]
+	if !live {
+		return nil, fmt.Errorf("%w: %s %s=%d", domain.ErrRowNotFound, table, pkColumn, pkValue)
+	}
+
 	result := make(map[string]any, len(columns))
 	for _, c := range columns {
 		result[c] = row[c]
@@ -424,7 +455,7 @@ func TestInsertGraphAction(t *testing.T) {
 	})
 
 	t.Run("it propagates insert errors", func(t *testing.T) {
-		db := &failingDBAdapter{}
+		db := &failingDBAdapter{mockDBAdapter: *newMockDBAdapter()}
 		refMap := make(map[string]int64)
 
 		entities := []domain.Entity{
@@ -439,4 +470,65 @@ func TestInsertGraphAction(t *testing.T) {
 			t.Fatal("expected error, got nil")
 		}
 	})
+}
+
+// UniqueKeys returns the unique indexes the fixture declared for the table.
+func (m *mockDBAdapter) UniqueKeys(_ context.Context, table string) ([][]string, error) {
+	m.uniqueKeyCalls++
+	return m.uniqueKeys[table], nil
+}
+
+// FindByUniqueKey scans currentRows for the one whose named columns all match.
+//
+// It compares through HashValue rather than ==, because the mock's rows hold
+// whatever a test wrote into them and a declared 1 is an int against a stored
+// int64 often enough to matter.
+func (m *mockDBAdapter) FindByUniqueKey(
+	_ context.Context,
+	table, _ string,
+	key map[string]any,
+) (int64, error) {
+	for rowKey, row := range m.currentRows {
+		name, pk, ok := splitRowKey(rowKey)
+		if !ok || name != table {
+			continue
+		}
+
+		matches := true
+		for column, want := range key {
+			if HashValue(row[column]) != HashValue(want) {
+				matches = false
+				break
+			}
+		}
+
+		if matches {
+			return pk, nil
+		}
+	}
+
+	return 0, domain.ErrRowNotFound
+}
+
+// splitRowKey takes a currentRows key back apart into its table and primary key.
+func splitRowKey(rowKey string) (string, int64, bool) {
+	sep := strings.LastIndex(rowKey, "|")
+	if sep < 0 {
+		return "", 0, false
+	}
+
+	pk, err := strconv.ParseInt(rowKey[sep+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+
+	return rowKey[:sep], pk, true
+}
+
+// DeleteRow records the call and removes the row, so a later liveness check
+// sees what the delete did.
+func (m *mockDBAdapter) DeleteRow(_ context.Context, table, pkColumn string, pkValue int64) error {
+	m.deletedRows = append(m.deletedRows, mockDeleteCall{Table: table, PKColumn: pkColumn, PKValue: pkValue})
+	delete(m.currentRows, fmt.Sprintf("%s|%d", table, pkValue))
+	return nil
 }

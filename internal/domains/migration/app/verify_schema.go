@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 )
 
@@ -68,7 +67,7 @@ func (a VerifySchemaAction) Execute(ctx context.Context) (VerifyResult, error) {
 			result.Added = append(result.Added, table)
 			continue
 		}
-		if normalizeCreateTable(snapStmt) != normalizeCreateTable(liveStmt) {
+		if snapStmt != liveStmt {
 			result.Modified = append(result.Modified, ModifiedTable{
 				Table:    table,
 				Snapshot: snapStmt,
@@ -90,15 +89,4 @@ func (a VerifySchemaAction) Execute(ctx context.Context) (VerifyResult, error) {
 	})
 
 	return result, nil
-}
-
-// autoIncrementRE strips `AUTO_INCREMENT=<n>` from MySQL SHOW CREATE TABLE
-// output so comparing snapshots against live schemas doesn't false-positive
-// every time a row is inserted.
-var autoIncrementRE = regexp.MustCompile(`\s*AUTO_INCREMENT=\d+`)
-
-// normalizeCreateTable removes non-structural noise so two equivalent schemas
-// compare equal. Currently strips MySQL's AUTO_INCREMENT counter.
-func normalizeCreateTable(stmt string) string {
-	return autoIncrementRE.ReplaceAllString(stmt, "")
 }

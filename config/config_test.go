@@ -3,8 +3,6 @@ package config
 import (
 	"os"
 	"testing"
-
-	"github.com/apsdsm/joka/internal/domains/template/domain"
 )
 
 func TestLoad(t *testing.T) {
@@ -15,12 +13,7 @@ func TestLoad(t *testing.T) {
 		defer os.Chdir(orig)
 
 		yaml := `migrations: db/migrations
-templates: db/templates
-tables:
-  - name: emails
-    strategy: truncate
-  - name: settings
-    strategy: update
+entities: db/entities
 `
 		os.WriteFile(".jokarc.yaml", []byte(yaml), 0644)
 
@@ -31,17 +24,8 @@ tables:
 		if cfg.Migrations != "db/migrations" {
 			t.Errorf("expected migrations 'db/migrations', got %q", cfg.Migrations)
 		}
-		if cfg.Templates != "db/templates" {
-			t.Errorf("expected templates 'db/templates', got %q", cfg.Templates)
-		}
-		if len(cfg.Tables) != 2 {
-			t.Fatalf("expected 2 tables, got %d", len(cfg.Tables))
-		}
-		if cfg.Tables[0].Name != "emails" || cfg.Tables[0].Strategy != domain.StrategyTruncate {
-			t.Errorf("unexpected first table: %+v", cfg.Tables[0])
-		}
-		if cfg.Tables[1].Name != "settings" || cfg.Tables[1].Strategy != domain.StrategyUpdate {
-			t.Errorf("unexpected second table: %+v", cfg.Tables[1])
+		if cfg.Entities != "db/entities" {
+			t.Errorf("expected entities 'db/entities', got %q", cfg.Entities)
 		}
 	})
 
@@ -55,7 +39,7 @@ tables:
 		if err != nil {
 			t.Fatalf("expected no error for missing file, got: %v", err)
 		}
-		if cfg.Migrations != "" || cfg.Templates != "" || len(cfg.Tables) != 0 {
+		if cfg.Migrations != "" || cfg.Entities != "" {
 			t.Errorf("expected zero-value config, got %+v", cfg)
 		}
 	})
@@ -88,15 +72,15 @@ profiles:
     entities: db/entities-dev
     connection:
       source: aws_secrets_manager
-      driver: mysql
+      driver: postgres
       host: 127.0.0.1
-      port: 3307
+      port: 5432
       user: root
       database: lgc
       secret:
         secret_id: lgc
         region: ap-northeast-1
-        password_key: mysql_root_password
+        password_key: pg_root_password
 `
 
 	writeCfg := func(t *testing.T) {
@@ -144,7 +128,7 @@ profiles:
 		if cfg.Connection == nil || cfg.Connection.Source != "aws_secrets_manager" {
 			t.Fatalf("expected aws connection, got %+v", cfg.Connection)
 		}
-		if cfg.Connection.Secret == nil || cfg.Connection.Secret.PasswordKey != "mysql_root_password" {
+		if cfg.Connection.Secret == nil || cfg.Connection.Secret.PasswordKey != "pg_root_password" {
 			t.Errorf("unexpected secret config: %+v", cfg.Connection.Secret)
 		}
 		if cfg.Profiles != nil {

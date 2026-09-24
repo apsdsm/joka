@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
 	"github.com/apsdsm/joka/internal/domains/migration/infra"
@@ -108,7 +107,6 @@ func TestConsolidate(t *testing.T) {
 
 	err := RunConsolidateCommand{
 		DB:            db,
-		Driver:        jokadb.Postgres,
 		DSN:           dsn,
 		MigrationsDir: dir,
 		UpToIndex:     "240102000000",
@@ -210,7 +208,6 @@ func TestConsolidateRequiresTheLastAppliedMigration(t *testing.T) {
 	// Writing that as the 240102000000 baseline would be a lie.
 	err := RunConsolidateCommand{
 		DB:            db,
-		Driver:        jokadb.Postgres,
 		DSN:           dsn,
 		MigrationsDir: dir,
 		UpToIndex:     "240102000000",

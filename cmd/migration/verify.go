@@ -7,8 +7,8 @@ import (
 	"fmt"
 
 	"github.com/apsdsm/joka/cmd/shared"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
 	"github.com/fatih/color"
 )
 
@@ -22,13 +22,12 @@ var ErrSchemaDrift = errors.New("schema drift detected")
 // tables. Exits non-zero when drift is found.
 type RunVerifyCommand struct {
 	DB           *sql.DB
-	Driver       jokadb.Driver
 	OutputFormat string
 }
 
 func (r RunVerifyCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
-	adapter := newMigrationAdapter(r.Driver, r.DB)
+	adapter := infra.NewPostgresDBAdapter(r.DB)
 
 	result, err := app.VerifySchemaAction{DB: adapter}.Execute(ctx)
 	if err != nil {

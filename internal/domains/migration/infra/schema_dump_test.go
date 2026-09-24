@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/infra"
 	"github.com/apsdsm/joka/testlib"
 )
@@ -55,10 +54,7 @@ func TestPgSchemaDumper(t *testing.T) {
 	execPG(t, db, `CREATE VIEW test_dump_view AS SELECT id, m FROM test_dump_parent`)
 	execPG(t, db, `CREATE FUNCTION test_dump_fn() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql`)
 
-	dumper, err := infra.NewSchemaDumper(jokadb.Postgres, db, dsn)
-	if err != nil {
-		t.Fatalf("NewSchemaDumper: %v", err)
-	}
+	dumper := infra.NewSchemaDumper(db, dsn)
 
 	script, err := dumper.Dump(ctx)
 	if err != nil {

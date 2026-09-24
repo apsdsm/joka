@@ -5,42 +5,69 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
-	"github.com/joho/godotenv"
 	"github.com/apsdsm/joka/cmd/dbtools"
 	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/lock"
 	"github.com/apsdsm/joka/cmd/migration"
 	"github.com/apsdsm/joka/cmd/shared"
-	"github.com/apsdsm/joka/cmd/template"
+	"github.com/apsdsm/joka/cmd/status"
 	"github.com/apsdsm/joka/config"
-	"github.com/apsdsm/joka/internal/connection"
-	"github.com/apsdsm/joka/internal/secrets"
-	templateinfra "github.com/apsdsm/joka/internal/domains/template/infra"
 	jokadb "github.com/apsdsm/joka/db"
+	"github.com/apsdsm/joka/internal/connection"
+	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
+	"github.com/apsdsm/joka/internal/domains/entity/domain"
+	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
+	"github.com/apsdsm/joka/internal/meta"
+	"github.com/apsdsm/joka/internal/secrets"
+	"github.com/apsdsm/joka/internal/upgrade"
+	"github.com/fatih/color"
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
-const version = "0.13.0"
+const version = "0.14.0"
+
+// annotationMutates marks a command that writes to the database, so the root
+// command knows whether to stamp joka_meta. Read-only commands must not.
+const annotationMutates = "joka:mutates"
+
+// annotationWipes marks a command that destroys the tracking rather than
+// reading it. Such a command still writes, so it stamps — but it must not be
+// gated on an upgrade of bookkeeping it is about to delete.
+//
+// Without this, a database whose upgrade is blocked has no way out: every
+// command that could clear the blockage is itself blocked by it.
+const annotationWipes = "joka:wipes"
+
+// mutates is the annotation map for a command that writes.
+var mutates = map[string]string{annotationMutates: "true"}
+
+// wipes is the annotation map for a command that destroys the tracking.
+var wipes = map[string]string{annotationMutates: "true", annotationWipes: "true"}
 
 func main() {
 	var (
 		envFile       string
 		profile       string
 		migrationsDir string
-		templatesDir  string
 		entitiesDir   string
+		stateFile     string
 		autoConfirm   bool
 		outputFormat  string
 		dbConn        *sql.DB
-		dbDriver      jokadb.Driver
 		dbDSN         string
 		cfg           *config.Config
 	)
 
 	root := &cobra.Command{
-		Use:   "joka",
-		Short: "Database migration management tool",
+		Use: "joka",
+		// A failed command prints its error once, and prints no flags. Cobra's
+		// own handling did both wrong: it dumped a screen of flags after every
+		// error, burying the message that named what to do next, and it printed
+		// the error itself on top of main's own handling below.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Database migration management tool",
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
 			if err := shared.ValidateOutputFlag(outputFormat); err != nil {
 				return err
@@ -55,11 +82,11 @@ func main() {
 			if !c.Flags().Changed("migrations") && cfg.Migrations != "" {
 				migrationsDir = cfg.Migrations
 			}
-			if !c.Flags().Changed("templates") && cfg.Templates != "" {
-				templatesDir = cfg.Templates
-			}
 			if !c.Flags().Changed("entities") && cfg.Entities != "" {
 				entitiesDir = cfg.Entities
+			}
+			if !c.Flags().Changed("statefile") && cfg.StateFile != "" {
+				stateFile = cfg.StateFile
 			}
 
 			if c.Name() == "version" {
@@ -72,7 +99,9 @@ func main() {
 				return err
 			}
 
-			if c.Name() == "make" {
+			// `migrate new` writes a file and never opens a connection, so it
+			// runs without a reachable database.
+			if c.Name() == "new" {
 				return nil
 			}
 
@@ -82,41 +111,112 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Kept for `migrate consolidate`, which hands it to pg_dump/mysqldump.
+			// Kept for `migrate consolidate`, which hands it to pg_dump.
 			dbDSN = dsn
 
-			dbConn, dbDriver, err = jokadb.Open(dsn)
+			dbConn, err = jokadb.Open(dsn)
 			if err != nil {
 				return fmt.Errorf("error connecting to database: %w", err)
 			}
 
+			// Refuse a database whose bookkeeping a newer joka has already
+			// moved on: this build would read the new shape as the old one.
+			if err := meta.Check(c.Context(), dbConn); err != nil {
+				return err
+			}
+
+			// Bring the bookkeeping up to date and record what wrote here, but
+			// only for commands that write. A
+			// read-only command must leave a bare database bare — that is what
+			// makes a missing tracking table reportable.
+			if c.Annotations[annotationMutates] == "true" && c.Annotations[annotationWipes] != "true" {
+				if err := refuseWrongDatabase(c, stateFile, profile, dbConn); err != nil {
+					return err
+				}
+
+				applied, err := upgrade.Run(c.Context(), dbConn, version)
+				if err != nil {
+					return err
+				}
+				for _, step := range applied {
+					if outputFormat != shared.OutputJSON {
+						color.Cyan("Upgraded tracking to version %d: %s", step.To, step.Describe)
+					}
+				}
+			}
+
 			return nil
 		},
-		PersistentPostRun: func(c *cobra.Command, args []string) {
-			if dbConn != nil {
-				dbConn.Close()
+		PersistentPostRunE: func(c *cobra.Command, args []string) error {
+			if dbConn == nil {
+				return nil
 			}
+			defer dbConn.Close()
+
+			// A wiping command skips the upgrade gate on the way in, and the
+			// stamp lives inside it, so `drop` and `reset` would otherwise leave
+			// a database this build just wrote with no marker on it. The next
+			// mutating command would read that as pre-marker and announce an
+			// upgrade of bookkeeping it had itself written a second ago.
+			//
+			// Stamping here rather than there is deliberate: what the database
+			// holds afterwards is what this build writes, and that is only true
+			// once the command has finished. Cobra runs PersistentPostRunE only
+			// on success, so a failed reset leaves the marker alone.
+			if c.Annotations[annotationWipes] == "true" {
+				if err := meta.Stamp(c.Context(), dbConn, version); err != nil {
+					return err
+				}
+			}
+
+			return nil
 		},
 	}
 
 	root.PersistentFlags().StringVarP(&envFile, "env", "e", ".env", "Path to the environment file")
 	root.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Config profile to use (from .jokarc.yaml profiles)")
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
-	root.PersistentFlags().StringVarP(&templatesDir, "templates", "t", "devops/templates", "Path to the templates directory")
 	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")
+	root.PersistentFlags().StringVar(&stateFile, "statefile", "", "Path to the state file (default: joka[.<profile>].state.json beside the working directory)")
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 
-	initCmd := &cobra.Command{
-		Use:   "init",
-		Short: "Initialize the migrations table",
+	// No annotation. Status is read-only, so it stays out of the upgrade gate,
+	// the wrong-database refusal and the joka_meta stamp — a status that stamped
+	// the database would change what it reports on, and one refused for
+	// describing the wrong database would refuse the question it exists for.
+	statusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Report what joka has done to this database",
+		Long: `Report what joka has done to this database.
+
+An inventory, not a diff: status answers "what is", where a plan answers "what
+would change". Read-only, creates nothing, and always exits 0 when the report
+could be built — 'joka migrate verify' is the drift gate for schema and
+'joka entity sync' for seeds.`,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return migration.RunInitCommand{DB: dbConn, Driver: dbDriver, OutputFormat: outputFormat}.Execute(c.Context())
+			return status.RunStatusCommand{
+				DB:            dbConn,
+				Profile:       profile,
+				MigrationsDir: migrationsDir,
+				EntitiesDir:   entitiesDir,
+				StateFile:     stateFile,
+				OutputFormat:  outputFormat,
+			}.Execute(c.Context())
 		},
 	}
 
-	makeCmd := &cobra.Command{
-		Use:   "make [name]",
+	initCmd := &cobra.Command{
+		Use:         "init",
+		Short:       "Initialize the migrations table",
+		Annotations: mutates,
+		RunE: func(c *cobra.Command, _ []string) error {
+			return migration.RunInitCommand{DB: dbConn, OutputFormat: outputFormat}.Execute(c.Context())
+		},
+	}
+
+	migrateNewCmd := &cobra.Command{
+		Use:   "new [name]",
 		Short: "Create a new migration file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -134,12 +234,12 @@ func main() {
 	}
 
 	migrateUpCmd := &cobra.Command{
-		Use:   "up",
-		Short: "Apply pending migrations",
+		Use:         "up",
+		Short:       "Apply pending migrations",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateUpCommand{
 				DB:            dbConn,
-				Driver:        dbDriver,
 				MigrationsDir: migrationsDir,
 				AutoConfirm:   autoConfirm,
 				OutputFormat:  outputFormat,
@@ -153,81 +253,25 @@ func main() {
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunMigrateStatusCommand{
 				DB:            dbConn,
-				Driver:        dbDriver,
 				MigrationsDir: migrationsDir,
 				OutputFormat:  outputFormat,
 			}.Execute(c.Context())
 		},
 	}
 
-	dataCmd := &cobra.Command{
-		Use:   "data",
-		Short: "Application data state commands",
-	}
-
-	var ignoreForeignKeys bool
-
-	dataSyncCmd := &cobra.Command{
-		Use:   "sync",
-		Short: "Sync template data to the database",
-		RunE: func(c *cobra.Command, _ []string) error {
-			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
-			for i, t := range cfg.Tables {
-				tables[i] = templateinfra.TableConfig{
-					Name:     t.Name,
-					Strategy: t.Strategy,
-				}
-			}
-
-			// CLI flag overrides config; config is the default.
-			ignoreFK := cfg.IgnoreForeignKeys
-			if c.Flags().Changed("ignore-foreign-keys") {
-				ignoreFK = ignoreForeignKeys
-			}
-
-			return template.RunDataSyncCommand{
-				DB:                dbConn,
-				Driver:            dbDriver,
-				TemplatesDir:      templatesDir,
-				Tables:            tables,
-				AutoConfirm:       autoConfirm,
-				IgnoreForeignKeys: ignoreFK,
-				OutputFormat:      outputFormat,
-			}.Execute(c.Context())
-		},
-	}
-
-	dataSyncCmd.Flags().BoolVar(&ignoreForeignKeys, "ignore-foreign-keys", false, "Disable foreign key checks during truncate (MySQL)")
-
 	unlockCmd := &cobra.Command{
-		Use:   "unlock",
-		Short: "Force-release a held lock",
+		Use:         "unlock",
+		Short:       "Force-release a held lock",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return lock.RunUnlockCommand{DB: dbConn, Driver: dbDriver, OutputFormat: outputFormat}.Execute(c.Context())
-		},
-	}
-
-	migrateSnapshotCmd := &cobra.Command{
-		Use:   "snapshot [migration_index]",
-		Short: "View schema snapshot for a migration",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			var index string
-			if len(args) > 0 {
-				index = args[0]
-			}
-			return migration.RunSnapshotCommand{
-				DB:             dbConn,
-				Driver:         dbDriver,
-				MigrationIndex: index,
-				OutputFormat:   outputFormat,
-			}.Execute(c.Context())
+			return lock.RunUnlockCommand{DB: dbConn, OutputFormat: outputFormat}.Execute(c.Context())
 		},
 	}
 
 	migrateConsolidateCmd := &cobra.Command{
-		Use:   "consolidate",
-		Short: "Squash applied migrations into one baseline dumped by pg_dump (PostgreSQL only)",
+		Use:         "consolidate",
+		Short:       "Squash applied migrations into one baseline dumped by pg_dump (PostgreSQL only)",
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			upTo, _ := c.Flags().GetString("up-to")
 			if upTo == "" {
@@ -235,7 +279,6 @@ func main() {
 			}
 			return migration.RunConsolidateCommand{
 				DB:            dbConn,
-				Driver:        dbDriver,
 				DSN:           dbDSN,
 				MigrationsDir: migrationsDir,
 				UpToIndex:     upTo,
@@ -252,7 +295,6 @@ func main() {
 		RunE: func(c *cobra.Command, _ []string) error {
 			return migration.RunVerifyCommand{
 				DB:           dbConn,
-				Driver:       dbDriver,
 				OutputFormat: outputFormat,
 			}.Execute(c.Context())
 		},
@@ -268,93 +310,92 @@ func main() {
 		Short: "Sync entity YAML files to the database",
 		Long: `Sync entity YAML files to the database.
 
-New files have their entity graph inserted. Files whose content changed since
-the last sync (shown as [modified] by 'entity status') are reconciled in place:
-each entity is updated by primary key against the tracked row at the same
-depth-first position, so existing PKs are preserved (no delete, no FK conflict).
-Unchanged files are skipped.
+The seed files are the desired state. Every declared entity is compared against
+the database, whether or not its file changed. A tracked entity has each declared
+column compared three ways — against the file, against the database, and against
+what joka last wrote there.
 
-If a modified file changed structurally — a different number of entities than
-tracked, an entity's table changed, or an _id that disagrees with the tracked
-row at that position — sync refuses to guess and recommends 'entity reimport'.
+An entity joka does not track is looked for by a unique key its declaration
+fills in. Found, the row is claimed and the declaration written over it, which is
+reported before it happens. Not found, it is inserted.
 
-Use --dry-run to print the planned inserts and before/after field changes
-without applying anything.
+A column only the file moved is written. A column the database moved is a
+conflict: applying the file would discard a change joka did not make.
 
-Use --force to re-apply every tracked file's row updates regardless of its
-stored hash. This is the escape hatch when change detection is in doubt.`,
+  --on-conflict=fail   report them, write nothing, exit non-zero (default)
+  --on-conflict=file   the file wins; write over the database's values
+  --on-conflict=db     the database wins; keep its values and rewrite the seed files
+  --on-conflict=ask    show each one and ask, updating the seed files to match
+                       the database where you say it is right
+
+The default makes this a drift gate, the same role 'migrate verify' plays for
+schema. A column listed under an entity's _once: is not compared at all — joka
+seeds it on insert and the database owns it after, which is how a password
+survives a re-sync.
+
+Use --decayed when the database's copy of the seeded data has rotted and the
+files are the only version worth keeping: every declared column is rewritten and
+nothing is reported as a conflict. _once is still honoured.
+
+Use --dry-run to print the plan without applying anything.`,
+		Annotations: mutates,
 		RunE: func(c *cobra.Command, _ []string) error {
 			dryRun, _ := c.Flags().GetBool("dry-run")
-			force, _ := c.Flags().GetBool("force")
+			decayed, _ := c.Flags().GetBool("decayed")
+
+			onConflict, _ := c.Flags().GetString("on-conflict")
+			policy, err := entityapp.ParseConflictPolicy(onConflict)
+			if err != nil {
+				return err
+			}
+
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
 				Secrets:      secrets.New(cfg.Secrets),
-				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
-				Force:        force,
+				Decayed:      decayed,
+				OnConflict:   policy,
+				Profile:      profile,
+				StateFile:    stateFile,
+				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
 	}
 	entitySyncCmd.Flags().Bool("dry-run", false, "Preview inserts and before/after changes without applying")
-	entitySyncCmd.Flags().Bool("force", false, "Re-apply updates for every tracked file regardless of hash")
+	entitySyncCmd.Flags().String("on-conflict", "fail",
+		"What to do when the database changed since joka last wrote: fail, file, db or ask")
+	entitySyncCmd.Flags().Bool("decayed", false,
+		"Treat the seeded data in the database as stale: rewrite every declared column, and report no conflicts")
 
-	entityStatusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show entity file sync status",
-		RunE: func(c *cobra.Command, _ []string) error {
-			return entity.RunEntityStatusCommand{
-				DB:           dbConn,
-				Driver:       dbDriver,
-				EntitiesDir:  entitiesDir,
-				OutputFormat: outputFormat,
-			}.Execute(c.Context())
-		},
-	}
+	var diffNoValues bool
 
-	entityReimportCmd := &cobra.Command{
-		Use:   "reimport [file]",
-		Short: "Re-sync an entity file (delete old rows, re-insert)",
+	entityDiffCmd := &cobra.Command{
+		Use:   "diff [file]",
+		Short: "Line an entity file's declared graph up against the rows joka tracks and the rows in the database",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			return entity.RunEntityReimportCommand{
+			return entity.RunEntityDiffCommand{
 				DB:           dbConn,
-				Secrets:      secrets.New(cfg.Secrets),
-				Driver:       dbDriver,
 				EntitiesDir:  entitiesDir,
 				FilePath:     args[0],
-				AutoConfirm:  autoConfirm,
+				SkipValues:   diffNoValues,
 				OutputFormat: outputFormat,
 			}.Execute(c.Context())
 		},
 	}
 
-	entityUpdateCmd := &cobra.Command{
-		Use:   "update [file]",
-		Short: "Add new entities from a file without deleting existing rows",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			return entity.RunEntityUpdateCommand{
-				DB:           dbConn,
-				Secrets:      secrets.New(cfg.Secrets),
-				Driver:       dbDriver,
-				EntitiesDir:  entitiesDir,
-				FilePath:     args[0],
-				AutoConfirm:  autoConfirm,
-				OutputFormat: outputFormat,
-			}.Execute(c.Context())
-		},
-	}
+	entityDiffCmd.Flags().BoolVar(&diffNoValues, "no-values", false, "Skip the per-row column comparison (saves one query per matched row)")
 
 	dropCmd := &cobra.Command{
-		Use:   "drop",
-		Short: "Drop every table in the database (including joka_* tracking)",
+		Use:         "drop",
+		Short:       "Drop every table in the database (including joka_* tracking)",
+		Annotations: wipes,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return dbtools.RunDropCommand{
 				DB:           dbConn,
-				Driver:       dbDriver,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 			}.Execute(c.Context())
@@ -362,35 +403,26 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 	}
 
 	resetCmd := &cobra.Command{
-		Use:   "reset",
-		Short: "Drop everything and re-run init, migrations, data sync, entity sync",
+		Use:         "reset",
+		Short:       "Drop everything and re-run init, migrations and entity sync",
+		Annotations: wipes,
 		RunE: func(c *cobra.Command, _ []string) error {
-			tables := make([]templateinfra.TableConfig, len(cfg.Tables))
-			for i, t := range cfg.Tables {
-				tables[i] = templateinfra.TableConfig{
-					Name:     t.Name,
-					Strategy: t.Strategy,
-				}
-			}
-
 			return dbtools.RunResetCommand{
-				DB:                dbConn,
-				Secrets:           secrets.New(cfg.Secrets),
-				Driver:            dbDriver,
-				MigrationsDir:     migrationsDir,
-				TemplatesDir:      templatesDir,
-				EntitiesDir:       entitiesDir,
-				Tables:            tables,
-				IgnoreForeignKeys: cfg.IgnoreForeignKeys,
-				AutoConfirm:       autoConfirm,
-				OutputFormat:      outputFormat,
+				DB:            dbConn,
+				Secrets:       secrets.New(cfg.Secrets),
+				MigrationsDir: migrationsDir,
+				EntitiesDir:   entitiesDir,
+				AutoConfirm:   autoConfirm,
+				OutputFormat:  outputFormat,
+				Profile:       profile,
+				StateFile:     stateFile,
+				JokaVersion:   version,
 			}.Execute(c.Context())
 		},
 	}
 
-	migrateCmd.AddCommand(migrateUpCmd, migrateStatusCmd, migrateSnapshotCmd, migrateConsolidateCmd, migrateVerifyCmd)
-	dataCmd.AddCommand(dataSyncCmd)
-	entityCmd.AddCommand(entitySyncCmd, entityStatusCmd, entityReimportCmd, entityUpdateCmd)
+	migrateCmd.AddCommand(migrateNewCmd, migrateUpCmd, migrateStatusCmd, migrateConsolidateCmd, migrateVerifyCmd)
+	entityCmd.AddCommand(entitySyncCmd, entityDiffCmd)
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
@@ -403,7 +435,7 @@ stored hash. This is the escape hatch when change detection is in doubt.`,
 		},
 	}
 
-	root.AddCommand(initCmd, makeCmd, migrateCmd, dataCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
+	root.AddCommand(initCmd, statusCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		if outputFormat == shared.OutputJSON {
@@ -425,4 +457,51 @@ func loadEnv(envFile string) error {
 	}
 	godotenv.Load(envFile)
 	return nil
+}
+
+// refuseWrongDatabase stops a command that writes when the state file beside
+// the working directory describes a database this is not.
+//
+// The check is here rather than in entity sync because every writing command
+// has the same exposure: `migrate up` against a database nobody meant to touch
+// is as bad as a sync against one. It runs on the same annotation as the
+// upgrade gate, so `drop` and `reset` skip it — they destroy the tracking, and
+// being unable to reset a database because its state file is stale is the wrong
+// way round.
+//
+// Only a disagreeing identity refuses. See StateAudit.BlocksWrite.
+func refuseWrongDatabase(c *cobra.Command, stateFile, profile string, db *sql.DB) error {
+	path := entityinfra.StateFilePath(stateFile, profile)
+
+	doc, hasFile, err := entityinfra.ReadStateFile(path)
+	if err != nil {
+		return err
+	}
+
+	metaState, err := meta.Read(c.Context(), db)
+	if err != nil {
+		return err
+	}
+
+	audit := entityapp.AuditState(hasFile, doc.Identity, doc.Version,
+		metaState.StateIdentity, metaState.StateVersion)
+	if !audit.BlocksWrite() {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s names %s, and this database is %s. Nothing was written.\n"+
+		"  If the connection is right, the state file is stale: remove it, or point --statefile "+
+		"somewhere else.",
+		domain.ErrWrongDatabase, path,
+		identityOrNone(doc.Identity), identityOrNone(metaState.StateIdentity))
+}
+
+// identityOrNone renders a state identity for the refusal above. An empty one
+// is a database joka has never written state to, which reads better as a phrase
+// than as an empty pair of quotes.
+func identityOrNone(identity string) string {
+	if identity == "" {
+		return "a database joka has never written state to"
+	}
+	return identity
 }

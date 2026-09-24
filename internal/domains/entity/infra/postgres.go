@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/lib/pq"
@@ -15,25 +16,29 @@ import (
 
 // PostgresDBAdapter implements entity app.DBAdapter for PostgreSQL.
 type PostgresDBAdapter struct {
-	db     DBTX
-	conn   *sql.DB
-	driver jokadb.Driver
+	db   DBTX
+	conn *sql.DB
 }
 
 // NewPostgresDBAdapter creates an adapter that runs all queries on the raw connection.
 func NewPostgresDBAdapter(conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: conn, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: conn, conn: conn}
 }
 
 // NewPostgresTxDBAdapter creates an adapter that runs InsertRow inside the
 // given transaction, while tracking-table DDL uses the raw connection.
 func NewPostgresTxDBAdapter(tx *sql.Tx, conn *sql.DB) *PostgresDBAdapter {
-	return &PostgresDBAdapter{db: tx, conn: conn, driver: jokadb.Postgres}
+	return &PostgresDBAdapter{db: tx, conn: conn}
 }
 
-// EnsureTrackingTable creates the joka_entities table if it does not already exist.
+// EnsureTrackingTable creates the joka_entities table if it does not already
+// exist.
+//
+// Legacy: tracking version 3 moved entity tracking into the joka_state
+// document and dropped this table. Nothing creates it any more — it is kept so
+// the upgrade's tests can build a database at the version the upgrade reads.
 func (p *PostgresDBAdapter) EnsureTrackingTable(ctx context.Context) error {
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, "joka_entities")
+	exists, err := jokadb.TableExists(ctx, p.conn, "joka_entities")
 	if err != nil {
 		return err
 	}
@@ -48,31 +53,6 @@ func (p *PostgresDBAdapter) EnsureTrackingTable(ctx context.Context) error {
 			synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)
 	`)
-	return err
-}
-
-// IsEntitySynced returns true if the given file path has already been recorded.
-func (p *PostgresDBAdapter) IsEntitySynced(ctx context.Context, filePath string) (bool, error) {
-	var exists int
-	err := p.conn.QueryRowContext(ctx,
-		`SELECT 1 FROM joka_entities WHERE entity_file = $1`,
-		filePath,
-	).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("checking entity sync status: %w", err)
-	}
-	return true, nil
-}
-
-// RecordEntitySynced inserts a row into joka_entities to mark the file as synced.
-func (p *PostgresDBAdapter) RecordEntitySynced(ctx context.Context, filePath string) error {
-	_, err := p.conn.ExecContext(ctx,
-		`INSERT INTO joka_entities (entity_file) VALUES ($1)`,
-		filePath,
-	)
 	return err
 }
 
@@ -192,7 +172,7 @@ func (p *PostgresDBAdapter) GetRow(ctx context.Context, table string, columns []
 
 	err := p.db.QueryRowContext(ctx, query, pkValue).Scan(scan...)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("reading %s row %s=%d: row not found", table, pkColumn, pkValue)
+		return nil, fmt.Errorf("%w: %s %s=%d", domain.ErrRowNotFound, table, pkColumn, pkValue)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading %s row %s=%d: %w", table, pkColumn, pkValue, err)
@@ -228,10 +208,19 @@ func (p *PostgresDBAdapter) LookupValue(ctx context.Context, table, returnCol, w
 	return result, nil
 }
 
+// RefIDIndex is the unique index that makes _id the identity of a tracked row.
+// Named so the upgrade step and the fresh-table path agree on it.
+const RefIDIndex = "joka_entity_rows_ref_id_key"
+
 // EnsureRowTrackingTable creates the joka_entity_rows table if it does not
 // already exist.
+//
+// A table created now gets the unique index on ref_id with it. A table that
+// already exists is left alone: adding the constraint to one whose rows predate
+// it can fail, so that path belongs to the upgrade (internal/upgrade), which
+// checks the data first and reports what stands in the way.
 func (p *PostgresDBAdapter) EnsureRowTrackingTable(ctx context.Context) error {
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, "joka_entity_rows")
+	exists, err := jokadb.TableExists(ctx, p.conn, "joka_entity_rows")
 	if err != nil {
 		return err
 	}
@@ -239,18 +228,33 @@ func (p *PostgresDBAdapter) EnsureRowTrackingTable(ctx context.Context) error {
 		return nil
 	}
 
-	_, err = p.conn.ExecContext(ctx, `
+	if _, err := p.conn.ExecContext(ctx, `
 		CREATE TABLE joka_entity_rows (
 			id BIGSERIAL PRIMARY KEY,
 			entity_file VARCHAR(512) NOT NULL,
 			table_name VARCHAR(255) NOT NULL,
 			row_pk BIGINT NOT NULL,
 			pk_column VARCHAR(255) NOT NULL DEFAULT 'id',
-			ref_id VARCHAR(255),
+			ref_id VARCHAR(255) NOT NULL,
 			insertion_order INT NOT NULL
 		)
-	`)
-	return err
+	`); err != nil {
+		return err
+	}
+
+	return p.EnsureRefIDIndex(ctx)
+}
+
+// EnsureRefIDIndex adds the unique index on ref_id if it is not already there.
+// It fails on data that breaks the constraint, so callers working on an
+// existing table check first.
+func (p *PostgresDBAdapter) EnsureRefIDIndex(ctx context.Context) error {
+	_, err := p.conn.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS `+RefIDIndex+` ON joka_entity_rows (ref_id)`)
+	if err != nil {
+		return fmt.Errorf("adding the unique index on ref_id: %w", err)
+	}
+	return nil
 }
 
 // EnsureContentHashColumn adds the content_hash column to joka_entities if
@@ -274,109 +278,106 @@ func (p *PostgresDBAdapter) EnsureContentHashColumn(ctx context.Context) error {
 	return err
 }
 
-// RecordEntitySyncedWithHash inserts a row into joka_entities with a content
-// hash for change detection.
-func (p *PostgresDBAdapter) RecordEntitySyncedWithHash(ctx context.Context, filePath, contentHash string) error {
-	_, err := p.conn.ExecContext(ctx,
-		`INSERT INTO joka_entities (entity_file, content_hash) VALUES ($1, $2)
-		 ON CONFLICT (entity_file) DO UPDATE SET content_hash = EXCLUDED.content_hash, synced_at = NOW()`,
-		filePath, contentHash,
-	)
-	return err
+// TableExists reports whether the named table is present in the current schema.
+func (p *PostgresDBAdapter) TableExists(ctx context.Context, table string) (bool, error) {
+	return jokadb.TableExists(ctx, p.conn, table)
 }
 
-// UpdateEntitySynced updates an existing joka_entities row with a new content
-// hash and synced_at timestamp.
-func (p *PostgresDBAdapter) UpdateEntitySynced(ctx context.Context, filePath, contentHash string) error {
-	_, err := p.conn.ExecContext(ctx,
-		`UPDATE joka_entities SET content_hash = $1, synced_at = NOW() WHERE entity_file = $2`,
-		contentHash, filePath,
-	)
-	return err
+// RowExists reports whether a single row is still present, matched by
+// pkColumn = pkValue.
+func (p *PostgresDBAdapter) RowExists(ctx context.Context, table, pkColumn string, pkValue int64) (bool, error) {
+	var one int
+	err := p.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT 1 FROM "%s" WHERE "%s" = $1 LIMIT 1`, table, pkColumn),
+		pkValue,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking for %s.%s = %d: %w", table, pkColumn, pkValue, err)
+	}
+	return true, nil
 }
 
-// GetEntityHash returns the content_hash stored for a synced entity file.
-func (p *PostgresDBAdapter) GetEntityHash(ctx context.Context, filePath string) (string, error) {
-	var hash sql.NullString
-	err := p.conn.QueryRowContext(ctx,
-		`SELECT content_hash FROM joka_entities WHERE entity_file = $1`,
-		filePath,
-	).Scan(&hash)
+// UniqueKeys returns the table's unique indexes as column lists, ordered so the
+// narrowest comes first.
+//
+// Narrowest first because adoption takes the first key the entity fully
+// declares, and a single-column natural key (jjc2 and tic_main both use
+// `UNIQUE (xid)`) is a better statement of "this is the same row" than a wide
+// composite that happens to match.
+//
+// Partial indexes (indpred) and expression indexes (indexprs) are excluded:
+// neither identifies a row by the values an entity declares, so matching on one
+// would be matching on something other than what it says.
+func (p *PostgresDBAdapter) UniqueKeys(ctx context.Context, table string) ([][]string, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT array_agg(a.attname ORDER BY k.ord)
+		FROM pg_index i
+		JOIN pg_class t ON t.oid = i.indrelid
+		JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+		WHERE t.relname = $1
+		  AND t.relnamespace = current_schema()::regnamespace
+		  AND i.indisunique
+		  AND i.indpred IS NULL
+		  AND i.indexprs IS NULL
+		GROUP BY i.indexrelid
+		ORDER BY count(*), min(a.attname)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("reading unique keys of %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	var keys [][]string
+
+	for rows.Next() {
+		var columns pq.StringArray
+		if err := rows.Scan(&columns); err != nil {
+			return nil, fmt.Errorf("scanning unique keys of %s: %w", table, err)
+		}
+		keys = append(keys, []string(columns))
+	}
+
+	return keys, rows.Err()
+}
+
+// FindByUniqueKey returns the primary key of the row whose named columns hold
+// these values, or ErrRowNotFound.
+func (p *PostgresDBAdapter) FindByUniqueKey(
+	ctx context.Context,
+	table, pkColumn string,
+	key map[string]any,
+) (int64, error) {
+	names := make([]string, 0, len(key))
+	for name := range key {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	where := make([]string, 0, len(names))
+	args := make([]any, 0, len(names))
+
+	for i, name := range names {
+		where = append(where, fmt.Sprintf(`"%s" = $%d`, name, i+1))
+		args = append(args, key[name])
+	}
+
+	query := fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE %s LIMIT 1`,
+		pkColumn, table, strings.Join(where, " AND "))
+
+	var pk int64
+
+	err := p.db.QueryRowContext(ctx, query, args...).Scan(&pk)
 	if err == sql.ErrNoRows {
-		return "", nil
+		return 0, domain.ErrRowNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("getting entity hash: %w", err)
+		return 0, fmt.Errorf("finding %s by its unique key: %w", table, err)
 	}
-	return hash.String, nil
-}
 
-// GetAllSyncedEntities returns all entity_file paths mapped to content hashes.
-func (p *PostgresDBAdapter) GetAllSyncedEntities(ctx context.Context) (map[string]string, error) {
-	rows, err := p.conn.QueryContext(ctx,
-		`SELECT entity_file, content_hash FROM joka_entities`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying synced entities: %w", err)
-	}
-	defer rows.Close()
-
-	result := make(map[string]string)
-	for rows.Next() {
-		var file string
-		var hash sql.NullString
-		if err := rows.Scan(&file, &hash); err != nil {
-			return nil, err
-		}
-		result[file] = hash.String
-	}
-	return result, rows.Err()
-}
-
-// RecordEntityRow inserts a row into joka_entity_rows to track an individual
-// inserted entity row.
-func (p *PostgresDBAdapter) RecordEntityRow(ctx context.Context, row domain.TrackedRow) error {
-	_, err := p.db.ExecContext(ctx,
-		`INSERT INTO joka_entity_rows (entity_file, table_name, row_pk, pk_column, ref_id, insertion_order)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		row.EntityFile, row.TableName, row.RowPK, row.PKColumn, nullString(row.RefID), row.InsertionOrder,
-	)
-	return err
-}
-
-// GetTrackedRows returns all tracked rows for a given entity file in reverse
-// insertion order (for deletion).
-func (p *PostgresDBAdapter) GetTrackedRows(ctx context.Context, entityFile string) ([]domain.TrackedRow, error) {
-	rows, err := p.conn.QueryContext(ctx,
-		`SELECT entity_file, table_name, row_pk, pk_column, ref_id, insertion_order
-		 FROM joka_entity_rows WHERE entity_file = $1 ORDER BY insertion_order DESC`,
-		entityFile,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying tracked rows: %w", err)
-	}
-	defer rows.Close()
-
-	var result []domain.TrackedRow
-	for rows.Next() {
-		var r domain.TrackedRow
-		var refID sql.NullString
-		if err := rows.Scan(&r.EntityFile, &r.TableName, &r.RowPK, &r.PKColumn, &refID, &r.InsertionOrder); err != nil {
-			return nil, err
-		}
-		r.RefID = refID.String
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
-// DeleteTrackedRows removes all joka_entity_rows entries for a given entity file.
-func (p *PostgresDBAdapter) DeleteTrackedRows(ctx context.Context, entityFile string) error {
-	_, err := p.db.ExecContext(ctx,
-		`DELETE FROM joka_entity_rows WHERE entity_file = $1`,
-		entityFile,
-	)
-	return err
+	return pk, nil
 }
 
 // DeleteRow deletes a single row from the given table by primary key. Returns
@@ -394,13 +395,4 @@ func (p *PostgresDBAdapter) DeleteRow(ctx context.Context, table, pkColumn strin
 		return fmt.Errorf("deleting from %s: %w", table, err)
 	}
 	return nil
-}
-
-// DeleteEntityRecord removes the joka_entities row for a given file path.
-func (p *PostgresDBAdapter) DeleteEntityRecord(ctx context.Context, filePath string) error {
-	_, err := p.conn.ExecContext(ctx,
-		`DELETE FROM joka_entities WHERE entity_file = $1`,
-		filePath,
-	)
-	return err
 }

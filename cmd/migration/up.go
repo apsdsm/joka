@@ -6,19 +6,18 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
+	"github.com/apsdsm/joka/internal/domains/migration/infra"
+	"github.com/fatih/color"
 )
 
 // RunMigrateUpCommand handles the "migrate up" command. It builds the migration
 // chain, identifies pending migrations, and applies them inside a transaction.
 type RunMigrateUpCommand struct {
 	DB            *sql.DB
-	Driver        jokadb.Driver
 	MigrationsDir string
 	AutoConfirm   bool
 	OutputFormat  string
@@ -34,7 +33,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 
 	if !r.SkipLock {
 		// Acquire advisory lock to prevent concurrent migration runs.
-		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 		if err := lockAdapter.Acquire(ctx, "migrate up"); err != nil {
 			if jsonOut {
 				return shared.PrintErrorJSON(err)
@@ -48,7 +47,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		color.Green("Checking migration chain...")
 	}
 
-	adapter := newMigrationAdapter(r.Driver, r.DB)
+	adapter := infra.NewPostgresDBAdapter(r.DB)
 	chain, err := app.GetMigrationChainAction{
 		DB:            adapter,
 		MigrationsDir: r.MigrationsDir,
@@ -105,8 +104,8 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 
 	// Fail fast on lock contention rather than hanging indefinitely: a DDL
 	// migration that can't acquire its lock (e.g. an app still holding the
-	// table) errors out in seconds instead of wedging. Postgres-only syntax.
-	if r.Driver == jokadb.Postgres {
+	// table) errors out in seconds instead of wedging.
+	if true {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '15s'"); err != nil {
 			tx.Rollback()
 			if jsonOut {
@@ -116,7 +115,7 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		}
 	}
 
-	txAdapter := newMigrationTxAdapter(r.Driver, tx, r.DB)
+	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
 
 	var applied []string
 	for _, m := range pending {

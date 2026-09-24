@@ -5,18 +5,16 @@ import (
 	"database/sql"
 	"errors"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/migration/app"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
 	"github.com/apsdsm/joka/internal/domains/migration/infra"
+	"github.com/fatih/color"
 )
 
 // RunInitCommand handles the "init" command to create the migrations table.
 type RunInitCommand struct {
 	DB           *sql.DB
-	Driver       jokadb.Driver
 	OutputFormat string
 }
 
@@ -29,7 +27,7 @@ func (r RunInitCommand) Execute(ctx context.Context) error {
 	}
 
 	err := app.CreateMigrationTableAction{
-		DB: newMigrationAdapter(r.Driver, r.DB),
+		DB: infra.NewPostgresDBAdapter(r.DB),
 	}.Execute(ctx)
 
 	if errors.Is(err, domain.ErrMigrationAlreadyExists) {
@@ -60,18 +58,4 @@ func (r RunInitCommand) Execute(ctx context.Context) error {
 
 	color.Green("Migrations table created successfully.")
 	return nil
-}
-
-func newMigrationAdapter(driver jokadb.Driver, conn *sql.DB) app.DBAdapter {
-	if driver == jokadb.Postgres {
-		return infra.NewPostgresDBAdapter(conn)
-	}
-	return infra.NewMySQLDBAdapter(conn)
-}
-
-func newMigrationTxAdapter(driver jokadb.Driver, tx *sql.Tx, conn *sql.DB) app.DBAdapter {
-	if driver == jokadb.Postgres {
-		return infra.NewPostgresTxDBAdapter(tx, conn)
-	}
-	return infra.NewMySQLTxDBAdapter(tx, conn)
 }

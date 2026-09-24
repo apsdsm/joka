@@ -3,9 +3,9 @@ package migration
 import (
 	"context"
 
-	"github.com/fatih/color"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/migration/infra"
+	"github.com/fatih/color"
 )
 
 // RunMakeCommand handles the "make" command to create a new migration file.

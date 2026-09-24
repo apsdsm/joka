@@ -15,7 +15,7 @@ import (
 
 // syncEntityFile mirrors what `entity sync` does for a single file: parse the
 // YAML at fullPath, attach the relative path and current content hash, then
-// insert its entity graph (and tracking rows) through SyncEntitiesAction in a
+// insert its entity graph (and tracking rows) through ApplySetAction in a
 // transaction against the real adapter. It returns nothing; failures fail t.
 func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 	t.Helper()
@@ -40,7 +40,27 @@ func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.SyncEntitiesAction{DB: txAdapter, Files: []*domain.EntityFile{file}}).Execute(ctx); err != nil {
+	declared := []*domain.EntityFile{file}
+	dirty := map[string]bool{file.Path: true}
+
+	// The apply takes its instructions from the plan, the way the command does.
+	state, err := infra.NewPostgresTxStateBackend(tx, db).Load(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("loading state: %v", err)
+	}
+
+	plan, err := (app.PlanSyncAction{DB: txAdapter, State: state, Declared: declared, Dirty: dirty}).Execute(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("planning: %v", err)
+	}
+
+	if _, err := (app.ApplySetAction{
+		DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db),
+		Declared: declared, Dirty: dirty,
+		Recreate: plan.Recreate, Write: plan.ColumnsToWrite(),
+	}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("initial sync of %s: %v", rel, err)
 	}
@@ -50,32 +70,30 @@ func syncEntityFile(t *testing.T, db *sql.DB, fullPath, rel string) {
 	}
 }
 
-// classify mirrors `entity status`: it asks EntityStatusAction for the status
-// of rel given the file on disk and the recorded tracking state.
+// classify asks the same question `entity status` used to answer: is this file
+// new, modified or synced relative to what joka recorded? It goes through
+// app.FileStatusFor, which is what the sync command itself calls, so the
+// regression below is measured against the verdict sync acts on.
 func classify(t *testing.T, db *sql.DB, entitiesDir, rel string) domain.FileStatus {
 	t.Helper()
 	ctx := context.Background()
 
-	results, err := (app.EntityStatusAction{
-		DB:          infra.NewPostgresDBAdapter(db),
-		EntitiesDir: entitiesDir,
-		Files:       []string{rel},
-	}).Execute(ctx)
+	state, err := infra.NewPostgresStateBackend(db).Load(ctx)
 	if err != nil {
-		t.Fatalf("status: %v", err)
+		t.Fatalf("loading state: %v", err)
 	}
 
-	for _, r := range results {
-		if r.Path == rel {
-			return r.Status
-		}
+	hash, err := app.HashFileContent(filepath.Join(entitiesDir, rel))
+	if err != nil {
+		t.Fatalf("hashing %s: %v", rel, err)
 	}
-	t.Fatalf("no status reported for %s", rel)
-	return ""
+
+	stored, tracked := state.FileHash(rel)
+	return app.FileStatusFor(tracked, stored, hash)
 }
 
 // applyModified mirrors the sync command's update path for a single modified
-// file: re-parse, re-hash, and run SyncEntitiesAction with the file in the
+// file: re-parse, re-hash, and run ApplySetAction with the file in the
 // Modified slice so its tracked rows are UPDATEd in place.
 func applyModified(t *testing.T, db *sql.DB, fullPath, rel string) {
 	t.Helper()
@@ -100,7 +118,27 @@ func applyModified(t *testing.T, db *sql.DB, fullPath, rel string) {
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, db)
 
-	if _, err := (app.SyncEntitiesAction{DB: txAdapter, Modified: []*domain.EntityFile{file}}).Execute(ctx); err != nil {
+	declared := []*domain.EntityFile{file}
+	dirty := map[string]bool{file.Path: true}
+
+	// The apply takes its instructions from the plan, the way the command does.
+	state, err := infra.NewPostgresTxStateBackend(tx, db).Load(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("loading state: %v", err)
+	}
+
+	plan, err := (app.PlanSyncAction{DB: txAdapter, State: state, Declared: declared, Dirty: dirty}).Execute(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		t.Fatalf("planning: %v", err)
+	}
+
+	if _, err := (app.ApplySetAction{
+		DB: txAdapter, Backend: infra.NewPostgresTxStateBackend(tx, db),
+		Declared: declared, Dirty: dirty,
+		Recreate: plan.Recreate, Write: plan.ColumnsToWrite(),
+	}).Execute(ctx); err != nil {
 		tx.Rollback() //nolint:errcheck
 		t.Fatalf("update sync of %s: %v", rel, err)
 	}
@@ -144,7 +182,6 @@ func TestPostgresEntitySyncDetectsModifiedColumnValue(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	adapter := infra.NewPostgresDBAdapter(db)
 
 	t.Run("it reports synced immediately after the initial sync", func(t *testing.T) {
 		syncEntityFile(t, db, fullPath, rel)
@@ -182,10 +219,11 @@ func TestPostgresEntitySyncDetectsModifiedColumnValue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hashing edited file: %v", err)
 		}
-		storedHash, err := adapter.GetEntityHash(ctx, rel)
+		state, err := infra.NewPostgresStateBackend(db).Load(ctx)
 		if err != nil {
-			t.Fatalf("GetEntityHash: %v", err)
+			t.Fatalf("loading state: %v", err)
 		}
+		storedHash, _ := state.FileHash(rel)
 		if newHash == storedHash {
 			t.Fatalf("edited file hash matches stored hash %q — edit did not change content", storedHash)
 		}

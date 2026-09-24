@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/apsdsm/joka/cmd/shared"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/dbtools/app"
 	"github.com/apsdsm/joka/internal/domains/dbtools/infra"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
@@ -17,7 +16,6 @@ import (
 // including joka_* tracking tables. Destructive — confirms by default.
 type RunDropCommand struct {
 	DB           *sql.DB
-	Driver       jokadb.Driver
 	AutoConfirm  bool
 	OutputFormat string
 	// SkipLock skips advisory lock acquisition. Used when an outer command
@@ -29,7 +27,7 @@ func (r RunDropCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
 	if !r.SkipLock {
-		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 		if err := lockAdapter.Acquire(ctx, "drop"); err != nil {
 			if jsonOut {
 				return shared.PrintErrorJSON(err)
@@ -39,7 +37,7 @@ func (r RunDropCommand) Execute(ctx context.Context) error {
 		defer lockAdapter.Release(ctx) //nolint:errcheck
 	}
 
-	dbAdapter := infra.NewDBAdapter(r.Driver, r.DB)
+	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
 	tables, err := dbAdapter.ListTables(ctx)
 	if err != nil {

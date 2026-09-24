@@ -1,73 +1,22 @@
 package app
 
-import (
-	"context"
+import "context"
 
-	"github.com/apsdsm/joka/internal/domains/entity/domain"
-)
-
-// DBAdapter abstracts the database operations needed by entity sync. The
-// tracking methods (EnsureTrackingTable, IsEntitySynced, RecordEntitySynced)
-// manage the joka_entities table. InsertRow performs a single INSERT and
-// returns the auto-increment id for use in child entity references.
+// DBAdapter is what the entity actions do to the database itself: insert,
+// update, delete and read the seeded rows, and answer whether a table or a row
+// is still there.
+//
+// Nothing here concerns tracking. What joka last applied is one value behind
+// StateBackend, loaded and saved whole, which is why this interface no longer
+// carries IsEntitySynced, RecordEntityRow, RetrackEntityRow and the rest — nine
+// methods that existed only because six commands each reached for the tracking
+// columns they happened to need.
+//
+// Table creation is deliberately absent too: it is the command layer's
+// business, which calls EnsureTables on the concrete adapter once before
+// handing it over. An action that could create the table it reads cannot be
+// used by a read-only caller, which is what `joka status` needs.
 type DBAdapter interface {
-	// EnsureTrackingTable creates the joka_entities table if it does not
-	// already exist.
-	EnsureTrackingTable(ctx context.Context) error
-
-	// EnsureRowTrackingTable creates the joka_entity_rows table if it does
-	// not already exist. This table tracks individual rows inserted per
-	// entity file for reimport support.
-	EnsureRowTrackingTable(ctx context.Context) error
-
-	// EnsureContentHashColumn adds the content_hash column to joka_entities
-	// if it is not already present.
-	EnsureContentHashColumn(ctx context.Context) error
-
-	// IsEntitySynced returns true if filePath has already been recorded in
-	// the joka_entities table.
-	IsEntitySynced(ctx context.Context, filePath string) (bool, error)
-
-	// RecordEntitySynced inserts a row into joka_entities to mark filePath
-	// as synced.
-	RecordEntitySynced(ctx context.Context, filePath string) error
-
-	// RecordEntitySyncedWithHash inserts a row into joka_entities with a
-	// content hash for change detection.
-	RecordEntitySyncedWithHash(ctx context.Context, filePath, contentHash string) error
-
-	// UpdateEntitySynced updates an existing joka_entities row with a new
-	// content hash and synced_at timestamp.
-	UpdateEntitySynced(ctx context.Context, filePath, contentHash string) error
-
-	// GetEntityHash returns the content_hash stored for a synced entity file.
-	// Returns empty string if no hash is stored or the file is not found.
-	GetEntityHash(ctx context.Context, filePath string) (string, error)
-
-	// GetAllSyncedEntities returns all entity_file paths from joka_entities
-	// mapped to their content hashes. NULL hashes are returned as empty strings.
-	GetAllSyncedEntities(ctx context.Context) (map[string]string, error)
-
-	// RecordEntityRow inserts a row into joka_entity_rows to track an
-	// individual inserted entity row.
-	RecordEntityRow(ctx context.Context, row domain.TrackedRow) error
-
-	// GetTrackedRows returns all rows from joka_entity_rows for a given
-	// entity file, ordered by insertion_order DESC (for reverse deletion).
-	GetTrackedRows(ctx context.Context, entityFile string) ([]domain.TrackedRow, error)
-
-	// DeleteTrackedRows removes all joka_entity_rows entries for a given
-	// entity file.
-	DeleteTrackedRows(ctx context.Context, entityFile string) error
-
-	// DeleteRow deletes a single row from the given table by primary key.
-	// Returns an error wrapping ErrForeignKeyConflict if a FK constraint
-	// blocks the deletion.
-	DeleteRow(ctx context.Context, table, pkColumn string, pkValue int64) error
-
-	// DeleteEntityRecord removes the joka_entities row for a given file path.
-	DeleteEntityRecord(ctx context.Context, filePath string) error
-
 	// InsertRow inserts a single row into the given table and returns the
 	// auto-generated primary key value. pkColumn identifies the primary key
 	// column (e.g. "id") so the adapter can retrieve it portably.
@@ -79,6 +28,14 @@ type DBAdapter interface {
 	// field-level changes to [modified] files without deleting the row.
 	UpdateRow(ctx context.Context, table, pkColumn string, pkValue int64, columns map[string]any) error
 
+	// DeleteRow deletes a single row from the given table by primary key.
+	// Returns an error wrapping ErrForeignKeyConflict if a FK constraint
+	// blocks the deletion.
+	//
+	// Sync uses it for a tracked entity no file declares any more. Nothing else
+	// deletes: this is the only path by which joka removes a seeded row.
+	DeleteRow(ctx context.Context, table, pkColumn string, pkValue int64) error
+
 	// GetRow reads the given columns from a single row, matched by
 	// pkColumn = pkValue, and returns them as a column→value map. Used by the
 	// sync preview to show the "before" side of an update. Byte-slice values
@@ -86,8 +43,34 @@ type DBAdapter interface {
 	// does not exist.
 	GetRow(ctx context.Context, table string, columns []string, pkColumn string, pkValue int64) (map[string]any, error)
 
+	// TableExists reports whether the named table is present in the current
+	// database/schema. Used by entity forget to distinguish a tracked row
+	// whose table a later migration dropped from one that is still there —
+	// querying the dropped table for the row would just error.
+	TableExists(ctx context.Context, table string) (bool, error)
+
+	// RowExists reports whether a single row is still present, matched by
+	// pkColumn = pkValue. Used by entity forget to refuse to drop the
+	// tracking for rows that are still in the database.
+	RowExists(ctx context.Context, table, pkColumn string, pkValue int64) (bool, error)
+
 	// LookupValue queries a single value from an existing table row. Used by
 	// {{ lookup|table,return_col,where_col=value }} template expressions to
 	// resolve foreign keys against data seeded outside the entity file.
 	LookupValue(ctx context.Context, table, returnCol, whereCol string, whereVal any) (any, error)
+
+	// FindByUniqueKey returns the primary key of the row whose named columns
+	// hold these values, or ErrRowNotFound. The columns come from UniqueKeys,
+	// so at most one row can match.
+	FindByUniqueKey(ctx context.Context, table, pkColumn string, key map[string]any) (int64, error)
+
+	// UniqueKeys returns the table's unique indexes as column lists, each
+	// usable on its own to identify one row. Adoption uses them to find the row
+	// a declared entity already corresponds to in a database joka does not track
+	// yet.
+	//
+	// The primary key is included — it is a unique index, and an entity that
+	// declares it can be adopted by it. Partial and expression indexes are left
+	// out: neither identifies a row by the values an entity declares.
+	UniqueKeys(ctx context.Context, table string) ([][]string, error)
 }

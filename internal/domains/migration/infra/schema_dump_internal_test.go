@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/internal/domains/migration/domain"
 )
 
@@ -32,28 +31,12 @@ func TestStripPsqlMetaCommands(t *testing.T) {
 	}
 }
 
-func TestNewSchemaDumperDriverSupport(t *testing.T) {
-	t.Run("it returns a pg_dump dumper for postgres", func(t *testing.T) {
-		dumper, err := NewSchemaDumper(jokadb.Postgres, nil, "postgres://localhost/db")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if dumper.Tool() != "pg_dump" {
-			t.Errorf("expected pg_dump, got %s", dumper.Tool())
-		}
-	})
-
-	t.Run("it refuses MySQL for now", func(t *testing.T) {
-		// mysqldump output needs DELIMITER and multi-line /*! */ handling in the
-		// SQL splitter before joka can apply it. Refusing beats writing a
-		// baseline that cannot be replayed.
-		_, err := NewSchemaDumper(jokadb.MySQL, nil, "user:pass@tcp(h:3306)/db")
-		if !errors.Is(err, domain.ErrDumpDriverUnsupported) {
-			t.Fatalf("expected ErrDumpDriverUnsupported, got: %v", err)
-		}
-	})
+func TestNewSchemaDumper(t *testing.T) {
+	dumper := NewSchemaDumper(nil, "postgres://localhost/db")
+	if dumper.Tool() != "pg_dump" {
+		t.Errorf("expected pg_dump, got %s", dumper.Tool())
+	}
 }
-
 func TestRunDumpToolMissingBinary(t *testing.T) {
 	// The most likely first-run failure now that joka depends on an external
 	// binary, so the error has to name it.

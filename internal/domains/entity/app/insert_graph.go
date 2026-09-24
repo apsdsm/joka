@@ -27,6 +27,12 @@ type InsertGraphAction struct {
 	TrackedRows []domain.TrackedRow
 	SkipRefIDs  map[string]int64
 
+	// Baselines is the per-column hash of every row inserted, keyed by _id, for
+	// the caller to record alongside the tracking. An entity with no _id
+	// contributes nothing: there is no key to file it under, and reimport and
+	// update both refuse such a row anyway.
+	Baselines map[string]map[string]string
+
 	insertOrder int
 }
 
@@ -71,6 +77,11 @@ func (a *InsertGraphAction) insertEntity(ctx context.Context, entity domain.Enti
 
 	if entity.RefID != "" {
 		a.RefMap[entity.RefID] = id
+
+		if a.Baselines == nil {
+			a.Baselines = make(map[string]map[string]string)
+		}
+		a.Baselines[entity.RefID] = BaselineOf(columns)
 	}
 
 	if a.EntityFile != "" {

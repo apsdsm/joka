@@ -21,19 +21,18 @@ const jokaLockKey int64 = 0x6A6F6B61
 // informational ("who holds it, since when, for what") and is no longer the
 // gate itself, so a stale row from a crashed run cannot block new runs.
 type PostgresLockAdapter struct {
-	conn   *sql.DB
-	driver jokadb.Driver
-	held   *sql.Conn
+	conn *sql.DB
+	held *sql.Conn
 }
 
 // NewPostgresLockAdapter creates a lock adapter for PostgreSQL.
 func NewPostgresLockAdapter(conn *sql.DB) *PostgresLockAdapter {
-	return &PostgresLockAdapter{conn: conn, driver: jokadb.Postgres}
+	return &PostgresLockAdapter{conn: conn}
 }
 
 // EnsureTable creates the joka_lock table if it doesn't already exist.
 func (p *PostgresLockAdapter) EnsureTable(ctx context.Context) error {
-	exists, err := jokadb.TableExists(ctx, p.conn, p.driver, "joka_lock")
+	exists, err := jokadb.TableExists(ctx, p.conn, "joka_lock")
 	if err != nil {
 		return err
 	}

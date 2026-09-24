@@ -5,14 +5,15 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 
-	"github.com/fatih/color"
-	jokadb "github.com/apsdsm/joka/db"
 	"github.com/apsdsm/joka/cmd/shared"
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	"github.com/apsdsm/joka/internal/domains/entity/infra"
 	lockinfra "github.com/apsdsm/joka/internal/domains/lock/infra"
+	"github.com/fatih/color"
 )
 
 // RunEntitySyncCommand handles the "entity sync" command.
@@ -21,72 +22,58 @@ type RunEntitySyncCommand struct {
 	// Secrets resolves {{ asm.<source>.<key> }} template references against the
 	// `secrets:` sources in .jokarc.yaml.
 	Secrets      app.SecretResolver
-	Driver       jokadb.Driver
 	EntitiesDir  string
 	AutoConfirm  bool
 	OutputFormat string
+	// StateFile overrides where the state file is written; empty means the
+	// default beside the working directory.
+	StateFile string
+	// Profile and JokaVersion name the state file and stamp it.
+	Profile     string
+	JokaVersion string
 	// SkipLock skips advisory lock acquisition. Used when an outer command
 	// (e.g. `joka reset`) already holds the lock.
 	SkipLock bool
 	// DryRun computes and prints the plan (inserts + before/after updates)
 	// without applying anything or acquiring the advisory lock.
 	DryRun bool
-	// Force treats every tracked file as modified (re-applies its row updates)
-	// regardless of whether its stored hash matches the current file. Genuinely
-	// new files are still inserted as usual. The escape hatch for when change
-	// detection is in doubt.
-	Force bool
+	// Decayed declares the seeded data in the database stale and rewrites every
+	// declared column. See app.PlanSyncAction.Decayed.
+	Decayed bool
+	// OnConflict decides what happens when the database moved out from under
+	// the declaration. Defaults to refusing.
+	OnConflict app.ConflictPolicy
 }
 
 func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	if r.Force && !jsonOut {
-		color.Yellow("Forced re-sync: every tracked file will be re-applied regardless of its stored hash.")
+	fail := func(err error) error {
+		if jsonOut {
+			return shared.PrintErrorJSON(err)
+		}
+		return err
 	}
 
 	if !r.SkipLock && !r.DryRun {
-		lockAdapter := lockinfra.NewLockAdapter(r.Driver, r.DB)
+		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 
 		if err := lockAdapter.Acquire(ctx, "entity sync"); err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
+			return fail(err)
 		}
 
 		defer lockAdapter.Release(ctx) //nolint:errcheck
 	}
 
-	dbAdapter := newEntityAdapter(r.Driver, r.DB)
+	dbAdapter := infra.NewPostgresDBAdapter(r.DB)
 
-	if err := dbAdapter.EnsureTrackingTable(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring tracking table: %w", err))
-		}
-		return fmt.Errorf("ensuring tracking table: %w", err)
-	}
-
-	if err := dbAdapter.EnsureRowTrackingTable(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring row tracking table: %w", err))
-		}
-		return fmt.Errorf("ensuring row tracking table: %w", err)
-	}
-
-	if err := dbAdapter.EnsureContentHashColumn(ctx); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("ensuring content hash column: %w", err))
-		}
-		return fmt.Errorf("ensuring content hash column: %w", err)
+	if err := infra.NewPostgresStateBackend(r.DB).EnsureStateTable(ctx); err != nil {
+		return fail(err)
 	}
 
 	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
+		return fail(err)
 	}
 
 	if len(relPaths) == 0 {
@@ -98,92 +85,119 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
+	// One read of the state for the whole run. The status of any one file
+	// depends on the whole set anyway, because an _id can be claimed elsewhere.
+	state, err := infra.NewPostgresStateBackend(r.DB).Load(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
 	var pending []*domain.EntityFile  // new files to insert
 	var modified []*domain.EntityFile // tracked files whose content changed
+	var all []*domain.EntityFile      // every file, for set-level validation
 
 	for _, rel := range relPaths {
 		fullPath := filepath.Join(r.EntitiesDir, rel)
 
 		hash, err := app.HashFileContent(fullPath)
 		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
+			return fail(err)
 		}
 
-		already, err := dbAdapter.IsEntitySynced(ctx, rel)
-		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
-		}
-
-		if already {
-			dbHash, err := dbAdapter.GetEntityHash(ctx, rel)
-			if err != nil {
-				if jsonOut {
-					return shared.PrintErrorJSON(err)
-				}
-				return err
-			}
-
-			// A stored hash that matches means the file is unchanged. An
-			// empty stored hash (synced before hashing existed) is treated
-			// as modified, matching `entity status`; the update path then
-			// backfills the hash. --force overrides this so an unchanged
-			// file is re-applied anyway.
-			if !r.Force && dbHash != "" && dbHash == hash {
-				continue
-			}
-
-			file, err := app.ParseEntityAction{Path: fullPath}.Execute()
-			if err != nil {
-				if jsonOut {
-					return shared.PrintErrorJSON(err)
-				}
-				return err
-			}
-			file.Path = rel
-			file.ContentHash = hash
-			modified = append(modified, file)
-			continue
-		}
-
+		// Every file is parsed, including ones the hash says are unchanged.
+		// _id uniqueness is a property of the whole set, so an unchanged file
+		// still has to be read to know what it claims. The hash decides
+		// whether a file is written, not whether it is read.
 		file, err := app.ParseEntityAction{Path: fullPath}.Execute()
 		if err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
-			return err
+			return fail(err)
 		}
-
 		file.Path = rel
 		file.ContentHash = hash
+		all = append(all, file)
 
-		pending = append(pending, file)
+		stored, tracked := state.FileHash(rel)
+
+		// The hash no longer decides what gets reconciled — every declared
+		// entity is compared against the database. It decides which files get
+		// their content hash rewritten, and it is the only signal joka has for
+		// a non-deterministic column.
+		switch app.FileStatusFor(tracked, stored, hash) {
+		case domain.StatusNew:
+			pending = append(pending, file)
+		case domain.StatusModified:
+			modified = append(modified, file)
+		}
 	}
 
-	if len(pending) == 0 && len(modified) == 0 {
+	// Validate the whole set before anything is written: an _id claimed twice
+	// is only visible across files, and a set that cannot be identified is not
+	// one joka should start writing from.
+	if err := app.EntitySetError(app.ValidateEntitySet(all)); err != nil {
+		return fail(err)
+	}
+
+	dirty := make(map[string]bool, len(pending)+len(modified))
+	for _, f := range pending {
+		dirty[f.Path] = true
+	}
+	for _, f := range modified {
+		dirty[f.Path] = true
+	}
+
+	// The plan comes before the early return. A run with no dirty files can
+	// still have something to say: deleting a file leaves every other file
+	// unchanged, and the entities it declared are now declared nowhere.
+	plan, err := app.PlanSyncAction{
+		DB:       dbAdapter,
+		State:    state,
+		Declared: all,
+		Dirty:    dirty,
+		Decayed:  r.Decayed,
+	}.Execute(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
+	if !plan.HasChanges() {
+		// A file can be modified and still have nothing to apply: an edit that
+		// makes the declaration match what the database already holds. Nothing
+		// is written to the database, but the content hash still has to move,
+		// or the file reads as modified on every run from here on.
+		if len(dirty) > 0 {
+			if err := refreshHashes(ctx, r, all, dirty); err != nil {
+				return fail(err)
+			}
+		}
+
 		if jsonOut {
-			shared.PrintJSON(map[string]any{"status": "ok", "synced": []string{}, "updated": []string{}, "message": "all entity files already synced"})
+			shared.PrintJSON(map[string]any{
+				"status": "ok", "inserted": []string{}, "updated": []string{},
+				"files": []string{}, "undeclared": []map[string]any{},
+				"message": "all entity files already synced",
+			})
 			return nil
 		}
 		color.Green("All entity files already synced.")
 		return nil
 	}
 
-	plan, err := app.PlanSyncAction{
-		DB:       dbAdapter,
-		Files:    pending,
-		Modified: modified,
-	}.Execute(ctx)
-	if err != nil {
+	// Nothing to write, but tracked entities no file declares any more. Report
+	// and stop: there is no transaction to open. An adoption is excluded: it
+	// writes no row when every column agrees, but the tracking it records is a
+	// write, and skipping it would claim the row again on every later run.
+	if len(plan.Inserts) == 0 && len(plan.Updates) == 0 && len(plan.Conflicts) == 0 &&
+		len(plan.Adopted) == 0 && len(plan.Deletes) == 0 && len(plan.Forgets) == 0 &&
+		len(plan.Rekeyed) == 0 && len(plan.Removals) == 0 && len(plan.Moves) == 0 {
 		if jsonOut {
-			return shared.PrintErrorJSON(err)
+			shared.PrintJSON(map[string]any{
+				"status": "ok", "inserted": []string{}, "updated": []string{},
+				"files": []string{}, "undeclared": undeclaredJSON(plan.Undeclared),
+			})
+			return nil
 		}
-		return err
+		reportUndeclared(plan.Undeclared)
+		return nil
 	}
 
 	if r.DryRun {
@@ -196,10 +210,53 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	if !jsonOut {
+	// A conflict is the database holding a value joka did not write. Applying
+	// the declaration over it would discard a change joka cannot account for,
+	// so by default nothing is written and the run exits non-zero — which is
+	// what makes entity sync a drift gate in CI.
+	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictFail {
+		if !jsonOut {
+			printPlan(plan)
+			return app.ConflictSummary(plan.Conflicts)
+		}
+		return fail(app.ConflictError(plan.Conflicts))
+	}
+
+	// A conceded column is left alone in the database and its declaration is
+	// rewritten to match. --on-conflict=db concedes every one of them;
+	// --on-conflict=ask asks per column and builds the same answers from the
+	// replies.
+	keep := app.KeepFromConflicts(plan.Conflicts, r.OnConflict)
+	resolutions := app.ResolutionsFor(plan.Conflicts, r.OnConflict)
+
+	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictAsk {
+		if jsonOut || r.AutoConfirm {
+			return fail(fmt.Errorf(
+				"--on-conflict=ask needs someone to ask: use fail, file or db with --auto or --output json"))
+		}
+
 		printPlan(plan)
 
+		var ok bool
+		resolutions, ok = askConflicts(plan.Conflicts)
+		if !ok {
+			color.Yellow("Entity sync cancelled. Nothing was changed.")
+			return nil
+		}
+
+		keep = app.KeepFromResolutions(plan.Conflicts, resolutions)
+	}
+
+	if !jsonOut {
+		if r.OnConflict != app.ConflictAsk {
+			printPlan(plan)
+		}
+
 		fmt.Println()
+
+		for _, path := range app.FilesToRewrite(resolutions) {
+			color.Cyan("  Will update the seed file to match the database: %s", path)
+		}
 
 		if !r.AutoConfirm {
 			if !shared.Confirm("Proceed with entity sync? (only 'yes' will confirm): ") {
@@ -209,72 +266,180 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		}
 	}
 
-	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("starting transaction: %w", err))
+	// The seed files are rewritten after the confirmation and before the
+	// database is touched. After, because a cancel that has already edited the
+	// files on disk is not a cancel. Before, because if the write fails nothing
+	// has been applied and the seeds are still what they were.
+	var rewritten []string
+
+	if len(resolutions) > 0 {
+		rewritten, err = app.ApplyResolutions(r.EntitiesDir, resolutions)
+		if err != nil {
+			return fail(err)
 		}
-		return fmt.Errorf("starting transaction: %w", err)
+
+		// A rewritten file's content hash moved, and the copy in memory is the
+		// one joka is about to record. Left stale, the next run would report
+		// the file modified because of an edit joka made itself.
+		if err := reloadFiles(r.EntitiesDir, all, rewritten); err != nil {
+			return fail(err)
+		}
+
+		// A file joka has just rewritten is dirty by definition, and its hash has
+		// to be refreshed with the rest. Without this the state keeps the hash
+		// of the content from before joka's own edit, so the file reads as
+		// modified on every later run — and a non-deterministic column in it is
+		// regenerated every time, because the file hash is the only signal joka
+		// has for those.
+		for _, path := range rewritten {
+			dirty[path] = true
+		}
+
+		if !jsonOut {
+			for _, path := range rewritten {
+				color.Cyan("  Updated the seed file to match the database: %s", path)
+			}
+		}
 	}
 
-	txAdapter := newEntityTxAdapter(r.Driver, tx, r.DB)
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fail(fmt.Errorf("starting transaction: %w", err))
+	}
 
-	result, err := app.SyncEntitiesAction{
+	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
+
+	result, err := app.ApplySetAction{
 		DB:       txAdapter,
+		Backend:  infra.NewPostgresTxStateBackend(tx, r.DB),
 		Secrets:  r.Secrets,
-		Files:    pending,
-		Modified: modified,
+		Declared: all,
+		Dirty:    dirty,
+		Keep:     keep,
+		Recreate: plan.Recreate,
+		Adopted:  plan.Adopted,
+		Delete:   plan.Deletes,
+		Forget:   plan.Forgets,
+		Rekeyed:  plan.Rekeyed,
+		Removals: plan.Removals,
+		Write:    plan.ColumnsToWrite(),
 	}.Execute(ctx)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		return err
+		return fail(err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("committing transaction: %w", err))
-		}
-		return fmt.Errorf("committing transaction: %w", err)
+		return fail(fmt.Errorf("committing transaction: %w", err))
 	}
 
-	syncedPaths := result.Synced
-	if syncedPaths == nil {
-		syncedPaths = []string{}
-	}
-	updatedPaths := result.Updated
-	if updatedPaths == nil {
-		updatedPaths = []string{}
+	if err := materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion); err != nil {
+		color.Yellow("The sync committed, but the state file was not written: %v", err)
 	}
 
 	if jsonOut {
-		shared.PrintJSON(map[string]any{"status": "ok", "synced": syncedPaths, "updated": updatedPaths, "forced": r.Force, "plan": planJSON(plan)})
+		shared.PrintJSON(map[string]any{
+			"status": "ok", "on_conflict": string(r.OnConflict), "plan": planJSON(plan),
+			"inserted": orEmpty(result.Inserted), "updated": orEmpty(result.Updated),
+			"adopted":   orEmpty(result.Adopted),
+			"deleted":   undeclaredJSON(result.Deleted),
+			"forgotten": undeclaredJSON(result.Forgotten),
+			"files":     orEmpty(result.Files), "moved": result.Moved,
+			"undeclared":      undeclaredJSON(result.Undeclared),
+			"forgotten_files": orEmpty(result.ForgottenFiles),
+			"rewritten_files": orEmpty(rewritten),
+		})
 		return nil
 	}
 
 	fmt.Println()
 
-	for _, path := range syncedPaths {
+	for _, path := range result.Files {
 		color.Green("  Synced: %s", path)
 	}
 
-	for _, path := range updatedPaths {
-		color.Green("  Updated: %s", path)
+	for _, move := range result.Moved {
+		color.Cyan("  Moved:  %s  %s → %s", move.RefID, move.From, move.To)
 	}
 
-	if r.Force {
-		color.Green("\nForced entity re-sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
-	} else {
-		color.Green("\nEntity sync complete. %d synced, %d updated.", len(syncedPaths), len(updatedPaths))
+	for _, path := range result.ForgottenFiles {
+		color.Cyan("  Cleared tracking for %s (it declares nothing joka still tracks)", path)
 	}
+
+	for _, refID := range result.Adopted {
+		color.Yellow("  Claimed: %s (a row joka did not insert)", refID)
+	}
+
+	for _, row := range result.Deleted {
+		color.Red("  Deleted: %s  %s %s %d (declared nowhere)",
+			row.RefID, row.TableName, row.PKColumn, row.RowPK)
+	}
+
+	if result.ClearedUnkeyed > 0 {
+		color.Cyan("  Cleared %d pre-_id tracking %s now owned by a declared entity",
+			result.ClearedUnkeyed, plural(result.ClearedUnkeyed, "row", "rows"))
+	}
+
+	for _, row := range result.Forgotten {
+		color.Cyan("  Dropped tracking for %s (its row was already gone)", row.RefID)
+	}
+
+	for _, move := range result.Rekeyed {
+		color.Cyan("  Renamed: %s → %s (the row is unchanged)", move.From, move.To)
+	}
+
+	for _, m := range result.Moves {
+		color.Cyan("  Moved:    %s → %s (the row is unchanged)", m.Move.From, m.Move.To)
+	}
+
+	for _, r := range result.Removed {
+		if r.Removal.Keep {
+			color.Cyan("  Released: %s (tracking dropped, the row is left in place)", r.Removal.RefID)
+			continue
+		}
+		color.Red("  Removed:  %s (declared removed, the row is deleted)", r.Removal.RefID)
+	}
+
+	fmt.Println()
+	color.Green("Entity sync complete. %d inserted, %d updated, %d claimed, %d deleted, across %d files.",
+		len(result.Inserted), len(result.Updated), len(result.Adopted), len(result.Deleted), len(result.Files))
+
+	// Nothing is deleted on an undeclared entity's account: a seed file edited
+	// by mistake should not take data with it.
+	reportUndeclared(result.Undeclared)
+
+	fmt.Println()
 
 	return nil
 }
 
-// printPlan renders a SyncPlan as a human-readable preview: new rows to insert
-// and per-column before/after diffs for modified files.
+// orEmpty keeps a nil slice out of the JSON.
+func orEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func firstRows(rows []domain.TrackedRow, n int) []domain.TrackedRow {
+	if len(rows) <= n {
+		return rows
+	}
+	return rows[:n]
+}
+
+// undeclaredJSON renders the tracked rows no file declares.
+func undeclaredJSON(rows []domain.TrackedRow) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, map[string]any{
+			"ref_id": row.RefID, "table": row.TableName,
+			"pk_column": row.PKColumn, "pk_value": row.RowPK,
+			"last_declared_in": row.EntityFile,
+		})
+	}
+	return out
+}
 func printPlan(plan *app.SyncPlan) {
 	red := color.New(color.FgRed)
 	green := color.New(color.FgGreen)
@@ -312,6 +477,12 @@ func printPlan(plan *app.SyncPlan) {
 		}
 	}
 
+	printAdoptions(plan.Adopted)
+	printDeletes(plan.Deletes, plan.Forgets)
+	printRekeyed(plan.Rekeyed)
+	printRemovals(plan.Removals)
+	printMoves(plan.Moves)
+
 	for _, f := range plan.Updates {
 		fmt.Println()
 		color.Set(color.Bold)
@@ -340,10 +511,56 @@ func printPlan(plan *app.SyncPlan) {
 					green.Printf("          + (lookup, resolved at apply time)\n")
 					continue
 				}
+				// A column being written whose value is not changing. Under
+				// --decayed every declared column is written whatever it
+				// holds, so most of them are this, and printing the same
+				// string twice under a - and a + reads as a difference that
+				// is not there.
+				if c.Before == c.After {
+					fmt.Printf("        %s: (rewritten, unchanged)\n", c.Column)
+					continue
+				}
+
 				fmt.Printf("        %s:\n", c.Column)
 				red.Printf("          - %s\n", c.Before)
 				green.Printf("          + %s\n", c.After)
 			}
+		}
+	}
+
+	printConflicts(plan.Conflicts)
+}
+
+// printConflicts shows the rows the database moved, with the value it holds
+// against the value the file declares, so the reader can pick a side without
+// running a second command.
+func printConflicts(conflicts []app.RowConflict) {
+	if len(conflicts) == 0 {
+		return
+	}
+
+	red := color.New(color.FgRed)
+	green := color.New(color.FgGreen)
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Changed in the database since joka last wrote:")
+	color.Unset()
+
+	for _, row := range conflicts {
+		color.Yellow("  ! %s  %s %s %d  (%s)", row.RefID, row.Table, row.PKColumn, row.PKValue, row.File)
+
+		for _, c := range row.Columns {
+			if c.Regenerated {
+				// A fresh hash tells the reader nothing, and an asm.* secret
+				// must not be printed.
+				fmt.Printf("        %s:\n", c.Column)
+				red.Printf("          the database holds a value joka did not write\n")
+				continue
+			}
+			fmt.Printf("        %s:\n", c.Column)
+			red.Printf("          database %s\n", c.Before)
+			green.Printf("          file     %s\n", c.After)
 		}
 	}
 }
@@ -380,19 +597,234 @@ func planJSON(plan *app.SyncPlan) map[string]any {
 		updates = append(updates, map[string]any{"file": f.Path, "rows": rows})
 	}
 
-	return map[string]any{"inserts": inserts, "updates": updates}
+	conflicts := make([]map[string]any, 0, len(plan.Conflicts))
+	for _, row := range plan.Conflicts {
+		columns := make([]map[string]any, 0, len(row.Columns))
+		for _, c := range row.Columns {
+			columns = append(columns, map[string]any{
+				"column": c.Column, "database": c.Before, "file": c.After,
+			})
+		}
+		conflicts = append(conflicts, map[string]any{
+			"file": row.File, "ref_id": row.RefID, "table": row.Table,
+			"pk_column": row.PKColumn, "pk_value": row.PKValue, "columns": columns,
+		})
+	}
+
+	return map[string]any{"inserts": inserts, "updates": updates, "conflicts": conflicts}
 }
 
-func newEntityAdapter(driver jokadb.Driver, conn *sql.DB) app.DBAdapter {
-	if driver == jokadb.Postgres {
-		return infra.NewPostgresDBAdapter(conn)
+// reportUndeclared prints the tracked entities no file declares any more.
+// Nothing is deleted on their account: a seed file edited by mistake should not
+// take data with it.
+func reportUndeclared(rows []domain.TrackedRow) {
+	if len(rows) == 0 {
+		return
 	}
-	return infra.NewMySQLDBAdapter(conn)
+
+	fmt.Println()
+	color.Yellow("%d tracked rows carry no _id, so joka cannot tell whether a file declares them:", len(rows))
+	for _, row := range firstRows(rows, 10) {
+		color.Yellow("  %s  %s %s %d  (last declared in %s)",
+			row.RefID, row.TableName, row.PKColumn, row.RowPK, row.EntityFile)
+	}
+	if extra := len(rows) - 10; extra > 0 {
+		color.Yellow("  … and %d more", extra)
+	}
+	fmt.Println()
+	color.Yellow("  Nothing was deleted \u2014 an entity declared nowhere is removed, but these cannot be")
+	color.Yellow("  matched either way. Give them an _id, or drop their rows from the tracking by hand.")
+	fmt.Println()
 }
 
-func newEntityTxAdapter(driver jokadb.Driver, tx *sql.Tx, conn *sql.DB) app.DBAdapter {
-	if driver == jokadb.Postgres {
-		return infra.NewPostgresTxDBAdapter(tx, conn)
+// refreshHashes records the content hash of files that changed without
+// changing anything joka applies, and rewrites the state file.
+//
+// It is the no-op case of the same bookkeeping ApplySetAction does: there is no
+// row to write, so there is no transaction's worth of work, but the hash still
+// has to move.
+func refreshHashes(
+	ctx context.Context,
+	r RunEntitySyncCommand,
+	all []*domain.EntityFile,
+	dirty map[string]bool,
+) error {
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
 	}
-	return infra.NewMySQLTxDBAdapter(tx, conn)
+
+	backend := infra.NewPostgresTxStateBackend(tx, r.DB)
+
+	state, err := backend.Load(ctx)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+
+	for _, file := range all {
+		if dirty[file.Path] {
+			state.TrackFile(file.Path, file.ContentHash)
+		}
+	}
+
+	if err := backend.Save(ctx, state); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion)
+}
+
+// printAdoptions names the rows joka found in the database and is about to
+// claim, and what it matched each one on.
+//
+// It is printed rather than counted because a claim is a consequential thing to
+// do quietly: the rows were put there by something other than joka, and the
+// update listed below this will write the declaration over them. Someone
+// reading "18 rows adopted" has to be able to check that `xid` is the column
+// they would have matched on themselves.
+func printAdoptions(adopted map[string]app.Adoption) {
+	if len(adopted) == 0 {
+		return
+	}
+
+	refIDs := make([]string, 0, len(adopted))
+	for refID := range adopted {
+		refIDs = append(refIDs, refID)
+	}
+	sort.Strings(refIDs)
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Already in the database, and not tracked by joka — these rows will be claimed:")
+	color.Unset()
+
+	for _, refID := range refIDs {
+		a := adopted[refID]
+		color.Yellow("  = %s  %s %s %d  (%s, matched on %s)",
+			refID, a.Row.Table, a.Row.PKColumn, a.Row.PKValue, a.File,
+			strings.Join(a.MatchedOn, ", "))
+	}
+}
+
+// printDeletes shows the rows a sync is about to remove because no file
+// declares them any more, and the tracking it will drop for rows already gone.
+//
+// Deleting is the one thing a sync does that running it again cannot undo, so
+// every row is named rather than counted. The confirmation prompt after the
+// plan is the only gate on it.
+func printDeletes(deletes, forgets []domain.TrackedRow) {
+	if len(deletes) > 0 {
+		red := color.New(color.FgRed)
+
+		fmt.Println()
+		color.Set(color.Bold)
+		fmt.Println("Declared in no file any more — these rows will be DELETED:")
+		color.Unset()
+
+		for _, row := range deletes {
+			red.Printf("  - %s  %s %s %d  (last declared in %s)\n",
+				row.RefID, row.TableName, row.PKColumn, row.RowPK, row.EntityFile)
+		}
+	}
+
+	if len(forgets) > 0 {
+		fmt.Println()
+		color.Set(color.Bold)
+		fmt.Println("Declared in no file any more, and already gone from the database:")
+		color.Unset()
+
+		for _, row := range forgets {
+			color.Cyan("  \u00b7 %s  %s %s %d  (tracking dropped, nothing to delete)",
+				row.RefID, row.TableName, row.PKColumn, row.RowPK)
+		}
+	}
+}
+
+// rekeyedRows renders the plan's Rekeyed entries as the tracked rows whose
+// records the apply should drop.
+//
+// An entity whose _id changed while its row stayed put has two records for one
+// row for the length of the run: the new _id adopted it, and the old _id still
+// names it. Dropping the old one is all that is left to do — the row itself
+// needs nothing.
+func rekeyedRows(plan *app.SyncPlan) []domain.TrackedRow {
+	rows := make([]domain.TrackedRow, 0, len(plan.Rekeyed))
+	for _, move := range plan.Rekeyed {
+		rows = append(rows, domain.TrackedRow{RefID: move.From})
+	}
+	return rows
+}
+
+// printRekeyed names the entities whose _id changed while the row stayed put.
+//
+// It is reported because it looks like a deletion and an insertion in the file
+// and is neither: the row is untouched and only the name joka files it under
+// has moved.
+func printRekeyed(moves []app.EntityMove) {
+	if len(moves) == 0 {
+		return
+	}
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Renamed — the row is kept, the _id it is tracked under changes:")
+	color.Unset()
+
+	for _, move := range moves {
+		color.Cyan("  ~ %s → %s", move.From, move.To)
+	}
+}
+
+// printRemovals shows the declared state operations this run will apply.
+//
+// A `removed:` entry naming an _id joka does not track is absent from the plan
+// entirely, which is what lets one file be left in place until every database
+// has applied it. The ones that appear are the ones that will do something here.
+func printRemovals(removals []app.PlannedRemoval) {
+	if len(removals) == 0 {
+		return
+	}
+
+	red := color.New(color.FgRed)
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Declared removed:")
+	color.Unset()
+
+	for _, r := range removals {
+		if r.Removal.Keep {
+			color.Cyan("  · %s  %s %s %d  (tracking dropped, the row is kept)",
+				r.Removal.RefID, r.Row.TableName, r.Row.PKColumn, r.Row.RowPK)
+			continue
+		}
+		red.Printf("  - %s  %s %s %d  (the row is DELETED)\n",
+			r.Removal.RefID, r.Row.TableName, r.Row.PKColumn, r.Row.RowPK)
+	}
+}
+
+// printMoves shows the declared _id renames this run will apply.
+//
+// It is separate from the rename sync infers for itself: that one is a
+// consequence of adoption finding the row again, this one is an instruction.
+func printMoves(moves []app.PlannedMove) {
+	if len(moves) == 0 {
+		return
+	}
+
+	fmt.Println()
+	color.Set(color.Bold)
+	fmt.Println("Declared moved — the row is kept, the _id it is tracked under changes:")
+	color.Unset()
+
+	for _, m := range moves {
+		color.Cyan("  ~ %s → %s  (%s %s %d)",
+			m.Move.From, m.Move.To, m.Row.TableName, m.Row.PKColumn, m.Row.RowPK)
+	}
 }

@@ -9,6 +9,6 @@ type DBAdapter interface {
 	ListTables(ctx context.Context) ([]string, error)
 
 	// DropAllTables drops every table returned by ListTables. Foreign key
-	// constraints are bypassed (MySQL: disable FK checks; Postgres: CASCADE).
+	// constraints are bypassed (DROP TABLE ... CASCADE).
 	DropAllTables(ctx context.Context) error
 }

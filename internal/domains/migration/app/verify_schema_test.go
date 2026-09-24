@@ -82,13 +82,11 @@ func TestVerifySchema(t *testing.T) {
 		}
 	})
 
-	t.Run("it treats MySQL AUTO_INCREMENT counter changes as equivalent", func(t *testing.T) {
+	t.Run("it reports no drift when the statements match", func(t *testing.T) {
 		adapter := &mockDBAdapter{
 			latestSnapshotIndex: "240101000000",
-			schemaSnapshot:      `{"users":"CREATE TABLE users (id INT AUTO_INCREMENT) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4"}`,
-			computedSchema: map[string]string{
-				"users": "CREATE TABLE users (id INT AUTO_INCREMENT) ENGINE=InnoDB AUTO_INCREMENT=999 DEFAULT CHARSET=utf8mb4",
-			},
+			schemaSnapshot:      `{"users":"CREATE TABLE users (id integer NOT NULL);"}`,
+			computedSchema:      map[string]string{"users": "CREATE TABLE users (id integer NOT NULL);"},
 		}
 
 		result, err := VerifySchemaAction{DB: adapter}.Execute(ctx)
@@ -96,7 +94,7 @@ func TestVerifySchema(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.HasDrift() {
-			t.Errorf("expected no drift after AUTO_INCREMENT normalization, got %+v", result)
+			t.Errorf("expected no drift for identical statements, got %+v", result)
 		}
 	})
 }
