@@ -135,8 +135,10 @@ func TestResolveWithTunnel(t *testing.T) {
 		}
 	})
 
-	t.Run("a DSN that fails to resolve closes the tunnel", func(t *testing.T) {
-		// Otherwise a config error leaks a child process and a port.
+	t.Run("a DSN that will not resolve never opens a tunnel", func(t *testing.T) {
+		// Stronger than closing one afterwards, which is what this asserted
+		// while the tunnel was opened first. Resolving first is also what lets
+		// the tunnel default its remote host from the DSN.
 		fake := &fakeTunnel{}
 		providers.RegisterTunnel("faketun3", fake)
 
@@ -148,8 +150,78 @@ func TestResolveWithTunnel(t *testing.T) {
 		if _, _, err := ResolveWithTunnel(ctx, conn, nil); err == nil {
 			t.Fatal("expected a secret source with no secret_id to fail")
 		}
-		if fake.closed != 1 {
-			t.Errorf("expected the tunnel to be closed once, got %d", fake.closed)
+		if fake.got.Target != "" {
+			t.Errorf("expected no tunnel to have been opened, got one to %q", fake.got.Target)
+		}
+		if fake.closed != 0 {
+			t.Errorf("expected nothing to close, got %d closes", fake.closed)
+		}
+	})
+}
+
+func TestTunnelDefaultsFromTheDSN(t *testing.T) {
+	t.Run("source env needs no remote_host", func(t *testing.T) {
+		// DATABASE_URL holds the only copy of the host, so making the author
+		// write it out again under tunnel: is asking for the two to disagree.
+		t.Setenv("DATABASE_URL", "postgresql://u:p@db.private:6543/app")
+
+		fake := &fakeTunnel{}
+		providers.RegisterTunnel("dsntun", fake)
+
+		conn := &config.Connection{
+			Source: "env",
+			Tunnel: &config.Tunnel{Provider: "dsntun", Target: "i-9"},
+		}
+
+		dsn, closer, err := ResolveWithTunnel(context.Background(), conn, nil)
+		if err != nil {
+			t.Fatalf("ResolveWithTunnel: %v", err)
+		}
+		defer closer()
+
+		if fake.got.RemoteHost != "db.private" || fake.got.RemotePort != 6543 {
+			t.Errorf("expected the DSN's host and port, got %s:%d", fake.got.RemoteHost, fake.got.RemotePort)
+		}
+		if !strings.Contains(dsn, "127.0.0.1:54321") {
+			t.Errorf("expected the DSN redirected, got %q", dsn)
+		}
+	})
+
+	t.Run("an explicit remote_host still wins", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgresql://u:p@proxy:5432/app")
+
+		fake := &fakeTunnel{}
+		providers.RegisterTunnel("dsntun2", fake)
+
+		conn := &config.Connection{
+			Source: "env",
+			Tunnel: &config.Tunnel{Provider: "dsntun2", Target: "i-9", RemoteHost: "real.db", RemotePort: 5433},
+		}
+
+		_, closer, err := ResolveWithTunnel(context.Background(), conn, nil)
+		if err != nil {
+			t.Fatalf("ResolveWithTunnel: %v", err)
+		}
+		defer closer()
+
+		if fake.got.RemoteHost != "real.db" || fake.got.RemotePort != 5433 {
+			t.Errorf("expected the declared host to win, got %s:%d", fake.got.RemoteHost, fake.got.RemotePort)
+		}
+	})
+
+	t.Run("no host anywhere is refused, naming the ways to give one", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgresql:///app")
+
+		providers.RegisterTunnel("dsntun3", &fakeTunnel{})
+
+		conn := &config.Connection{
+			Source: "env",
+			Tunnel: &config.Tunnel{Provider: "dsntun3", Target: "i-9"},
+		}
+
+		_, _, err := ResolveWithTunnel(context.Background(), conn, nil)
+		if err == nil || !strings.Contains(err.Error(), "remote host") {
+			t.Fatalf("expected a refusal naming the missing host, got: %v", err)
 		}
 	})
 }

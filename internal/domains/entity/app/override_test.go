@@ -23,7 +23,7 @@ func TestApplyOverrides(t *testing.T) {
 			RefID: "c1", Columns: map[string]any{"host": "test.example.com"},
 		})
 
-		if problems := ApplyOverrides([]*domain.EntityFile{shared, env}); len(problems) != 0 {
+		if _, problems := ApplyOverrides([]*domain.EntityFile{shared, env}); len(problems) != 0 {
 			t.Fatalf("expected no problems, got %+v", problems)
 		}
 
@@ -60,7 +60,7 @@ func TestApplyOverrides(t *testing.T) {
 		}})
 		env := ovrFile("b.yaml", nil, domain.Override{RefID: "k", Columns: map[string]any{"n": 99}})
 
-		if problems := ApplyOverrides([]*domain.EntityFile{shared, env}); len(problems) != 0 {
+		if _, problems := ApplyOverrides([]*domain.EntityFile{shared, env}); len(problems) != 0 {
 			t.Fatalf("expected no problems, got %+v", problems)
 		}
 		if got := shared.Entities[0].Children[0].Columns["n"]; got != 99 {
@@ -71,7 +71,7 @@ func TestApplyOverrides(t *testing.T) {
 	t.Run("an override naming nothing is a problem, not a silent no-op", func(t *testing.T) {
 		env := ovrFile("b.yaml", nil, domain.Override{RefID: "nope", Columns: map[string]any{"x": 1}})
 
-		problems := ApplyOverrides([]*domain.EntityFile{env})
+		_, problems := ApplyOverrides([]*domain.EntityFile{env})
 		if len(problems) != 1 || problems[0].Kind != ProblemOverrideUndeclared {
 			t.Fatalf("expected ProblemOverrideUndeclared, got %+v", problems)
 		}
@@ -84,7 +84,7 @@ func TestApplyOverrides(t *testing.T) {
 		one := ovrFile("b.yaml", nil, domain.Override{RefID: "c1", Columns: map[string]any{"n": 2}})
 		two := ovrFile("c.yaml", nil, domain.Override{RefID: "c1", Columns: map[string]any{"n": 3}})
 
-		problems := ApplyOverrides([]*domain.EntityFile{shared, one, two})
+		_, problems := ApplyOverrides([]*domain.EntityFile{shared, one, two})
 		if len(problems) != 1 || problems[0].Kind != ProblemOverrideDuplicated {
 			t.Fatalf("expected ProblemOverrideDuplicated, got %+v", problems)
 		}
@@ -97,7 +97,7 @@ func TestApplyOverrides(t *testing.T) {
 	t.Run("no overrides changes nothing", func(t *testing.T) {
 		shared := ovrFile("a.yaml", []domain.Entity{{Table: "t", RefID: "c1", Columns: map[string]any{"n": 1}}})
 
-		if problems := ApplyOverrides([]*domain.EntityFile{shared}); len(problems) != 0 {
+		if _, problems := ApplyOverrides([]*domain.EntityFile{shared}); len(problems) != 0 {
 			t.Fatalf("expected no problems, got %+v", problems)
 		}
 		if shared.Entities[0].Columns["n"] != 1 {

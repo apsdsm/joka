@@ -18,8 +18,13 @@ import (
 // Name is what a config says to reach AWS.
 const Name = "aws"
 
-// ParamRegion is the AWS-specific parameter this provider reads.
-const ParamRegion = "region"
+// ParamRegion and ParamProfile are the AWS-specific parameters these providers
+// read out of a Params map. They are AWS's concerns, so they travel there
+// rather than in the provider-neutral SecretRef and TunnelSpec.
+const (
+	ParamRegion  = "region"
+	ParamProfile = "profile"
+)
 
 func init() {
 	providers.RegisterSecrets(Name, SecretsManager{})
@@ -36,6 +41,9 @@ func (SecretsManager) Fetch(ctx context.Context, ref providers.SecretRef) (map[s
 	var opts []func(*awsconfig.LoadOptions) error
 	if region := ref.Params[ParamRegion]; region != "" {
 		opts = append(opts, awsconfig.WithRegion(region))
+	}
+	if profile := ref.Params[ParamProfile]; profile != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
 	}
 
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)

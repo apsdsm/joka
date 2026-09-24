@@ -32,15 +32,11 @@ func (r RunMigrateStatusCommand) Execute(ctx context.Context) error {
 	}.Execute(ctx)
 
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
 		if errors.Is(err, domain.ErrNoMigrationTable) {
-			color.Red("Migrations table does not exist.")
-		} else {
-			color.Red("Error checking migration status: %v", err)
+			return fmt.Errorf("%w: run 'joka init' first", err)
 		}
-		return err
+
+		return fmt.Errorf("checking migration status: %w", err)
 	}
 
 	if jsonOut {

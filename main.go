@@ -30,8 +30,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.14.0"
-
 // annotationMutates marks a command that writes to the database, so the root
 // command knows whether to stamp joka_meta. Read-only commands must not.
 const annotationMutates = "joka:mutates"

@@ -39,7 +39,7 @@ func (r RunStatusCommand) Execute(ctx context.Context) error {
 	})
 	if err != nil {
 		if r.OutputFormat == shared.OutputJSON {
-			return shared.PrintErrorJSON(err)
+			return err
 		}
 		return err
 	}

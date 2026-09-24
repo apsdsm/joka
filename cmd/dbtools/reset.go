@@ -38,9 +38,6 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 	// Single outer lock covers the whole reset.
 	lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 	if err := lockAdapter.Acquire(ctx, "reset"); err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
 		return err
 	}
 	defer lockAdapter.Release(ctx) //nolint:errcheck
@@ -73,7 +70,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		SkipLock:     true,
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("drop: %w", err))
+			return fmt.Errorf("drop: %w", err)
 		}
 		return fmt.Errorf("drop: %w", err)
 	}
@@ -87,7 +84,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		OutputFormat: "text",
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("init: %w", err))
+			return fmt.Errorf("init: %w", err)
 		}
 		return fmt.Errorf("init: %w", err)
 	}
@@ -104,7 +101,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		SkipLock:      true,
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("migrate up: %w", err))
+			return fmt.Errorf("migrate up: %w", err)
 		}
 		return fmt.Errorf("migrate up: %w", err)
 	}
@@ -133,7 +130,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		OnConflict: entityapp.ConflictFile,
 	}).Execute(ctx); err != nil {
 		if jsonOut {
-			return shared.PrintErrorJSON(fmt.Errorf("entity sync: %w", err))
+			return fmt.Errorf("entity sync: %w", err)
 		}
 		return fmt.Errorf("entity sync: %w", err)
 	}

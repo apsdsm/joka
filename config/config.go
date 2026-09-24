@@ -25,6 +25,10 @@ type Secret struct {
 	Region      string `yaml:"region"`
 	URLKey      string `yaml:"url_key"`
 	PasswordKey string `yaml:"password_key"`
+	// Params carries anything the provider needs that joka has no opinion
+	// about - an AWS profile, a GCP project. `region:` above is the one AWS
+	// concern old enough to have its own key, and it is merged in here.
+	Params map[string]string `yaml:"params"`
 }
 
 // Connection describes how joka obtains its database DSN.

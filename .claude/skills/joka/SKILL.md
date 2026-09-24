@@ -223,7 +223,7 @@ import joka "github.com/apsdsm/joka/jokalib"
 
 joka.Init(ctx, db)
 joka.MigrateUp(ctx, db, "devops/migrations")
-joka.EntitySync(ctx, db, "devops/entities")
+joka.EntitySync(ctx, db, []string{"devops/entities"})
 ```
 
 Silent by default; `joka.WithOutput(w)` sends progress somewhere. `joka.WithoutLock()` skips the

@@ -170,20 +170,46 @@ func (p *PostgresDBAdapter) GetRow(ctx context.Context, table string, columns []
 		scan[i] = &dest[i]
 	}
 
-	err := p.db.QueryRowContext(ctx, query, pkValue).Scan(scan...)
-	if err == sql.ErrNoRows {
+	rows, err := p.db.QueryContext(ctx, query, pkValue)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s row %s=%d: %w", table, pkColumn, pkValue, err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("reading %s row %s=%d: %w", table, pkColumn, pkValue, err)
+		}
 		return nil, fmt.Errorf("%w: %s %s=%d", domain.ErrRowNotFound, table, pkColumn, pkValue)
 	}
+
+	// Query rather than QueryRow, only so the column types are available. They
+	// are needed for exactly one thing: char(n) pads what it stores, so a row
+	// joka inserted "abc" into comes back as "abc       " and never matches the
+	// baseline taken from what was sent. Every char column then read as drift
+	// on every run, for ever. The padding is insignificant by definition —
+	// SQL says trailing spaces do not count in a char comparison — so it is
+	// dropped here and nothing above this line has to know about it.
+	types, err := rows.ColumnTypes()
 	if err != nil {
+		return nil, fmt.Errorf("reading %s column types: %w", table, err)
+	}
+
+	if err := rows.Scan(scan...); err != nil {
 		return nil, fmt.Errorf("reading %s row %s=%d: %w", table, pkColumn, pkValue, err)
 	}
 
 	for i, c := range columns {
-		if b, ok := dest[i].([]byte); ok {
-			result[c] = string(b)
-		} else {
-			result[c] = dest[i]
+		value := dest[i]
+		if b, ok := value.([]byte); ok {
+			value = string(b)
 		}
+
+		if s, ok := value.(string); ok && i < len(types) && types[i].DatabaseTypeName() == "BPCHAR" {
+			value = strings.TrimRight(s, " ")
+		}
+
+		result[c] = value
 	}
 
 	return result, nil

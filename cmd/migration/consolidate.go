@@ -40,14 +40,6 @@ type RunConsolidateCommand struct {
 func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
-	fail := func(err error) error {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Error: %v", err)
-		return err
-	}
-
 	adapter := infra.NewPostgresDBAdapter(r.DB)
 
 	// 0. Refuse drivers joka cannot dump, before touching anything.
@@ -59,7 +51,7 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		MigrationsDir: r.MigrationsDir,
 	}.Execute(ctx)
 	if chainErr != nil {
-		return fail(chainErr)
+		return chainErr
 	}
 
 	// 2. Locate the target and check it is the last applied migration.
@@ -71,7 +63,7 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 		}
 	}
 	if targetIdx < 0 {
-		return fail(fmt.Errorf("migration %s not found in chain", r.UpToIndex))
+		return fmt.Errorf("migration %s not found in chain", r.UpToIndex)
 	}
 
 	lastApplied := -1
@@ -82,22 +74,22 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 	}
 	if targetIdx != lastApplied {
 		if lastApplied < 0 {
-			return fail(fmt.Errorf("no migrations are applied — nothing to consolidate"))
+			return fmt.Errorf("no migrations are applied — nothing to consolidate")
 		}
-		return fail(fmt.Errorf("%w: --up-to must name the last applied migration (%s), not %s\n\nThe baseline is produced by dumping the live schema, which reflects every applied migration. Consolidating up to an earlier index would write a file that does not match the index it carries",
-			domain.ErrNotLastApplied, chain[lastApplied].MigrationIndex, r.UpToIndex))
+		return fmt.Errorf("%w: --up-to must name the last applied migration (%s), not %s\n\nThe baseline is produced by dumping the live schema, which reflects every applied migration. Consolidating up to an earlier index would write a file that does not match the index it carries",
+			domain.ErrNotLastApplied, chain[lastApplied].MigrationIndex, r.UpToIndex)
 	}
 
 	// Must have at least 2 migrations to consolidate.
 	if targetIdx < 1 {
-		return fail(fmt.Errorf("need at least 2 migrations to consolidate (found %d)", targetIdx+1))
+		return fmt.Errorf("need at least 2 migrations to consolidate (found %d)", targetIdx+1)
 	}
 
 	// 3. Dump the schema. Nothing has been written or deleted yet, so a missing
 	// binary or a version mismatch aborts harmlessly.
 	dumped, err := dumper.Dump(ctx)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 
 	newFileName := fmt.Sprintf("%s_consolidated.sql", r.UpToIndex)
@@ -139,14 +131,14 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 
 	// 5. Write the baseline.
 	if err := os.WriteFile(newFilePath, []byte(baseline), 0644); err != nil {
-		return fail(fmt.Errorf("writing consolidated file: %w", err))
+		return fmt.Errorf("writing consolidated file: %w", err)
 	}
 
 	// 6. Reconcile the tracking tables. Done before deleting files so a failure
 	// here leaves the migrations directory intact and the database unchanged.
 	if err := adapter.RemoveMigrationRecords(ctx, recordsToRemove); err != nil {
 		os.Remove(newFilePath) //nolint:errcheck — best-effort rollback of step 5
-		return fail(fmt.Errorf("reconciling migration records: %w", err))
+		return fmt.Errorf("reconciling migration records: %w", err)
 	}
 
 	// 7. Delete the migration files the baseline replaces.
@@ -158,7 +150,7 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 			continue
 		}
 		if err := os.Remove(m.FileFullPath); err != nil {
-			return fail(fmt.Errorf("deleting %s: %w — records were already reconciled; remove the remaining consolidated files by hand", m.FileFullPath, err))
+			return fmt.Errorf("deleting %s: %w — records were already reconciled; remove the remaining consolidated files by hand", m.FileFullPath, err)
 		}
 		deleted = append(deleted, m.MigrationIndex)
 	}
@@ -166,10 +158,13 @@ func (r RunConsolidateCommand) Execute(ctx context.Context) error {
 	// 8. Report on the resulting migration directory.
 	remaining, err := infra.ListMigrationFiles(r.MigrationsDir)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
+		// The consolidation has already committed and the files are already
+		// gone. Not being able to list the directory afterwards is a warning
+		// about the report, not a failure of the command - and it returned the
+		// error under --output json, failing a run that had succeeded.
+		if !jsonOut {
+			color.Red("Warning: could not verify migration directory: %v", err)
 		}
-		color.Red("Warning: could not verify migration directory: %v", err)
 		return nil
 	}
 

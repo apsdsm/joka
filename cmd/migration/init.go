@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 
@@ -50,16 +51,8 @@ func (r RunInitCommand) Execute(ctx context.Context) error {
 		color.New(color.FgYellow).Fprintln(r.out(), "Migrations table already exists.")
 		return nil
 	} else if errors.Is(err, domain.ErrMigrationTableCreation) {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.New(color.FgRed).Fprintln(r.out(), "Error creating migrations table.")
-		return err
+		return fmt.Errorf("creating the migrations table: %w", err)
 	} else if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.New(color.FgRed).Fprintf(r.out(), "Unexpected error: %v\n", err)
 		return err
 	}
 

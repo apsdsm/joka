@@ -252,6 +252,15 @@ type PlanSyncAction struct {
 	// non-deterministic template, whose value joka cannot predict and so
 	// cannot tell drift from regeneration.
 	Dirty map[string]bool
+	// OverriddenBy is _id to the file whose `overrides:` block set columns on
+	// it, from ApplyOverrides.
+	//
+	// An entity whose override moved has changed as surely as one whose own
+	// declaration did. A non-deterministic column has no signal but whether its
+	// file changed, and the override lives in a different file from the entity,
+	// so rotating an argon2id value in an override did nothing at all, with no
+	// output saying so.
+	OverriddenBy map[string]string
 	// Decayed treats what the database holds as not worth comparing against:
 	// every declared column of every declared entity is written, whatever is
 	// there, and nothing is reported as a conflict.
@@ -361,7 +370,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 				continue
 			}
 
-			changes, err := ResolveRowChanges(ctx, a.DB, e, row, refMap, now, a.Dirty[file.Path], a.Decayed)
+			changes, err := ResolveRowChanges(ctx, a.DB, e, row, refMap, now, a.changed(file.Path, e.RefID), a.Decayed)
 
 			// The row joka tracks is gone. That is not a failure to read it —
 			// it is the state of the database, and the answer is to put the
@@ -587,6 +596,11 @@ func normalizeValue(v any) string {
 		return string(x)
 	case string:
 		return x
+	case time.Time:
+		// The driver hands back a time.Time for every timestamp column, and %v
+		// renders it "2026-09-24 05:49:13 +0000 UTC", never the "2026-09-24
+		// 05:49:13" that was inserted and hashed. See canonicalTimestamp.
+		return x.UTC().Format(time.RFC3339Nano)
 	default:
 		return fmt.Sprintf("%v", x)
 	}
@@ -808,15 +822,25 @@ func canonicalJSON(s string) (string, bool) {
 // when both are JSON, so a reader comparing them sees only what actually
 // differs. Values that are not both JSON are returned unchanged.
 func alignForDisplay(before, after string) (string, string) {
-	beforeJSON, ok := canonicalJSON(before)
-	if !ok {
-		return before, after
+	if beforeJSON, ok := canonicalJSON(before); ok {
+		if afterJSON, ok := canonicalJSON(after); ok {
+			return beforeJSON, afterJSON
+		}
 	}
-	afterJSON, ok := canonicalJSON(after)
-	if !ok {
-		return before, after
+
+	// The same treatment for an instant, so a reader compares two timestamps
+	// rather than a timestamp against a differently-spelled one. The driver
+	// hands back a time.Time and the declaration is whatever the author typed,
+	// so without this a one-second drift prints as
+	// "2030-01-01T00:00:00Z" against "2026-01-15 09:30:00" and the reader has
+	// to normalise them by eye.
+	if beforeTS, ok := canonicalTimestamp(before); ok {
+		if afterTS, ok := canonicalTimestamp(after); ok {
+			return beforeTS, afterTS
+		}
 	}
-	return beforeJSON, afterJSON
+
+	return before, after
 }
 
 // rowKey identifies one database row for the move check: a table and a primary
@@ -824,4 +848,16 @@ func alignForDisplay(before, after string) (string, string) {
 // when the _id between them has changed.
 func rowKey(table string, pk int64) string {
 	return table + "|" + strconv.FormatInt(pk, 10)
+}
+
+// changed reports whether the author moved anything that decides this entity's
+// declaration — its own file, or the file that overrides it.
+func (a PlanSyncAction) changed(file, refID string) bool {
+	if a.Dirty[file] {
+		return true
+	}
+
+	origin, overridden := a.OverriddenBy[refID]
+
+	return overridden && a.Dirty[origin]
 }

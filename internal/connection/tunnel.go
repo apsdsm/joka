@@ -19,7 +19,7 @@ const defaultProvider = "aws"
 //
 // A connection with no tunnel returns a nil session and a closer that does
 // nothing, so no caller branches on whether there is one.
-func openTunnel(ctx context.Context, conn *config.Connection) (*providers.Session, func() error, error) {
+func openTunnel(ctx context.Context, conn *config.Connection, dsn string) (*providers.Session, func() error, error) {
 	noop := func() error { return nil }
 
 	if conn == nil || conn.Tunnel == nil {
@@ -48,8 +48,24 @@ func openTunnel(ctx context.Context, conn *config.Connection) (*providers.Sessio
 	if port == 0 {
 		port = conn.Port
 	}
+
+	// Then whatever the DSN says. With source: env the connection block has no
+	// host at all - DATABASE_URL holds the only copy - and making the author
+	// write it out again under `tunnel:` is asking for the two to disagree.
+	if dsnHost, dsnPort, ok := hostPortOf(dsn); ok {
+		if host == "" {
+			host = dsnHost
+		}
+		if port == 0 {
+			port = dsnPort
+		}
+	}
+
 	if port == 0 {
 		port = 5432
+	}
+	if host == "" {
+		return nil, noop, fmt.Errorf("the tunnel has no remote host: set tunnel.remote_host, connection.host, or a host in the DSN")
 	}
 
 	session, err := provider.Open(ctx, providers.TunnelSpec{
@@ -87,4 +103,20 @@ func redirectDSN(dsn string, session *providers.Session) (string, error) {
 	u.Host = net.JoinHostPort(session.LocalHost, strconv.Itoa(session.LocalPort))
 
 	return u.String(), nil
+}
+
+// hostPortOf reads the host and port out of a DSN, so a tunnel can default to
+// the database the connection already names.
+func hostPortOf(dsn string) (string, int, bool) {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Hostname() == "" {
+		return "", 0, false
+	}
+
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		port = 0
+	}
+
+	return u.Hostname(), port, true
 }

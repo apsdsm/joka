@@ -7,6 +7,7 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,12 +79,13 @@ func (s SessionManager) Open(ctx context.Context, spec providers.TunnelSpec) (*p
 	// leaves the plugin holding the port.
 	runCtx, cancel := context.WithCancel(ctx)
 
-	cmd := s.run(runCtx, awsBinary,
-		"ssm", "start-session",
-		"--target", spec.Target,
-		"--document-name", "AWS-StartPortForwardingSessionToRemoteHost",
-		"--parameters", parameters(spec.RemoteHost, spec.RemotePort, localPort),
-	)
+	cmd := s.run(runCtx, awsBinary, arguments(spec, localPort)...)
+
+	// The CLI says why it failed — "instance not found", "not authorized", an
+	// expired SSO session — and without capturing it that sentence went to a
+	// pipe nobody read, leaving joka to report only that nothing came up.
+	var stderr lastLines
+	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -113,31 +115,46 @@ func (s SessionManager) Open(ctx context.Context, spec providers.TunnelSpec) (*p
 
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort))
 
-	if err := s.ready(runCtx, address, tunnelTimeout); err != nil {
-		// Look for the session's own failure before closing, not after: the
-		// closer waits on this same channel and would consume the exit error.
-		// It also has to be before the cancel, or every failure reads as
-		// "signal: killed" — which is joka killing it, not why it went.
-		//
-		// A session that failed to start usually failed for a reason the CLI
-		// printed, and that is the useful part: it says "instance not found"
-		// or "not authorized", where this can only say it never came up.
-		var runErr error
+	// Whichever happens first wins. Waiting on readiness alone meant a session
+	// that died in the first second still took the full thirty to be reported,
+	// because nothing was watching the process while the poll ran.
+	readyErr := make(chan error, 1)
+	go func() { readyErr <- s.ready(runCtx, address, tunnelTimeout) }()
+
+	var (
+		runErr   error
+		readyRes error
+		died     bool
+	)
+
+	select {
+	case readyRes = <-readyErr:
+		if readyRes == nil {
+			return &providers.Session{LocalHost: "127.0.0.1", LocalPort: localPort, Close: closer}, nil
+		}
+		// The poll gave up on its own. Give the process a moment to report an
+		// exit of its own, which is the better error when there is one.
 		select {
 		case runErr = <-exited:
+			died = true
 		case <-time.After(earlyExitGrace):
 		}
-
-		closer()
-
-		if runErr != nil {
-			return nil, fmt.Errorf("the ssm session ended before the tunnel opened: %w", runErr)
-		}
-
-		return nil, fmt.Errorf("the ssm tunnel to %s:%d did not open: %w", spec.RemoteHost, spec.RemotePort, err)
+	case runErr = <-exited:
+		died = true
 	}
 
-	return &providers.Session{LocalHost: "127.0.0.1", LocalPort: localPort, Close: closer}, nil
+	// Closing must come after reading `exited`: the closer receives on the same
+	// channel, and cancelling first would make every failure read as
+	// "signal: killed" — joka killing it, not why it went.
+	closer()
+
+	if died {
+		return nil, fmt.Errorf("the ssm session ended before the tunnel opened%s: %w",
+			stderr.suffix(), orExitedCleanly(runErr))
+	}
+
+	return nil, fmt.Errorf("the ssm tunnel to %s:%d did not open%s: %w",
+		spec.RemoteHost, spec.RemotePort, stderr.suffix(), readyRes)
 }
 
 // earlyExitGrace is how long to give a failing session to report its own exit
@@ -210,4 +227,76 @@ func waitForListener(ctx context.Context, address string, within time.Duration) 
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// arguments builds the CLI invocation.
+//
+// region and profile travel in Params, because they are AWS's and the
+// provider-neutral TunnelSpec must not grow a field per vendor. They parsed and
+// went nowhere before this: a config naming a profile was accepted in full and
+// then the session was opened against the default one.
+func arguments(spec providers.TunnelSpec, localPort int) []string {
+	args := []string{"ssm", "start-session",
+		"--target", spec.Target,
+		"--document-name", "AWS-StartPortForwardingSessionToRemoteHost",
+		"--parameters", parameters(spec.RemoteHost, spec.RemotePort, localPort),
+	}
+
+	if region := spec.Params[ParamRegion]; region != "" {
+		args = append(args, "--region", region)
+	}
+	if profile := spec.Params[ParamProfile]; profile != "" {
+		args = append(args, "--profile", profile)
+	}
+
+	return args
+}
+
+// orExitedCleanly names the case a wait error cannot: a session that ended of
+// its own accord with status zero, which is still a session that is not there.
+func orExitedCleanly(err error) error {
+	if err != nil {
+		return err
+	}
+
+	return errors.New("it exited without an error")
+}
+
+// lastLines keeps the tail of a stream, for putting a subprocess's own
+// complaint into joka's error.
+//
+// Bounded because it holds whatever the CLI decides to print, and an error
+// message is not the place for a screen of it. The tail rather than the head:
+// the reason a command failed is what it said last.
+type lastLines struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+// stderrKept is how much of a subprocess's output to carry into an error.
+const stderrKept = 2000
+
+func (l *lastLines) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.buf = append(l.buf, p...)
+	if len(l.buf) > stderrKept {
+		l.buf = l.buf[len(l.buf)-stderrKept:]
+	}
+
+	return len(p), nil
+}
+
+// suffix renders what was captured as a clause, or nothing at all.
+func (l *lastLines) suffix() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	s := strings.TrimSpace(string(l.buf))
+	if s == "" {
+		return ""
+	}
+
+	return " (aws said: " + strings.ReplaceAll(s, "\n", "; ") + ")"
 }

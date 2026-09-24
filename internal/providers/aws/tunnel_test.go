@@ -226,3 +226,82 @@ func TestParseSecretString(t *testing.T) {
 		}
 	})
 }
+
+func TestTunnelParamsReachTheCLI(t *testing.T) {
+	// region and profile parsed and went nowhere: a config naming a profile
+	// was accepted in full and the session opened against the default one.
+	l := listenOn(t, 0)
+	port := l.Addr().(*net.TCPAddr).Port
+
+	var got []string
+	s := SessionManager{
+		lookPath: present,
+		run: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			got = args
+			return exec.CommandContext(ctx, "sleep", "30")
+		},
+	}
+
+	sess, err := s.Open(context.Background(), providers.TunnelSpec{
+		Target: "i-1", RemoteHost: "h", RemotePort: 5432, LocalPort: port,
+		Params: map[string]string{ParamRegion: "ap-northeast-1", ParamProfile: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"--region ap-northeast-1", "--profile prod"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in the invocation, got: %s", want, joined)
+		}
+	}
+}
+
+func TestSessionThatDiesIsReportedAtOnce(t *testing.T) {
+	// It used to take the full readiness timeout, because nothing watched the
+	// process while the poll ran.
+	s := SessionManager{
+		lookPath: present,
+		run: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			cmd := exec.CommandContext(ctx, "sh", "-c", "echo 'An error occurred: TargetNotConnected' >&2; exit 254")
+			return cmd
+		},
+	}
+
+	start := time.Now()
+	_, err := s.Open(context.Background(), spec())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("expected the death to be reported at once, took %s", elapsed)
+	}
+	if !strings.Contains(err.Error(), "ended before the tunnel opened") {
+		t.Errorf("expected the early exit to be named, got: %v", err)
+	}
+	// The CLI's own sentence is the useful part.
+	if !strings.Contains(err.Error(), "TargetNotConnected") {
+		t.Errorf("expected the aws message to be carried, got: %v", err)
+	}
+}
+
+func TestSessionThatExitsCleanlyIsStillAFailure(t *testing.T) {
+	s := SessionManager{
+		lookPath: present,
+		run: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "true")
+		},
+	}
+
+	_, err := s.Open(context.Background(), spec())
+	if err == nil {
+		t.Fatal("expected a session that ended to be an error even at status zero")
+	}
+	if !strings.Contains(err.Error(), "exited without an error") {
+		t.Errorf("expected the clean exit to be named, got: %v", err)
+	}
+}

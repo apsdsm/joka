@@ -36,9 +36,6 @@ func (r RunEntityDiffCommand) Execute(ctx context.Context) error {
 	jsonOut := r.OutputFormat == shared.OutputJSON
 
 	fail := func(err error) error {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
 		return err
 	}
 

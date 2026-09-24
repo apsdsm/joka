@@ -46,12 +46,21 @@ func FetcherFor(sec *config.Secret) (SecretFetcher, error) {
 // RefFor renders a Secret block as a provider-neutral reference. Anything a
 // particular vendor needs travels in Params rather than in the signature.
 func RefFor(sec *config.Secret) providers.SecretRef {
-	ref := providers.SecretRef{ID: sec.SecretID}
+	params := make(map[string]string, len(sec.Params)+1)
+	for k, v := range sec.Params {
+		params[k] = v
+	}
+	// `region:` predates params: and stays a key of its own, so it is merged
+	// rather than being a second thing to write.
 	if sec.Region != "" {
-		ref.Params = map[string]string{"region": sec.Region}
+		params["region"] = sec.Region
 	}
 
-	return ref
+	if len(params) == 0 {
+		params = nil
+	}
+
+	return providers.SecretRef{ID: sec.SecretID, Params: params}
 }
 
 // Resolve turns a Connection into a DSN string suitable for db.Open. A nil
@@ -77,24 +86,32 @@ func Resolve(ctx context.Context, conn *config.Connection, fetcher SecretFetcher
 // the forward is a child process, and dropping it leaks the process and the
 // port.
 func ResolveWithTunnel(ctx context.Context, conn *config.Connection, fetcher SecretFetcher) (string, func() error, error) {
-	session, closeTunnel, err := openTunnel(ctx, conn)
+	noop := func() error { return nil }
+
+	// The DSN is resolved first, and the tunnel takes its defaults from it.
+	//
+	// The other way round, `tunnel:` had to repeat a host the DSN already
+	// carried — obvious with source: env, where the connection block has no
+	// host at all and DATABASE_URL has the only copy. Resolving first costs
+	// nothing: a secrets API is reached over the public internet, not through
+	// the tunnel that is about to be opened for the database.
+	dsn, err := resolveDSN(ctx, conn, fetcher)
+	if err != nil {
+		return "", noop, err
+	}
+
+	session, closeTunnel, err := openTunnel(ctx, conn, dsn)
 	if err != nil {
 		return "", closeTunnel, err
 	}
 
-	dsn, err := resolveDSN(ctx, conn, fetcher)
-	if err != nil {
-		closeTunnel()
-		return "", func() error { return nil }, err
-	}
-
-	// After resolving, not before: the DSN may come from a secret that carries
-	// the real host inside it, and only the finished string is sure to name
-	// where joka is about to connect.
+	// Redirect the finished string rather than the config: the DSN may come
+	// from a secret or a literal url: that carries the real host inside it, and
+	// only the finished string is sure to name where joka is about to connect.
 	dsn, err = redirectDSN(dsn, session)
 	if err != nil {
 		closeTunnel()
-		return "", func() error { return nil }, err
+		return "", noop, err
 	}
 
 	return dsn, closeTunnel, nil

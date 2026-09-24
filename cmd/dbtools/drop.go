@@ -29,9 +29,6 @@ func (r RunDropCommand) Execute(ctx context.Context) error {
 	if !r.SkipLock {
 		lockAdapter := lockinfra.NewPostgresLockAdapter(r.DB)
 		if err := lockAdapter.Acquire(ctx, "drop"); err != nil {
-			if jsonOut {
-				return shared.PrintErrorJSON(err)
-			}
 			return err
 		}
 		defer lockAdapter.Release(ctx) //nolint:errcheck
@@ -41,9 +38,6 @@ func (r RunDropCommand) Execute(ctx context.Context) error {
 
 	tables, err := dbAdapter.ListTables(ctx)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
 		return err
 	}
 
@@ -76,11 +70,7 @@ func (r RunDropCommand) Execute(ctx context.Context) error {
 
 	dropped, err := app.DropAllAction{DB: dbAdapter}.Execute(ctx)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Error dropping tables: %v", err)
-		return err
+		return fmt.Errorf("dropping tables: %w", err)
 	}
 
 	if jsonOut {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 
 	"github.com/apsdsm/joka/internal/domains/entity/app"
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
@@ -74,54 +73,6 @@ func reloadFiles(declared []*domain.EntityFile, rewritten []string) error {
 	}
 
 	return nil
-}
-
-// loadSet discovers, hashes and parses every entity file, then validates the
-// set as a whole.
-//
-// Every command that writes needs all of them, not just the one it was pointed
-// at: _id uniqueness is a property of the set, and an entity can be tracked
-// against a file other than the one now declaring it. reimport and update used
-// to read one file each, which is how they could write a set sync would refuse
-// — and, since the document keys on _id, quietly take over an _id tracked
-// somewhere else.
-func loadSet(entitiesDir string) ([]*domain.EntityFile, error) {
-	relPaths, err := infra.DiscoverEntityFiles(entitiesDir)
-	if err != nil {
-		return nil, err
-	}
-
-	files := make([]*domain.EntityFile, 0, len(relPaths))
-
-	for _, rel := range relPaths {
-		full := filepath.Join(entitiesDir, rel)
-
-		hash, err := app.HashFileContent(full)
-		if err != nil {
-			return nil, err
-		}
-
-		file, err := app.ParseEntityAction{Path: full}.Execute()
-		if err != nil {
-			return nil, err
-		}
-		file.Path = rel
-		file.ContentHash = hash
-
-		files = append(files, file)
-	}
-
-	// Overrides merge before validation, so what is validated is what the run
-	// will apply, and an override naming nothing is reported beside the other
-	// set problems rather than in a pass of its own.
-	problems := app.ApplyOverrides(files)
-	problems = append(problems, app.ValidateEntitySet(files)...)
-
-	if err := app.EntitySetError(problems); err != nil {
-		return nil, err
-	}
-
-	return files, nil
 }
 
 // declaredIn returns the file from a loaded set, or an error naming it.

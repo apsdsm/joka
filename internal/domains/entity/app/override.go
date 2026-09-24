@@ -15,11 +15,17 @@ import (
 // apply an override, which is how the content hash and the tracking tables
 // each drifted their own way before.
 //
+// The returned map is _id to the file that overrode it. An entity whose
+// override moved has changed as surely as one whose own declaration did, and
+// the only signal a non-deterministic column has is whether its file changed —
+// so without this, rotating an {{ argon2id|… }} in an override did nothing at
+// all, silently, which is the worst way for a secret rotation to fail.
+//
 // The merge is per column, not per entity: an override naming one column
 // leaves the rest of the declaration alone. Replacing the whole entity would
 // mean repeating every column in every environment, which is the duplication
 // this exists to remove.
-func ApplyOverrides(files []*domain.EntityFile) []EntitySetProblem {
+func ApplyOverrides(files []*domain.EntityFile) (map[string]string, []EntitySetProblem) {
 	declared := make(map[string]*domain.Entity)
 	for _, file := range files {
 		collectEntityPointers(file.Entities, declared)
@@ -27,6 +33,7 @@ func ApplyOverrides(files []*domain.EntityFile) []EntitySetProblem {
 
 	var problems []EntitySetProblem
 	claimed := make(map[string]string)
+	applied := make(map[string]string)
 
 	for _, file := range files {
 		for _, o := range file.Overrides {
@@ -62,12 +69,14 @@ func ApplyOverrides(files []*domain.EntityFile) []EntitySetProblem {
 			for column, value := range o.Columns {
 				target.Columns[column] = value
 			}
+
+			applied[o.RefID] = file.Path
 		}
 	}
 
 	sort.Slice(problems, func(i, j int) bool { return problems[i].RefID < problems[j].RefID })
 
-	return problems
+	return applied, problems
 }
 
 // collectEntityPointers indexes every entity in a tree by _id, as a pointer so

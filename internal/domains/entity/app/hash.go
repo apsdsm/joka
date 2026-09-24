@@ -28,6 +28,8 @@ func HashValue(v any) string {
 	s := normalizeValue(v)
 	if canonical, ok := canonicalJSON(s); ok {
 		s = canonical
+	} else if canonical, ok := canonicalTimestamp(s); ok {
+		s = canonical
 	}
 
 	sum := sha256.Sum256([]byte(s))

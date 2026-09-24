@@ -134,7 +134,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// Validate the whole set before anything is written: an _id claimed twice
 	// is only visible across files, and a set that cannot be identified is not
 	// one joka should start writing from.
-	problems := app.ApplyOverrides(all)
+	overriddenBy, problems := app.ApplyOverrides(all)
 	problems = append(problems, app.ValidateEntitySet(all)...)
 
 	if err := app.EntitySetError(problems); err != nil {
@@ -153,11 +153,12 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// still have something to say: deleting a file leaves every other file
 	// unchanged, and the entities it declared are now declared nowhere.
 	plan, err := app.PlanSyncAction{
-		DB:       dbAdapter,
-		State:    state,
-		Declared: all,
-		Dirty:    dirty,
-		Decayed:  r.Decayed,
+		DB:           dbAdapter,
+		State:        state,
+		Declared:     all,
+		Dirty:        dirty,
+		OverriddenBy: overriddenBy,
+		Decayed:      r.Decayed,
 	}.Execute(ctx)
 	if err != nil {
 		return err

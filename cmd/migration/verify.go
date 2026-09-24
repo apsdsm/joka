@@ -34,10 +34,6 @@ func (r RunVerifyCommand) Execute(ctx context.Context) error {
 
 	result, err := app.VerifySchemaAction{DB: adapter}.Execute(ctx)
 	if err != nil {
-		if jsonOut {
-			return shared.PrintErrorJSON(err)
-		}
-		color.Red("Error: %v", err)
 		return err
 	}
 

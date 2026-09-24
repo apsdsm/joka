@@ -91,8 +91,9 @@ a skill that documents a flag joka no longer has is worse than no skill.
 
 ## Versioning
 
-The version is defined as a `const` in `main.go`. When bumping the version:
-1. Update the `version` constant in `main.go`
+The version is defined as the `release` constant in `buildinfo.go`, and what joka reports is derived
+from it - see **Identifying the build**. When bumping the version:
+1. Update the `release` constant in `buildinfo.go`
 2. Create a git tag matching the version (e.g. `git tag v0.3.0`)
 3. Push the tag (e.g. `git push origin v0.3.0`)
 
@@ -525,8 +526,19 @@ script was the only reason most of them existed.
   carries the real host inside the URL, and a `url:` under `literal` does the same; rewriting the
   config would leave both connecting to a real database the tunnel is not forwarding to, which fails
   by succeeding.
-- **The database is named once.** `remote_host` and `remote_port` default to the connection's own.
-  Repeated, they get edited separately and eventually disagree.
+- **The database is named once.** `remote_host` and `remote_port` default to the connection's own,
+  and then to the host and port in the resolved DSN - which is the only copy there is under
+  `source: env`. The DSN is therefore resolved *before* the tunnel opens, which costs nothing: a
+  secrets API is reached over the public internet, not through the tunnel being opened for the
+  database.
+- **`params:` reaches the CLI.** `region` and `profile` travel in the provider-neutral `Params` map
+  and become `--region` and `--profile`. They parsed and went nowhere at first: a config naming a
+  profile was accepted in full and the session opened against the default one.
+- **A session that dies is reported at once, in its own words.** The readiness poll and the process
+  are waited on together, so a session that fails in the first second no longer takes the full
+  thirty to say so, and the CLI's stderr is captured and carried into the error - it says
+  "TargetNotConnected" or "not authorized", where joka can only say nothing came up. A session that
+  ends with status zero is still a failure, and says that too.
 - **The local port is chosen, not configured.** A fixed port collides with whatever else is running
   and nothing outside the process needs to predict it. There is a small race between releasing the
   probe port and the session claiming it, accepted against colliding every time.
@@ -866,6 +878,71 @@ shared declaration lives in one of them and each environment carries only what i
   applying them in load order would make the result depend on a filename.
 - **They merge at load, before validation**, so the planner, the applier, the diff and the write-back
   all read one merged declaration and there is no second place that has to remember.
+- **An override's file counts as a change to the entity it overrides.** A non-deterministic column
+  has no signal but whether its file changed, and the override lives in a different file from the
+  declaration - so rotating an `{{ argon2id|… }}` in an override did nothing at all, silently, which
+  is the worst way for a secret rotation to fail. `ApplyOverrides` returns _id to the file that
+  overrode it and `PlanSyncAction.changed` reads both.
+
+## Values that round-trip
+
+A baseline is the hash of what joka *sent*; the comparison is against what the driver *reads back*.
+Two column kinds came back spelled differently from what went in, so live-against-baseline said the
+database had moved on a row nobody had touched — every run, for ever.
+
+| | Went in | Came back | |
+|---|---|---|---|
+| any timestamp | `2026-09-24 05:49:13` | `time.Time`, which `%v` renders `2026-09-24 05:49:13 +0000 UTC` | `canonicalTimestamp` |
+| `char(n)` | `country` | `country   `, padded by the column | `GetRow` trims it |
+
+- **Timestamps are canonicalised on both sides**, to RFC3339 in UTC, in `normalizeValue` (the driver
+  value) and `HashValue` (the declared string), so the hash and the diff cannot disagree. It hit
+  literal timestamps as readily as `{{ now }}`, and the only way round it was to mark every timestamp
+  column `_once` — which gives up drift detection on it.
+- **Two spellings of one instant now compare equal**: `2026-01-01` and `2026-01-01 00:00:00` become
+  the same string. That is the intended reading of a column holding an instant, and the cost of
+  having no column type to consult in `normalizeValue`.
+- **`alignForDisplay` canonicalises timestamps too**, the way it already did JSON, so a reader
+  compares two timestamps rather than one against a differently-spelled one.
+- **The `char(n)` padding is dropped where it arrives.** `GetRow` uses `QueryContext` rather than
+  `QueryRowContext` for one reason — `ColumnTypes()` — and trims a `BPCHAR` value's trailing spaces.
+  SQL says trailing spaces are insignificant in a `char` comparison, so nothing above that line has
+  to know. Fixing it in `normalizeValue` instead would have meant trimming every string, which would
+  hide a real trailing-space change in a `text` column.
+
+## One error, printed once
+
+A command returns its error and `main` renders it. A command that also prints it says everything
+twice.
+
+Every command did. `entity sync` had a `fail` closure that called `PrintErrorJSON` and returned the
+error; the others wrote `color.Red("Error: %v", err)` and returned it; `main` then printed the same
+error again, and under `--output json` printed a second error object after the first. `migrate
+verify` on a database with no snapshot is where it was noticed.
+
+- **Nothing in `cmd/` calls `shared.PrintErrorJSON` any more.** `main` chooses the rendering, which
+  is also what lets `AlreadyReported` suppress it for a declined step or a reported plan.
+- **A friendly line becomes the error, not a print beside it.** `migrate status` on a database with
+  no table returns `migrations table does not exist: run 'joka init' first`, where it used to print
+  that and then let `main` print the bare sentinel underneath.
+- **A warning is not an error.** `migrate consolidate` could not always list the directory afterwards
+  and printed a warning — but returned the error under `--output json`, failing a run that had
+  already committed and succeeded. It warns in both modes now and returns nil.
+
+## Identifying the build
+
+`joka version` and the `joka_version` stamped into `joka_meta` are `release` for a build made from a
+tagged version, and `release+dev.<commit>[.dirty]` for anything else.
+
+A dev binary and the release it was branched from both reported `0.14.0`, so `joka_meta` could not
+say which had last written a database, and neither could anyone comparing two environments.
+
+- **From `debug.BuildInfo`, not `-ldflags`.** `go install module@version` — how consuming projects'
+  images get joka — accepts no linker flags, and this is exactly the build whose identity matters.
+- **Only a clean `vX.Y.Z` tag counts as a release.** `go build` in a tagged repo synthesises a
+  pseudo-version (`v0.14.1-0.20260924055729-20c4d2cb850e+dirty`) that names a release which does not
+  exist and reads like one that does.
+- `release` in `buildinfo.go` is what the versioning procedure bumps.
 
 ## Requests from consuming projects
 
@@ -882,7 +959,20 @@ Raised from jjc2 on 2026-09-24, agreed in this order. The order is by damage pre
 | References resolve across the whole set | 2 | **Done** — see **References resolve across the set** |
 | `entities:` accepts a list | 1 | **Done** — see **Several entity roots** |
 | Per-environment value overlays | 7 | **Done** — see **`overrides:`** |
-| SSM tunnel as a connection source | 5 | **Done** — see **The SSM tunnel**; the live AWS path is unverified |
+| SSM tunnel as a connection source | 5 | **Done** — see **The SSM tunnel**. Three defects from the jjc2 trial are fixed; the live AWS path is still unverified |
+
+**The trial.** jjc2 ran `joka-dev` (20c4d2c) against its real seeds on a throwaway database on
+2026-09-24. Eight items worked as built; three had defects, all now fixed:
+
+| | |
+|---|---|
+| 5 | `params:` never reached the CLI; a dying session took 30s and lost the CLI's message; `source: env` had to repeat the host |
+| 7 | a rotated `argon2id` in an override did nothing |
+| 11 | `migrate verify` printed its error twice — which turned out to be every command |
+
+It also confirmed what the rows are meant to be: ONC 160/160 and JinjiCrew 9/9, identical to their
+assembled pass, so their assembly script and its check can go. And it found the cause of the
+timestamp bug, which is now fixed — see **Values that round-trip**.
 
 **Deletion is loud** reverses a rule this file currently states on purpose — that `--auto` and
 `--output json` skip the confirmation, so a CI run deletes without being asked. jjc2's CI deleted 16
