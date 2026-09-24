@@ -187,7 +187,7 @@ func TestEntitySync(t *testing.T) {
 	}
 
 	t.Run("it seeds the declared rows", func(t *testing.T) {
-		if err := joka.EntitySync(ctx, db, entities); err != nil {
+		if err := joka.EntitySync(ctx, db, []string{entities}); err != nil {
 			t.Fatalf("EntitySync: %v", err)
 		}
 
@@ -203,7 +203,7 @@ func TestEntitySync(t *testing.T) {
 	t.Run("a second run changes nothing", func(t *testing.T) {
 		// The property a test helper depends on: calling it twice in one suite
 		// must not insert a second copy of every row.
-		if err := joka.EntitySync(ctx, db, entities); err != nil {
+		if err := joka.EntitySync(ctx, db, []string{entities}); err != nil {
 			t.Fatalf("EntitySync: %v", err)
 		}
 

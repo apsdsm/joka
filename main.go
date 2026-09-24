@@ -2,10 +2,10 @@ package main
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/apsdsm/joka/cmd/dbtools"
 	"github.com/apsdsm/joka/cmd/entity"
@@ -20,6 +20,9 @@ import (
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 	"github.com/apsdsm/joka/internal/meta"
+	// Registers the AWS secrets and tunnel providers. joka names a vendor in
+	// exactly one place, and this is it.
+	_ "github.com/apsdsm/joka/internal/providers/aws"
 	"github.com/apsdsm/joka/internal/secrets"
 	"github.com/apsdsm/joka/internal/upgrade"
 	"github.com/fatih/color"
@@ -67,13 +70,15 @@ func main() {
 		envFile       string
 		profile       string
 		migrationsDir string
-		entitiesDir   string
+		entitiesDirs  []string
 		stateFile     string
 		rootName      string
 		adoptRoot     bool
 		autoConfirm   bool
+		waitFor       time.Duration
 		outputFormat  string
 		dbConn        *sql.DB
+		closeTunnel   = func() error { return nil }
 		dbDSN         string
 		cfg           *config.Config
 	)
@@ -101,8 +106,8 @@ func main() {
 			if !c.Flags().Changed("migrations") && cfg.Migrations != "" {
 				migrationsDir = cfg.Migrations
 			}
-			if !c.Flags().Changed("entities") && cfg.Entities != "" {
-				entitiesDir = cfg.Entities
+			if !c.Flags().Changed("entities") && len(cfg.Entities) > 0 {
+				entitiesDirs = cfg.Entities
 			}
 			if !c.Flags().Changed("statefile") && cfg.StateFile != "" {
 				stateFile = cfg.StateFile
@@ -120,7 +125,7 @@ func main() {
 			// the wrong directory upgraded the tracking and created joka_meta,
 			// joka_state and joka_lock in a database it was never meant to
 			// reach, and only then noticed it had nothing to read.
-			if err := requireDirs(c, migrationsDir, entitiesDir, cfg); err != nil {
+			if err := requireDirs(c, migrationsDir, entitiesDirs, cfg); err != nil {
 				return err
 			}
 
@@ -138,14 +143,17 @@ func main() {
 
 			// Resolve the DSN from the connection config (env by default, or a
 			// secret source declared in .jokarc.yaml / the selected profile).
-			dsn, err := connection.Resolve(c.Context(), cfg.Connection, nil)
+			// The tunnel, if one is declared, outlives this function and is
+			// closed in PersistentPostRunE beside the connection it carries.
+			dsn, closer, err := connection.ResolveWithTunnel(c.Context(), cfg.Connection, nil)
 			if err != nil {
 				return err
 			}
+			closeTunnel = closer
 			// Kept for `migrate consolidate`, which hands it to pg_dump.
 			dbDSN = dsn
 
-			dbConn, err = jokadb.Open(dsn)
+			dbConn, err = jokadb.OpenWait(c.Context(), dsn, waitFor)
 			if err != nil {
 				return fmt.Errorf("error connecting to database: %w", err)
 			}
@@ -248,11 +256,14 @@ func main() {
 	root.PersistentFlags().StringVarP(&envFile, "env", "e", ".env", "Path to the environment file")
 	root.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Config profile to use (from .jokarc.yaml profiles)")
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
-	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")
+	root.PersistentFlags().StringArrayVar(&entitiesDirs, "entities", []string{"devops/entities"},
+		"Path to an entities directory; repeat the flag for several, synced as one desired state")
 	root.PersistentFlags().StringVar(&stateFile, "statefile", "", "Path to the state file (default: joka[.<profile>].state.json beside the working directory)")
 	root.PersistentFlags().StringVar(&rootName, "root", "", "Name of this joka root (default: the 'root:' key in .jokarc.yaml)")
 	root.PersistentFlags().BoolVar(&adoptRoot, "adopt-root", false, "Move this database's root claim to this root")
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
+	root.PersistentFlags().DurationVar(&waitFor, "wait", 0,
+		"Retry the connection for this long before giving up (e.g. 30s); 0 tries once")
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 
 	// No annotation. Status is read-only, so it stays out of the upgrade gate,
@@ -273,7 +284,7 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 				DB:            dbConn,
 				Profile:       profile,
 				MigrationsDir: migrationsDir,
-				EntitiesDir:   entitiesDir,
+				EntitiesDirs:  entitiesDirs,
 				StateFile:     stateFile,
 				OutputFormat:  outputFormat,
 			}.Execute(c.Context())
@@ -430,7 +441,7 @@ Use --dry-run to print the plan without applying anything.`,
 			return entity.RunEntitySyncCommand{
 				DB:           dbConn,
 				Secrets:      secrets.New(cfg.Secrets),
-				EntitiesDir:  entitiesDir,
+				EntitiesDirs: entitiesDirs,
 				AutoConfirm:  autoConfirm,
 				OutputFormat: outputFormat,
 				DryRun:       dryRun,
@@ -461,7 +472,7 @@ Use --dry-run to print the plan without applying anything.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			return entity.RunEntityDiffCommand{
 				DB:           dbConn,
-				EntitiesDir:  entitiesDir,
+				EntitiesDirs: entitiesDirs,
 				FilePath:     args[0],
 				SkipValues:   diffNoValues,
 				OutputFormat: outputFormat,
@@ -493,7 +504,7 @@ Use --dry-run to print the plan without applying anything.`,
 				DB:            dbConn,
 				Secrets:       secrets.New(cfg.Secrets),
 				MigrationsDir: migrationsDir,
-				EntitiesDir:   entitiesDir,
+				EntitiesDirs:  entitiesDirs,
 				AutoConfirm:   autoConfirm,
 				OutputFormat:  outputFormat,
 				Profile:       profile,
@@ -519,18 +530,29 @@ Use --dry-run to print the plan without applying anything.`,
 
 	root.AddCommand(initCmd, statusCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
-	if err := root.Execute(); err != nil {
+	err := root.Execute()
+
+	// Closed here rather than in PersistentPostRunE, which cobra runs only on
+	// success — a failing command would have left the forward and its child
+	// process behind. It goes after Execute because the connection runs through
+	// it, and it is safe to call whether or not one was ever opened.
+	closeTunnel()
+
+	if err != nil {
+		// Ordered so that "the command already said it" beats the output
+		// format. A dry run under --output json has printed its plan; adding an
+		// error object after it would say the run failed when it did not.
 		switch {
+		case shared.AlreadyReported(err):
+			// Nothing to add. What is still owed is the exit status: a declined
+			// step must stop a `&&` chain, and pending work must be
+			// distinguishable from a joka that could not tell.
 		case outputFormat == shared.OutputJSON:
 			shared.PrintErrorJSON(err)
-		case errors.Is(err, shared.ErrCancelled):
-			// The command already said it stopped, in its own words. What it
-			// still owes the shell is a non-zero exit, so a `&&` chain does not
-			// carry on past a step the operator declined.
 		default:
 			color.Red("%v", err)
 		}
-		os.Exit(1)
+		os.Exit(shared.ExitCodeFor(err))
 	}
 }
 
@@ -595,7 +617,12 @@ func identityOrNone(identity string) string {
 
 // requireDirs checks the directories a command declared it reads, in the order
 // a command that reads both would reach them.
-func requireDirs(c *cobra.Command, migrationsDir, entitiesDir string, cfg *config.Config) error {
+func requireDirs(c *cobra.Command, migrationsDir string, entitiesDirs []string, cfg *config.Config) error {
+	configured := ""
+	if len(cfg.Entities) > 0 {
+		configured = cfg.Entities[0]
+	}
+
 	for _, kind := range strings.Split(c.Annotations[annotationNeeds], ",") {
 		switch kind {
 		case "migrations":
@@ -603,8 +630,13 @@ func requireDirs(c *cobra.Command, migrationsDir, entitiesDir string, cfg *confi
 				return err
 			}
 		case "entities":
-			if err := shared.RequireDir(kind, entitiesDir, dirSource(c, kind, cfg.Entities)); err != nil {
-				return err
+			// Every root, not just the first. A list whose second entry is a
+			// typo would otherwise load the first, find every entity in the
+			// second declared nowhere, and plan to delete them.
+			for _, dir := range entitiesDirs {
+				if err := shared.RequireDir(kind, dir, dirSource(c, kind, configured)); err != nil {
+					return err
+				}
 			}
 		}
 	}

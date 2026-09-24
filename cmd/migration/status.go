@@ -53,7 +53,7 @@ func (r RunMigrateStatusCommand) Execute(ctx context.Context) error {
 			entries[i] = migrationEntry{Index: m.MigrationIndex, Status: string(m.Status)}
 		}
 		shared.PrintJSON(map[string]any{"status": "ok", "migrations": entries})
-		return nil
+		return pendingIn(chain)
 	}
 
 	if len(chain) == 0 {
@@ -63,6 +63,20 @@ func (r RunMigrateStatusCommand) Execute(ctx context.Context) error {
 
 	for _, m := range chain {
 		fmt.Printf("Migration %s - Status: %s\n", m.MigrationIndex, m.Status)
+	}
+
+	return pendingIn(chain)
+}
+
+// pendingIn reports unapplied migrations as ExitPending. The status has just
+// been printed line by line, so there is nothing to add — only the exit code,
+// which is what lets a pipeline branch on "this database needs migrating"
+// without parsing the output.
+func pendingIn(chain []domain.Migration) error {
+	for _, m := range chain {
+		if m.Status == domain.StatusPending {
+			return shared.ErrPendingReported
+		}
 	}
 
 	return nil

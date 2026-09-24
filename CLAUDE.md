@@ -468,26 +468,83 @@ same refusal. One marker rather than two that could disagree.
 
 ## Provider adapters
 
-joka talks to one external provider today — AWS Secrets Manager — and will talk to more. Anything
-added must be a provider *behind an interface*, never a second special case beside the first.
+`internal/providers` is joka's boundary against the outside world: the vendor services it fetches a
+secret from and tunnels a connection through. Every provider implements the same two interfaces and
+registers itself under a name, so adding one is adding a directory rather than editing a switch.
 
-Where it already is: `connection.SecretFetcher` is an interface and `connection/aws.go` is its only
-implementation, in a file of its own.
+```go
+type Secrets interface {
+    Fetch(ctx context.Context, ref SecretRef) (map[string]string, error)
+}
 
-Where it is not, and what has to move before a second provider lands:
+type Tunnel interface {
+    Open(ctx context.Context, spec TunnelSpec) (*Session, error)
+}
+```
 
-- **`Fetch(ctx, secretID, region)` is AWS-shaped.** `region` means nothing to a provider that does
-  not have regions. The parameters want to be a per-provider config struct, not a widening list.
-- **The provider is baked into the source name.** `source: aws_secrets_manager` names the vendor
-  where it should name the kind, with the vendor beside it — `source: secret` plus `provider: aws`.
-- **`{{ asm.<source>.<key> }}` is the real blocker, because it is in user files.** `asm` is AWS
-  Secrets Manager. A neutral prefix is needed with `asm.` kept as an alias for ever, since jjc2's
-  seed files already use it and a template prefix is not something a database migration can rewrite.
+joka ships `internal/providers/aws`, which registers both from its `init`. `main.go` imports it for
+the side effect, and that import is the only place in joka that names a vendor.
 
-The tunnel work (see the SSM item under **Requests from consuming projects**) introduces a second
-interface of the same shape — one `Tunnel`, with `ssm` as the first implementation — and must not be
-written as a direct `aws ssm` call in the connection path. It also crosses a line this file records
-elsewhere: `pg_dump` is currently the only binary joka shells out to.
+- **The interfaces are vendor-neutral, which they were not.** `Fetch(ctx, secretID, region)` only
+  means anything to AWS, and a second provider would have had to widen it or ignore half of it.
+  Anything one vendor needs travels in `Params` — a region for AWS, a project for GCP, a vault for
+  Azure — which it reads and nothing else has to know about.
+- **The JSON-object-or-plain-string convention is joka's, not a vendor's.** A secret holding an
+  object yields its fields; one holding a string yields a single entry under `""`, which is what
+  whole-URL mode reads. Every provider owes the same shape.
+- **`source: aws_secrets_manager` still works.** It is now an alias for `source: secret` with
+  `provider: aws`. Configs carrying it outnumber the ones that will ever be rewritten.
+- **`{{ secret.<source>.<key> }}` is the name to use; `{{ asm.… }}` is kept for ever.** That prefix
+  is written into seed files, and a template prefix is not something a database migration can
+  rewrite. Both resolve identically: the provider is a property of the source in `.jokarc.yaml`, not
+  of the reference.
+
+### The SSM tunnel
+
+```yaml
+connection:
+  source: secret
+  host: db.private.example.com
+  port: 5432
+  secret: { secret_id: prod/db, region: ap-northeast-1 }
+  tunnel:
+    target: i-0123456789abcdef0
+```
+
+`cd devops/joka/prod && joka migrate up` then works against a database in a private subnet with no
+wrapper script. Every project that needed one had written the same port-forward script, and the
+script was the only reason most of them existed.
+
+- **It shells out to `aws`, which crosses a line joka otherwise holds** — `pg_dump` is the only other
+  binary it runs. The alternative is reimplementing the Session Manager websocket protocol, which is
+  what `session-manager-plugin` exists to do and is not something a migration tool should carry. The
+  cost is named rather than hidden: both binaries are checked up front and the missing one is named,
+  because "aws: command not found" sends people to the wrong place when it is the plugin that is
+  missing.
+- **The redirect is applied to the finished DSN**, not to the config. A secret in whole-URL mode
+  carries the real host inside the URL, and a `url:` under `literal` does the same; rewriting the
+  config would leave both connecting to a real database the tunnel is not forwarding to, which fails
+  by succeeding.
+- **The database is named once.** `remote_host` and `remote_port` default to the connection's own.
+  Repeated, they get edited separately and eventually disagree.
+- **The local port is chosen, not configured.** A fixed port collides with whatever else is running
+  and nothing outside the process needs to predict it. There is a small race between releasing the
+  probe port and the session claiming it, accepted against colliding every time.
+- **`Open` returns only once something is listening**, because the caller's next act is to connect.
+  Same reason `db.OpenWait` exists.
+- **The session is closed after `root.Execute`, not in `PersistentPostRunE`**, which cobra runs only
+  on success — a failing command would have left the forward and its child process behind.
+- **A session that dies early reports its own failure.** The CLI prints why ("instance not found",
+  "not authorized") and that is the useful part; the check runs before the cancel, or every failure
+  reads as `signal: killed`, and before the closer, which waits on the same channel.
+- **Everything except the AWS call itself is tested.** `SessionManager` takes its command builder,
+  its `LookPath` and its readiness wait as fields, so the lifecycle — a missing binary, an
+  incomplete spec, the document parameters, a session that never opens, one that dies early, a
+  double close — is exercised against a real local listener and a fake process.
+
+**The live path against AWS is unverified.** There is no AWS account or Session Manager plugin on
+this machine, so what has been proved is the lifecycle and the wiring, not that the CLI invocation
+is accepted. The first real run should be a `joka migrate status` against a test environment.
 
 ## Commands the convergence work removed
 
@@ -688,6 +745,128 @@ so `db.SplitSQLStatements`, `db.Open` and the config schema are importable today
 `cmd/*` command structs, which is what this package calls — it exists to fix their defaults, not to
 reach anything that was locked away.
 
+## Exit codes
+
+| | |
+|---|---|
+| 0 | nothing to do |
+| 1 | joka could not do it, or refused to |
+| 2 | there is work: migrations to apply, seeds to change, schema that has drifted |
+
+joka had two, so a pipeline could not tell a database that needs migrating from a joka that could
+not reach it — and the only signal for "there are changes" was whichever command happened to refuse,
+which is how `entity sync --on-conflict=fail` came to be read as a drift gate rather than as the
+refusal it is.
+
+Which commands can return 2: `migrate status` (unapplied migrations), `migrate verify` (drift),
+`entity sync --dry-run` (a plan with changes), `entity diff` (a file that disagrees with the
+database). `joka status` never does — it is an inventory, not a gate.
+
+- **Both 1 and 2 are non-zero**, so a pipeline testing for failure is unaffected by the split. One
+  that wants to tell "the schema moved" from "verify could not tell me" now can.
+- **`shared.ErrChangesPending` is what marks the status.** Wrap it when the message is worth
+  printing, as `migration.ErrSchemaDrift` does. Return `shared.ErrPendingReported` when the command
+  has already printed the plan, the status or the diff — repeating it under `Error:` says it twice,
+  and under `--output json` would print an error object after a document that was not an error.
+- **`shared.AlreadyReported` is checked before the output format** in `main`, which is what keeps
+  that JSON document clean. A dry run with changes prints one plan and exits 2.
+- **A declined confirmation is 1, not 2.** Nothing is pending — somebody was asked and said no.
+- **`entity diff` does not count moves.** A row that shifted position because something was inserted
+  above it is re-recorded without being written to, so counting it would report work pending for a
+  file that needs none.
+
+## `--wait`
+
+`--wait 30s` retries the connection until the deadline instead of failing on the first ping.
+
+Every consuming project's container entrypoint had grown its own readiness loop, each against a
+different tool — `pg_isready`, `nc`, a `psql` call — with its own idea of how long to allow.
+`db.OpenWait` is one of them, in the tool that needs the database.
+
+- **A DSN joka cannot use is refused immediately**, not waited out. Sitting through thirty seconds
+  for a URL that can never work is the opposite of helpful.
+- **The retry is on the ping**, because `sql.Open` does not connect.
+- **A cancelled context stops the wait.** The caller giving up is not the same as the database being
+  slow.
+- Zero — the default — is one attempt, so nothing changes for anyone not asking for it.
+
+## Several entity roots
+
+`entities:` takes one path or a list, and the list is synced as one desired state.
+
+```yaml
+entities:
+  - ../shared/entities
+  - ./entities
+```
+
+`--entities` repeats for the same effect. One entity that differed in two fields per environment was
+duplicated whole before this, and every later edit had to be made in each copy or was forgotten in
+one.
+
+- **One root keys files exactly as it always did** — relative to the root. Changing that would make
+  every file in every existing project read as modified on the next sync, and regenerate every
+  `{{ now }}` in them, for nothing. Several roots prefix the key with the root, because two roots may
+  each hold an `admin.yaml` and one key cannot mean both. Moving from one root to a list therefore
+  re-keys the files once, which costs one hash rewrite and one regeneration.
+- **`EntityFile.FullPath` carries where the file actually is.** It is not part of the state. Rebuilt
+  by joining a root onto the key, it stops working the moment the key carries a root of its own —
+  and the two places that need it, re-reading a file and writing one back under
+  `--on-conflict=ask`, are exactly where getting it wrong is silent.
+- **The same root twice is refused**, and so is one root inside another: every file in the inner one
+  would be found by both walks, so every `_id` in it is declared twice. The nesting check compares
+  absolute paths, because `.` and `./entities` clean to `.` and `entities` and share no prefix.
+- **A dotfile is not a seed.** `.jokarc.yaml` matches `*.yaml` as readily as anything else and was
+  parsed as an entity file. It only needed a root beside a config, or containing one, and listing
+  several roots makes that ordinary.
+- `joka entity diff <file>` resolves its argument against each root in declared order.
+
+## References resolve across the set
+
+A file declaring an `_id` is ordered before any file referencing it (`app.OrderFilesByReference`).
+
+A `{{ ref.id }}` resolves against a map holding every tracked row plus whatever this run has
+inserted, so on a database that already has the target the order never mattered. On a fresh one it
+decided everything, and the order was the filename — a seed referencing an entity declared in a file
+sorting later died with `not found in reference map`, and the workaround was to rewrite it as a
+`{{ lookup| }}`, giving up the identity joka is built on to work around an alphabetical accident.
+
+- **Ordering is stable.** Anything the references do not constrain keeps its original position, so a
+  set with no cross-file references is untouched.
+- **The planner and the applier order through the same function**, or the plan would describe
+  inserts in an order the apply does not use.
+- **Files that reference each other are refused, and named.** Two entities each needing the other's
+  primary key cannot both be inserted first; that is unsatisfiable rather than merely unordered.
+- **Order within a file is left alone.** Depth-first declaration order is what a reader sees and what
+  `_has` means, and the recorded position is the insertion position deletes are sequenced by. An
+  entity referencing a later one in the same file is still an error — and the fix is visible in the
+  file, where a cross-file ordering problem was not.
+
+## `overrides:` — one entity, values per environment
+
+```yaml
+overrides:
+  - _id: lgc_client
+    redirect_uri: https://test.example.com/callback
+```
+
+An override sets column values on an entity declared elsewhere in the set. With several roots the
+shared declaration lives in one of them and each environment carries only what it changes.
+
+- **The merge is per column.** Replacing the whole entity would mean repeating every column in every
+  environment, which is the duplication this removes.
+- **It sets column values and nothing else.** `_is`, `_has`, `_pk` and `_once` say what an entity
+  *is*, and an entity that is a different thing per environment is two entities. Naming one of them
+  is refused rather than half-honoured.
+- **It may add a column the entity does not declare**, because "a field only this environment needs"
+  is the same request as "a field that differs". A mistyped name fails at the insert, naming it.
+- **An override naming nothing is a problem**, the same rule `moved:` has for `to:`. Doing nothing
+  quietly would leave the author believing an environment was configured.
+- **Two overrides for one `_id` are refused.** They cannot both be the environment's answer, and
+  applying them in load order would make the result depend on a filename.
+- **They merge at load, before validation**, so the planner, the applier, the diff and the write-back
+  all read one merged declaration and there is no second place that has to remember.
+
 ## Requests from consuming projects
 
 Raised from jjc2 on 2026-09-24, agreed in this order. The order is by damage prevented, not by size.
@@ -696,14 +875,14 @@ Raised from jjc2 on 2026-09-24, agreed in this order. The order is by damage pre
 |---|---|---|
 | Declined step exits non-zero; a fresh database is quiet | | **Done** |
 | A database remembers which root owns it, and the root is the environment label | 3, 6 | **Done** — see **Root ownership** |
-| Deletion is loud under `--auto` | 4 | Agreed, not built |
+| Deletion is loud under `--auto` | 4 | **Done** — see **`--allow-delete`** |
 | A Go library entry point | 8 | **Done** — see **The Go library** |
-| `--wait` for containers | 9 | Agreed, not built |
-| Detailed exit codes | 11 | Agreed, not built |
-| References resolve across the whole set | 2 | Agreed, not built |
-| `entities:` accepts a list | 1 | Agreed, not built |
-| Per-environment value overlays | 7 | Needs the list first |
-| SSM tunnel as a connection source | 5 | Last; see **Provider adapters** |
+| `--wait` for containers | 9 | **Done** — see **`--wait`** |
+| Detailed exit codes | 11 | **Done** — see **Exit codes** |
+| References resolve across the whole set | 2 | **Done** — see **References resolve across the set** |
+| `entities:` accepts a list | 1 | **Done** — see **Several entity roots** |
+| Per-environment value overlays | 7 | **Done** — see **`overrides:`** |
+| SSM tunnel as a connection source | 5 | **Done** — see **The SSM tunnel**; the live AWS path is unverified |
 
 **Deletion is loud** reverses a rule this file currently states on purpose — that `--auto` and
 `--output json` skip the confirmation, so a CI run deletes without being asked. jjc2's CI deleted 16
@@ -716,15 +895,12 @@ note it was written from: the logic was never locked away. `db`, `config` and `c
 outside `internal/`, so jjc2 could have called `db.SplitSQLStatements` all along. What the package
 adds is defaults a program wants rather than access it lacked.
 
-**`entities:` accepts a list** has one real problem and it is not the parsing. `State.Files` is keyed
-on path, and two roots can both hold `admin.yaml`. Whether that already works depends on whether the
-stored path is the joined one or the basename — confirm before scoping, because a root-relative key
-means a tracking version bump.
+**`entities:` accepts a list** was scoped from a worry about `State.Files` being keyed on path. The
+answer turned out to be that `DiscoverEntityFiles` returns paths relative to the root, so two roots
+would both have produced `admin.yaml`. No tracking version bump was needed in the end: one root keys
+files exactly as before, and only a list prefixes them. See **Several entity roots**.
 
-**References resolve across the whole set** is worth doing whether or not the list lands. `refMap` is
-pre-populated from tracked rows and files are processed in load order, so a cross-file reference
-resolves only when its target sorts earlier or was already tracked. Ordering the set by reference
-dependency rather than by filename is the fix.
+**References resolve across the set** was worth doing whether or not the list landed, and is done.
 
 ## Upgrading a database from 0.13
 

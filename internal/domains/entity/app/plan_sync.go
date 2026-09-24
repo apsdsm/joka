@@ -280,6 +280,15 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 	// so the rest of the plan has to see the post-move world.
 	plan.Moves = applyMoves(a.State, a.Declared)
 
+	// A file declaring an _id goes before any file referencing it, so a
+	// {{ ref.id }} resolves wherever in the set its target is declared. The
+	// applier orders through the same function, or the plan would describe
+	// inserts in an order the apply does not use.
+	ordered, err := OrderFilesByReference(a.Declared)
+	if err != nil {
+		return nil, err
+	}
+
 	refMap := make(map[string]int64, len(a.State.Entities))
 	for refID, tracked := range a.State.Entities {
 		refMap[refID] = tracked.PKValue
@@ -287,7 +296,7 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 
 	declared := make(map[string]bool)
 
-	for _, file := range a.Declared {
+	for _, file := range ordered {
 		entities := flattenEntities(file.Entities, nil)
 		for _, e := range entities {
 			declared[e.RefID] = true

@@ -40,6 +40,15 @@ const (
 	// declares. The file says both "this entity exists" and "its record belongs
 	// to another name", which cannot both be true.
 	ProblemMoveSourceDeclared = "move_source_declared"
+	// ProblemOverrideUndeclared is an `overrides:` entry whose _id nothing in
+	// the set declares. There is nothing to override, so it is a typo — and
+	// doing nothing quietly would leave the author believing an environment was
+	// configured when it was not.
+	ProblemOverrideUndeclared = "override_undeclared"
+	// ProblemOverrideDuplicated is an _id overridden by more than one entry.
+	// They cannot both be the environment's answer, and applying them in load
+	// order would make the result depend on a filename.
+	ProblemOverrideDuplicated = "override_duplicated"
 )
 
 // EntityLocation points at one entity in the set.
@@ -185,7 +194,8 @@ func EntitySetError(problems []EntitySetProblem) error {
 		switch p.Kind {
 		case ProblemMissingID:
 			missing++
-		case ProblemRemovedAndDeclared, ProblemMoveTargetUndeclared, ProblemMoveSourceDeclared:
+		case ProblemRemovedAndDeclared, ProblemMoveTargetUndeclared, ProblemMoveSourceDeclared,
+			ProblemOverrideUndeclared, ProblemOverrideDuplicated:
 			conflicting++
 		default:
 			duplicate++
@@ -230,6 +240,14 @@ func EntitySetError(problems []EntitySetProblem) error {
 			fmt.Fprintf(&b, "\n  moved: from %q, which is still declared at:", p.RefID)
 			for _, loc := range p.Where {
 				fmt.Fprintf(&b, "\n    %s", loc)
+			}
+		case ProblemOverrideUndeclared:
+			fmt.Fprintf(&b, "\n  overrides: %q in %s, which no entity declares \u2014 there is nothing to override",
+				p.RefID, p.Where[0].File)
+		case ProblemOverrideDuplicated:
+			fmt.Fprintf(&b, "\n  _id %q is overridden more than once:", p.RefID)
+			for _, loc := range p.Where {
+				fmt.Fprintf(&b, "\n    %s", loc.File)
 			}
 		}
 	}

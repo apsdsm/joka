@@ -46,7 +46,7 @@ func inputs(t *testing.T, db *sql.DB) status.Inputs {
 	return status.Inputs{
 		DB:            db,
 		MigrationsDir: filepath.Join(dir, "migrations"),
-		EntitiesDir:   filepath.Join(dir, "entities"),
+		EntitiesDirs:  []string{filepath.Join(dir, "entities")},
 		StateFile:     filepath.Join(dir, "joka.state.json"),
 	}
 }
@@ -163,7 +163,7 @@ func TestStatusSurvivesAnUnreadableHalf(t *testing.T) {
 	db := bareDB(t)
 
 	in := inputs(t, db)
-	in.EntitiesDir = filepath.Join(t.TempDir(), "does-not-exist")
+	in.EntitiesDirs = []string{filepath.Join(t.TempDir(), "does-not-exist")}
 
 	report, err := status.Build(context.Background(), in)
 	if err != nil {

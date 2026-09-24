@@ -168,10 +168,17 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 		refMap[refID] = tracked.PKValue
 	}
 
+	// The same ordering the plan used, through the same function: a file
+	// declaring an _id goes before any file referencing it.
+	ordered, err := OrderFilesByReference(a.Declared)
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	declared := make(map[string]bool)
 
-	for _, file := range a.Declared {
+	for _, file := range ordered {
 		entities := flattenEntities(file.Entities, nil)
 
 		for _, e := range entities {

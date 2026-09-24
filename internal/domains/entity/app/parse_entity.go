@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/apsdsm/joka/internal/domains/entity/domain"
 	"gopkg.in/yaml.v3"
@@ -18,9 +19,10 @@ type ParseEntityAction struct {
 
 // yamlFile is the top-level YAML structure for an entity file.
 type yamlFile struct {
-	Entities []map[string]any `yaml:"entities"`
-	Removed  []yamlRemoval    `yaml:"removed"`
-	Moved    []yamlMove       `yaml:"moved"`
+	Entities  []map[string]any `yaml:"entities"`
+	Removed   []yamlRemoval    `yaml:"removed"`
+	Moved     []yamlMove       `yaml:"moved"`
+	Overrides []map[string]any `yaml:"overrides"`
 }
 
 // yamlMove is one entry of a file's `moved:` list.
@@ -72,12 +74,58 @@ func (a ParseEntityAction) Execute() (*domain.EntityFile, error) {
 		moved = append(moved, domain.Move{From: m.From, To: m.To})
 	}
 
+	overrides, err := parseOverrides(file.Overrides, a.Path)
+	if err != nil {
+		return nil, err
+	}
+
 	return &domain.EntityFile{
-		Path:     a.Path,
-		Entities: entities,
-		Removed:  removed,
-		Moved:    moved,
+		Path:      a.Path,
+		Entities:  entities,
+		Removed:   removed,
+		Moved:     moved,
+		Overrides: overrides,
 	}, nil
+}
+
+// parseOverrides reads a file's `overrides:` list.
+//
+// An override carries an _id and column values, and nothing else. The other
+// reserved keys say what an entity *is* — its table, its children, which of
+// its columns are seeded once — and an entity that is a different thing per
+// environment is two entities, so naming one of them here is refused rather
+// than half-honoured.
+func parseOverrides(raw []map[string]any, path string) ([]domain.Override, error) {
+	overrides := make([]domain.Override, 0, len(raw))
+
+	for _, entry := range raw {
+		refID, _ := entry["_id"].(string)
+		if refID == "" {
+			return nil, fmt.Errorf("%w: an overrides: entry in %s has no _id",
+				domain.ErrEntityParseFailed, path)
+		}
+
+		columns := make(map[string]any, len(entry)-1)
+		for key, value := range entry {
+			if key == "_id" {
+				continue
+			}
+			if strings.HasPrefix(key, "_") {
+				return nil, fmt.Errorf("%w: the overrides: entry for %q in %s sets %s, and an override sets column values only",
+					domain.ErrEntityParseFailed, refID, path, key)
+			}
+			columns[key] = value
+		}
+
+		if len(columns) == 0 {
+			return nil, fmt.Errorf("%w: the overrides: entry for %q in %s sets no columns",
+				domain.ErrEntityParseFailed, refID, path)
+		}
+
+		overrides = append(overrides, domain.Override{RefID: refID, Columns: columns})
+	}
+
+	return overrides, nil
 }
 
 // parseEntities converts a slice of raw YAML maps into domain entities by

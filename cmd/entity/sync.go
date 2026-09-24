@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -22,7 +21,7 @@ type RunEntitySyncCommand struct {
 	// Secrets resolves {{ asm.<source>.<key> }} template references against the
 	// `secrets:` sources in .jokarc.yaml.
 	Secrets      app.SecretResolver
-	EntitiesDir  string
+	EntitiesDirs []string
 	AutoConfirm  bool
 	OutputFormat string
 	// StateFile overrides where the state file is written; empty means the
@@ -69,17 +68,17 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return err
 	}
 
-	relPaths, err := infra.DiscoverEntityFiles(r.EntitiesDir)
+	found, err := infra.DiscoverEntityRoots(r.EntitiesDirs)
 	if err != nil {
 		return err
 	}
 
-	if len(relPaths) == 0 {
+	if len(found) == 0 {
 		if jsonOut {
 			shared.PrintJSON(map[string]any{"status": "ok", "synced": []string{}, "message": "no entity files found"})
 			return nil
 		}
-		color.Yellow("No entity files found in %s.", r.EntitiesDir)
+		color.Yellow("No entity files found in %s.", strings.Join(r.EntitiesDirs, ", "))
 		return nil
 	}
 
@@ -94,8 +93,8 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	var modified []*domain.EntityFile // tracked files whose content changed
 	var all []*domain.EntityFile      // every file, for set-level validation
 
-	for _, rel := range relPaths {
-		fullPath := filepath.Join(r.EntitiesDir, rel)
+	for _, disc := range found {
+		rel, fullPath := disc.Key, disc.Full
 
 		hash, err := app.HashFileContent(fullPath)
 		if err != nil {
@@ -111,6 +110,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			return err
 		}
 		file.Path = rel
+		file.FullPath = fullPath
 		file.ContentHash = hash
 		all = append(all, file)
 
@@ -128,10 +128,16 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		}
 	}
 
+	// Overrides merge before anything else looks at the set, so the plan, the
+	// apply, the hashes and the write-back all read one merged declaration.
+	//
 	// Validate the whole set before anything is written: an _id claimed twice
 	// is only visible across files, and a set that cannot be identified is not
 	// one joka should start writing from.
-	if err := app.EntitySetError(app.ValidateEntitySet(all)); err != nil {
+	problems := app.ApplyOverrides(all)
+	problems = append(problems, app.ValidateEntitySet(all)...)
+
+	if err := app.EntitySetError(problems); err != nil {
 		return err
 	}
 
@@ -199,13 +205,22 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	}
 
 	if r.DryRun {
+		// A dry run that found work exits ExitPending. It is not a failure and
+		// it has printed the plan already, so nothing more is said — the exit
+		// status is the whole point, and it is what lets CI ask "is this
+		// database up to date with its seeds" without parsing output.
+		pending := error(nil)
+		if plan.HasChanges() {
+			pending = shared.ErrPendingReported
+		}
+
 		if jsonOut {
 			shared.PrintJSON(map[string]any{"status": "ok", "dry_run": true, "plan": planJSON(plan)})
-			return nil
+			return pending
 		}
 		printPlan(plan)
 		color.Yellow("\nDry run — no changes applied.")
-		return nil
+		return pending
 	}
 
 	// A run with nobody watching must be told, once, that it may delete.
@@ -294,7 +309,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	var rewritten []string
 
 	if len(resolutions) > 0 {
-		rewritten, err = app.ApplyResolutions(r.EntitiesDir, resolutions)
+		rewritten, err = app.ApplyResolutions(fullPathsOf(all), resolutions)
 		if err != nil {
 			return err
 		}
@@ -302,7 +317,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		// A rewritten file's content hash moved, and the copy in memory is the
 		// one joka is about to record. Left stale, the next run would report
 		// the file modified because of an edit joka made itself.
-		if err := reloadFiles(r.EntitiesDir, all, rewritten); err != nil {
+		if err := reloadFiles(all, rewritten); err != nil {
 			return err
 		}
 

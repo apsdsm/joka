@@ -38,7 +38,14 @@ func (e Entity) IsOnce(column string) bool {
 // EntityFile groups the entities parsed from a single YAML file. Path is the
 // relative file path used as the tracking key in the joka_entities table.
 type EntityFile struct {
-	Path        string
+	// Path is the key the state records this file under: relative to the
+	// entities root, or root-prefixed when several roots are configured.
+	Path string
+	// FullPath is where the file is on disk. It is not part of the state — it
+	// is carried so that reading the file again, or writing it back under
+	// --on-conflict=ask, does not have to rebuild it by joining a root onto
+	// Path, which stops working the moment Path carries a root of its own.
+	FullPath    string
 	ContentHash string
 	Entities    []Entity
 	// Removed are the file's `removed:` entries: state operations rather than
@@ -46,6 +53,9 @@ type EntityFile struct {
 	Removed []Removal
 	// Moved are the file's `moved:` entries. See Move.
 	Moved []Move
+	// Overrides are the file's `overrides:` entries: column values for an
+	// entity declared elsewhere in the set. See Override.
+	Overrides []Override
 }
 
 // Removal is a declared state operation: an _id joka should stop tracking.
@@ -119,4 +129,32 @@ type Move struct {
 	From string
 	// To is the _id it should be tracked under, which some entity must declare.
 	To string
+}
+
+// An Override sets column values on an entity declared elsewhere in the set.
+//
+//	overrides:
+//	  - _id: lgc_client
+//	    redirect_uri: https://test.example.com/callback
+//
+// It exists because one entity that differs in two fields per environment was
+// duplicated whole — every column copied into every environment's tree, and
+// every later edit made in each copy or forgotten in one. With several entity
+// roots the shared declaration lives in one of them and each environment
+// carries only what it changes.
+//
+// An override sets column values and nothing else. It cannot move an entity to
+// another table, give it children or make a column seeded-once: those describe
+// what the entity *is*, and an entity that is a different thing per environment
+// is two entities.
+type Override struct {
+	// RefID is the _id being overridden. It must be declared somewhere in the
+	// loaded set — an override naming nothing is a typo, and silently doing
+	// nothing would leave the author believing an environment was configured.
+	RefID string
+	// Columns replace the declared values of the same name, and add the ones
+	// the entity does not declare. Adding is allowed because "a field only
+	// this environment needs" is the same request as "a field that differs";
+	// a mistyped name fails at the insert, naming the column.
+	Columns map[string]any
 }

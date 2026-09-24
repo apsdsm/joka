@@ -550,3 +550,16 @@ func flattenDepths(entities []domain.Entity, depth int, out []int) []int {
 	}
 	return out
 }
+
+// HasDifferences reports whether the file and the database disagree about
+// anything a sync would act on.
+//
+// Moves are excluded deliberately. A move is a row that shifted position
+// because something was inserted above it, and sync re-records the position
+// without writing to the row — so counting it would make `entity diff` report
+// work pending for a file nothing needs doing to. Regenerated columns are
+// excluded for the reason they are excluded everywhere: they are a property of
+// the file, not a difference from the database.
+func (d *EntityDiff) HasDifferences() bool {
+	return d.Inserts > 0 || d.Deletes > 0 || d.Changes > 0
+}

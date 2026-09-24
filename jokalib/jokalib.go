@@ -100,7 +100,9 @@ func MigrateUp(ctx context.Context, db *sql.DB, migrationsDir string, opts ...Op
 	}.Execute(ctx)
 }
 
-// EntitySync applies the seed files in entitiesDir, as `joka entity sync` does.
+// EntitySync applies the seed files in entitiesDirs, as `joka entity sync`
+// does. Several directories are synced as one desired state, and a reference
+// resolves across all of them.
 //
 // Two differences from the other functions in this package, both of which
 // should go:
@@ -119,12 +121,12 @@ func MigrateUp(ctx context.Context, db *sql.DB, migrationsDir string, opts ...Op
 // and nothing is applied, which is the CLI default. Deciding which side wins
 // is a judgement, not something this package should make for a caller; use the
 // CLI, where --on-conflict can be answered.
-func EntitySync(ctx context.Context, db *sql.DB, entitiesDir string, opts ...Option) error {
+func EntitySync(ctx context.Context, db *sql.DB, entitiesDirs []string, opts ...Option) error {
 	o := resolve(opts)
 
 	return entity.RunEntitySyncCommand{
 		DB:           db,
-		EntitiesDir:  entitiesDir,
+		EntitiesDirs: entitiesDirs,
 		AutoConfirm:  true,
 		OutputFormat: "text",
 		SkipLock:     o.skipLock,

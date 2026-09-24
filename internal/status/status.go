@@ -22,6 +22,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	jokadb "github.com/apsdsm/joka/db"
 	entityapp "github.com/apsdsm/joka/internal/domains/entity/app"
@@ -39,7 +40,7 @@ type Inputs struct {
 	DB            *sql.DB
 	Profile       string
 	MigrationsDir string
-	EntitiesDir   string
+	EntitiesDirs  []string
 	StateFile     string
 }
 
@@ -244,12 +245,12 @@ func addSnapshots(ctx context.Context, in Inputs, adapter *migrationinfra.Postgr
 }
 
 func buildEntities(ctx context.Context, in Inputs, state *entitydomain.State, out *Entities) {
-	out.Dir = in.EntitiesDir
+	out.Dir = strings.Join(in.EntitiesDirs, ", ")
 	out.Tracked = len(state.Entities)
 	out.Files = len(state.Files)
 	out.Unkeyed = len(state.Unkeyed)
 
-	paths, err := entityinfra.DiscoverEntityFiles(in.EntitiesDir)
+	found, err := entityinfra.DiscoverEntityRoots(in.EntitiesDirs)
 	if err != nil {
 		if out.Problem == "" {
 			out.Problem = err.Error()
@@ -257,8 +258,8 @@ func buildEntities(ctx context.Context, in Inputs, state *entitydomain.State, ou
 		return
 	}
 
-	for _, rel := range paths {
-		file, err := entityapp.ParseEntityAction{Path: in.EntitiesDir + "/" + rel}.Execute()
+	for _, disc := range found {
+		file, err := entityapp.ParseEntityAction{Path: disc.Full}.Execute()
 		if err != nil {
 			if out.Problem == "" {
 				out.Problem = err.Error()

@@ -3,7 +3,6 @@ package migration
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 
 	"github.com/apsdsm/joka/cmd/shared"
@@ -15,7 +14,11 @@ import (
 // ErrSchemaDrift is returned when the live schema differs from the latest
 // snapshot. The error is surfaced so callers (CI, scripts) can detect drift
 // via exit code.
-var ErrSchemaDrift = errors.New("schema drift detected")
+// ErrSchemaDrift wraps shared.ErrChangesPending, so drift exits 2 and a joka
+// that could not run the check exits 1. Both are non-zero, so a CI gate testing
+// for failure is unaffected; one that wants to tell "the schema moved" from
+// "verify could not tell me" now can.
+var ErrSchemaDrift = fmt.Errorf("%w: schema drift detected", shared.ErrChangesPending)
 
 // RunVerifyCommand handles "migrate verify". It compares the live database
 // schema against the latest snapshot and reports added/removed/modified

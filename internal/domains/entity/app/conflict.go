@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -145,7 +144,7 @@ func KeepFromResolutions(conflicts []RowConflict, resolutions []Resolution) map[
 // entitiesDir is where the declared files live; Resolution.File is relative to
 // it, the way every other path in the domain is. It returns the files it
 // changed, so the caller can say which ones to look at in a diff.
-func ApplyResolutions(entitiesDir string, resolutions []Resolution) ([]string, error) {
+func ApplyResolutions(fullPath map[string]string, resolutions []Resolution) ([]string, error) {
 	var changed []string
 	seen := make(map[string]bool)
 
@@ -154,7 +153,11 @@ func ApplyResolutions(entitiesDir string, resolutions []Resolution) ([]string, e
 			continue
 		}
 
-		path := filepath.Join(entitiesDir, r.File)
+		path, known := fullPath[r.File]
+		if !known {
+			return changed, fmt.Errorf("no entity file loaded for %q", r.File)
+		}
+
 		if err := SetEntityColumn(path, r.RefID, r.Column, r.Value); err != nil {
 			return changed, err
 		}

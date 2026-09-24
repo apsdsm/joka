@@ -9,6 +9,7 @@ import (
 
 	"github.com/apsdsm/joka/config"
 	jokadb "github.com/apsdsm/joka/db"
+	"github.com/apsdsm/joka/internal/providers"
 )
 
 // stubFetcher returns canned secret values without touching AWS.
@@ -17,7 +18,7 @@ type stubFetcher struct {
 	err    error
 }
 
-func (s stubFetcher) Fetch(ctx context.Context, secretID, region string) (map[string]string, error) {
+func (s stubFetcher) Fetch(ctx context.Context, ref providers.SecretRef) (map[string]string, error) {
 	return s.values, s.err
 }
 
@@ -223,7 +224,7 @@ func TestResolve_RefusesMySQLBeforeFetching(t *testing.T) {
 
 type recordingFetcher struct{ onFetch func() }
 
-func (r recordingFetcher) Fetch(_ context.Context, _, _ string) (map[string]string, error) {
+func (r recordingFetcher) Fetch(_ context.Context, _ providers.SecretRef) (map[string]string, error) {
 	r.onFetch()
 	return map[string]string{"pw": "x"}, nil
 }

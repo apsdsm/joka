@@ -58,6 +58,7 @@ reordered, or be renamed without losing its row.
 | `joka entity sync` | Apply the seed files. The only path by which data is seeded. |
 | `joka entity sync --dry-run` | The plan, without applying or taking the lock. |
 | `joka entity sync --allow-delete` | Lets a `--auto` / `--output json` run delete rows no file declares. |
+| `--wait <duration>` | Retry the connection until the deadline. For container entrypoints. |
 | `joka entity diff <file>` | Declared vs tracked vs live, per row, for one file. |
 | `joka migrate status` | Applied vs pending. |
 | `joka migrate up` | Apply pending migrations — all in one transaction. |
@@ -231,6 +232,75 @@ conflict and deletes rows no file declares, because there is nobody to ask.
 
 **Do not write your own migration splitter.** `db.SplitSQLStatements` is public, and a private copy
 will disagree with the tool about something — a semicolon inside a comment, for one.
+
+## Exit codes
+
+| | |
+|---|---|
+| 0 | nothing to do |
+| 1 | joka could not do it, or refused to |
+| 2 | there is work to apply |
+
+`migrate status`, `migrate verify`, `entity sync --dry-run` and `entity diff` return 2 when they
+find work. `joka status` never does — it is an inventory, not a gate. Both 1 and 2 are non-zero, so
+a check for plain failure is unaffected.
+
+```bash
+joka entity sync --dry-run; case $? in
+  0) echo "seeds are up to date" ;;
+  2) echo "seeds need applying" ;;
+  *) echo "joka could not tell" ;;
+esac
+```
+
+## Waiting for the database
+
+`--wait 30s` retries the connection until the deadline instead of failing on the first attempt. Use
+it in a container entrypoint rather than writing a readiness loop around joka. A DSN joka cannot use
+is still refused immediately.
+
+### Share seeds between environments
+
+`entities:` takes a list, synced as one desired state, and a reference resolves across all of it:
+
+```yaml
+entities:
+  - ../shared/entities
+  - ./entities
+```
+
+Put what every environment has in the shared root, and in the environment's own root put the
+fixtures only it needs — plus an `overrides:` block for the handful of fields that differ:
+
+```yaml
+overrides:
+  - _id: lgc_client
+    redirect_uri: https://test.example.com/callback
+```
+
+An override sets column values on an entity declared elsewhere in the set, merging per column. It
+cannot change `_is`, `_has`, `_pk` or `_once`: those say what an entity is, and an entity that is a
+different thing per environment is two entities. An override naming an `_id` nothing declares is
+refused, so a typo is not a silent no-op.
+
+Two roots must not overlap — the same directory twice, or one inside another, is refused, because
+every file in it would be declared twice.
+
+### Reach a database in a private subnet
+
+```yaml
+connection:
+  source: secret
+  host: db.private.example.com
+  port: 5432
+  secret: { secret_id: prod/db, region: ap-northeast-1 }
+  tunnel:
+    target: i-0123456789abcdef0
+```
+
+joka opens the port forward, connects through it and closes it on the way out. Needs `aws` and
+`session-manager-plugin` on PATH; it names whichever is missing. `remote_host` and `remote_port`
+default to the connection's own, so the database is named once.
 
 ## Things that will catch you out
 

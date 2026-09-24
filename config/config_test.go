@@ -24,7 +24,7 @@ entities: db/entities
 		if cfg.Migrations != "db/migrations" {
 			t.Errorf("expected migrations 'db/migrations', got %q", cfg.Migrations)
 		}
-		if cfg.Entities != "db/entities" {
+		if len(cfg.Entities) != 1 || cfg.Entities[0] != "db/entities" {
 			t.Errorf("expected entities 'db/entities', got %q", cfg.Entities)
 		}
 	})
@@ -39,7 +39,7 @@ entities: db/entities
 		if err != nil {
 			t.Fatalf("expected no error for missing file, got: %v", err)
 		}
-		if cfg.Migrations != "" || cfg.Entities != "" {
+		if cfg.Migrations != "" || len(cfg.Entities) != 0 {
 			t.Errorf("expected zero-value config, got %+v", cfg)
 		}
 	})
@@ -100,7 +100,7 @@ profiles:
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.Entities != "db/entities" {
+		if len(cfg.Entities) != 1 || cfg.Entities[0] != "db/entities" {
 			t.Errorf("expected base entities, got %q", cfg.Entities)
 		}
 		if cfg.Connection == nil || cfg.Connection.Source != "env" {
@@ -122,7 +122,7 @@ profiles:
 			t.Errorf("expected inherited migrations, got %q", cfg.Migrations)
 		}
 		// overridden by profile
-		if cfg.Entities != "db/entities-dev" {
+		if len(cfg.Entities) != 1 || cfg.Entities[0] != "db/entities-dev" {
 			t.Errorf("expected overridden entities, got %q", cfg.Entities)
 		}
 		if cfg.Connection == nil || cfg.Connection.Source != "aws_secrets_manager" {

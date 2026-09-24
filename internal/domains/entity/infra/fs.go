@@ -27,6 +27,15 @@ func DiscoverEntityFiles(dir string) ([]string, error) {
 			return nil
 		}
 
+		// A dotfile is configuration, not a seed. `.jokarc.yaml` matches
+		// *.yaml as readily as anything else, and it was picked up and parsed
+		// as an entity file — which only needed an entities root to sit beside
+		// a config, or to contain one, and listing several roots makes that
+		// ordinary rather than perverse.
+		if strings.HasPrefix(info.Name(), ".") {
+			return nil
+		}
+
 		ext := strings.ToLower(filepath.Ext(path))
 
 		if ext != ".yaml" && ext != ".yml" {
