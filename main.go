@@ -69,6 +69,8 @@ func main() {
 		migrationsDir string
 		entitiesDir   string
 		stateFile     string
+		rootName      string
+		adoptRoot     bool
 		autoConfirm   bool
 		outputFormat  string
 		dbConn        *sql.DB
@@ -104,6 +106,9 @@ func main() {
 			}
 			if !c.Flags().Changed("statefile") && cfg.StateFile != "" {
 				stateFile = cfg.StateFile
+			}
+			if !c.Flags().Changed("root") && cfg.Root != "" {
+				rootName = cfg.Root
 			}
 
 			if c.Name() == "version" {
@@ -155,6 +160,29 @@ func main() {
 			// only for commands that write. A
 			// read-only command must leave a bare database bare — that is what
 			// makes a missing tracking table reportable.
+			// The root guard applies to drop and reset as well, which is where
+			// it parts company with the two gates below.
+			//
+			// Those two skip a wiping command for reasons that do not carry
+			// over. The upgrade gate skips because a blocked upgrade would
+			// otherwise have no command left that could clear it. The
+			// wrong-database gate skips because drop takes joka_meta with it,
+			// so a wiped database has no identity while the state file beside
+			// the checkout still has one — which made drop followed by init
+			// fail with nothing left to run.
+			//
+			// Ownership has neither problem. The claim lives in a committed
+			// configuration rather than in a file a wipe destroys, and a root
+			// that genuinely means to take a database over says so with
+			// --adopt-root. Dropping the wrong environment's database is the
+			// worst thing joka can do, so it is the last command that should
+			// skip the check that names the owner.
+			if c.Annotations[annotationMutates] == "true" {
+				if err := refuseWrongRoot(c, dbConn, rootName, adoptRoot); err != nil {
+					return err
+				}
+			}
+
 			if c.Annotations[annotationMutates] == "true" && c.Annotations[annotationWipes] != "true" {
 				if err := refuseWrongDatabase(c, stateFile, profile, dbConn); err != nil {
 					return err
@@ -195,6 +223,24 @@ func main() {
 				}
 			}
 
+			// The claim is made on the way out, for the same reason the wipe
+			// stamp is: a root owns a database once it has successfully written
+			// to it, and cobra runs PersistentPostRunE only on success. A run
+			// that failed has not taken ownership of anything.
+			//
+			// This covers drop and reset too. They take joka_meta with them, so
+			// without a re-claim here a wipe would quietly release a database
+			// its own root had claimed.
+			if c.Annotations[annotationMutates] == "true" {
+				claim := meta.ClaimRoot
+				if adoptRoot {
+					claim = meta.AdoptRoot
+				}
+				if err := claim(c.Context(), dbConn, rootName); err != nil {
+					return err
+				}
+			}
+
 			return nil
 		},
 	}
@@ -204,6 +250,8 @@ func main() {
 	root.PersistentFlags().StringVarP(&migrationsDir, "migrations", "m", "devops/migrations", "Path to the migrations directory")
 	root.PersistentFlags().StringVar(&entitiesDir, "entities", "devops/entities", "Path to the entities directory")
 	root.PersistentFlags().StringVar(&stateFile, "statefile", "", "Path to the state file (default: joka[.<profile>].state.json beside the working directory)")
+	root.PersistentFlags().StringVar(&rootName, "root", "", "Name of this joka root (default: the 'root:' key in .jokarc.yaml)")
+	root.PersistentFlags().BoolVar(&adoptRoot, "adopt-root", false, "Move this database's root claim to this root")
 	root.PersistentFlags().BoolVarP(&autoConfirm, "auto", "a", false, "Automatically confirm prompts")
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 
@@ -571,4 +619,26 @@ func dirSource(c *cobra.Command, flag, configured string) shared.DirSource {
 	}
 
 	return shared.DirDefault
+}
+
+// refuseWrongRoot stops a command that writes when the database was claimed by
+// a joka root other than the one running.
+//
+// It sits beside refuseWrongDatabase and covers the case that one cannot. The
+// state file carries the identity of the database it describes, which catches a
+// directory pointed at the wrong database — but the file is generally
+// gitignored, so a CI checkout has none and the audit returns no_file. The root
+// claim lives in a committed configuration instead, so it is there on a fresh
+// clone, which is exactly where the damage was done.
+//
+// Like the upgrade gate it runs on the mutates annotation, so drop and reset
+// skip it: they destroy the tracking, and being unable to reset a database
+// because of who owns its bookkeeping is the wrong way round.
+func refuseWrongRoot(c *cobra.Command, db *sql.DB, declared string, adopt bool) error {
+	state, err := meta.Read(c.Context(), db)
+	if err != nil {
+		return err
+	}
+
+	return meta.CheckRoot(state.StateRoot, declared, adopt)
 }

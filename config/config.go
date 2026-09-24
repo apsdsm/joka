@@ -49,6 +49,7 @@ type Connection struct {
 // Profile overlays the base config. Set (non-nil) fields override the base;
 // unset fields inherit it.
 type Profile struct {
+	Root       *string           `yaml:"root"`
 	Migrations *string           `yaml:"migrations"`
 	Entities   *string           `yaml:"entities"`
 	StateFile  *string           `yaml:"statefile"`
@@ -57,6 +58,11 @@ type Profile struct {
 }
 
 type Config struct {
+	// Root names this configuration, and through it the database it owns. See
+	// meta.KeyStateRoot: a database records the root that claimed it, and a
+	// different root is refused rather than allowed to converge it against the
+	// wrong desired state.
+	Root       string             `yaml:"root"`
 	Migrations string             `yaml:"migrations"`
 	Entities   string             `yaml:"entities"`
 	StateFile  string             `yaml:"statefile"`
@@ -104,6 +110,9 @@ func applyProfile(base *Config, p Profile) *Config {
 	merged := *base
 	merged.Profiles = nil
 
+	if p.Root != nil {
+		merged.Root = *p.Root
+	}
 	if p.Migrations != nil {
 		merged.Migrations = *p.Migrations
 	}

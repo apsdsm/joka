@@ -139,6 +139,34 @@ Add an `_id` to every entity it names and sync again. Adoption finds each existi
 key and claims it: no duplicates, nothing deleted. Do **not** wipe `joka_migrations` or the tracking
 tables — that throws away the migration history to fix a problem in the YAML.
 
+### Say which root a directory is
+
+A `.jokarc.yaml` may name itself, and the database remembers which name claimed it:
+
+```yaml
+root: myproject-prod
+```
+
+A second root pointed at the same database is refused rather than allowed to converge it against the
+wrong seed files:
+
+```
+this database belongs to a different joka root: it belongs to "myproject-local", and this
+configuration declares "myproject-prod"
+  if you meant to move it, re-run with --adopt-root
+```
+
+This is what stops two environment directories sharing one database and each deleting the other's
+rows as declared nowhere. It is stronger than the state file, which is usually gitignored and so
+absent in CI. It doubles as the environment label: name the root after the environment and a prod
+directory pointed at a test database is the same refusal.
+
+- Declaring no root keeps joka behaving exactly as before, so this is opt-in.
+- Once a database is claimed, a configuration that declares **no** root is also refused. Add the
+  line, or pass `--root`.
+- `drop` and `reset` are gated on this too, unlike the other refusals.
+- `joka status` names the owner on its database line.
+
 ### Rename an entity's `_id`
 
 Usually nothing to do: joka finds the row again by its unique key and re-keys the
@@ -198,6 +226,13 @@ selected by `--entities` or a profile, and only one is ever loaded.
 confirmation for deletions. In CI, a seed file deleted by mistake takes its rows
 with it.
 
+**A declined prompt exits non-zero.** `joka migrate up && joka entity sync` stops if you answer
+anything but `yes` to the migration, rather than syncing against a schema that was never migrated.
+
+**joka must be run from the directory holding its config.** It reads `.jokarc.yaml` from the working
+directory and never searches upward. From anywhere else it refuses before opening a connection, so
+nothing is written to whatever `DATABASE_URL` happened to point at.
+
 **Deleting a seed file deletes its rows.** This is the point, but it surprises
 people. Use `removed: … keep: true` if you meant to keep them.
 
@@ -244,6 +279,8 @@ value back.
 | Message | What it means |
 |---|---|
 | `the database changed since joka last wrote` | A conflict. Decide with `--on-conflict`. |
+| `this database belongs to a different joka root` | Another joka root claimed this database. Check you are in the right directory; `--adopt-root` moves the claim deliberately. |
+| `not a joka directory` | You are not in the directory holding the `.jokarc.yaml`. Nothing was written. |
 | `the state file describes a different database` | The identity in `joka.state.json` disagrees with the database. Either the connection is wrong, or the state file is stale — remove it or point `--statefile` elsewhere. Read-only commands still work. |
 | `entity set is not valid` | An `_id` is missing, claimed twice, or contradicted by a `removed:`/`moved:` entry. It lists every problem, not just the first. |
 | `tracking upgrade is blocked` | Two tracked rows claim one `_id`. No joka command can fix it — drop the losing claim from `joka_entity_rows` directly. |

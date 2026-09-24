@@ -115,6 +115,15 @@ The version is defined as a `const` in `main.go`. When bumping the version:
 - **CLI flags**: `--env` for .env path, `--profile`/`-p` for the config profile, `--migrations` for migrations dir, `--entities` for entities dir, `--auto` for auto-confirm, `--output` / `-o` for output format (`text` or `json`).
 - **JSON output**: `--output json` emits a single JSON object per command (no color, no prompts). All responses include a `"status"` field (`"ok"` or `"error"`). When `--output json` is set, confirmations are auto-skipped (like `--auto`).
 - **Advisory locking**: `migrate up`, `entity sync`, `drop`, and `reset` acquire a DB lock before running. (`reset` holds one outer lock for the whole pipeline.) Use `joka unlock` if a process crashes without releasing.
+- **A declined confirmation exits non-zero** (`shared.ErrCancelled`, returned by all five
+  confirmation sites). It used to return nil, so `joka migrate up && joka entity sync` carried on
+  into the sync after the migration was declined and failed on a table the pending migration would
+  have created. The command prints why it stopped in its own words and main exits 1 without printing
+  over it.
+- **A command declares the directories it reads** (`joka:needs`), and the root checks they exist
+  before opening a connection — see **Root discovery** under the plan/apply section. A path the
+  config or a flag named is reported as a plain not-found; only a missing *default* with no
+  `.jokarc.yaml` beside it reads as the wrong working directory (`shared.ErrNotJokaDir`).
 
 ## Database Tables
 
@@ -360,6 +369,7 @@ CREATE TABLE joka_meta (
 |---|---|
 | `tracking_version` | `meta.TrackingVersion` as a decimal string — the shape and meaning of the `joka_*` tables |
 | `joka_version` | The joka release that last wrote. Informational; nothing branches on it |
+| `state_root` | The joka root that owns this database. See **Root ownership** below |
 
 **Why it exists.** The tracking tables changed shape three times with no marker: `content_hash` on
 `joka_entities`, `ref_id`/`pk_column` on `joka_entity_rows`, and the v0.13.0 snapshot format. Each
@@ -378,6 +388,14 @@ something can still be run to clear it.
 - **An absent marker reads as the current version.** A database with tracking tables but no
   `joka_meta` predates the marker; it is not from the future. It gets stamped on the next mutating
   command.
+- **A database with no joka table at all reads as current, not as pre-marker.** `meta.isBare` probes
+  for the tables an older build could have left (`joka_migrations`, `joka_snapshots`,
+  `joka_entities`, `joka_entity_rows`, `joka_state` — not `joka_lock`, which says nothing about who
+  wrote here). Without the distinction every brand-new database announced both tracking upgrades on
+  its first mutating command, for entity tracking that had never existed. The two cases are guarded
+  separately: `meta.TestReadOnBareDatabase` for the empty one and
+  `upgrade.TestPreMarkerDatabaseIsNotMistakenForCurrent`, which builds a real v1 database, for the
+  one that must still upgrade.
 - **Check runs on connect; Stamp runs only for commands that write.** `main.go` tags mutating
   commands with the `joka:mutates` annotation and the root `PersistentPreRunE` stamps on that. A
   read-only command must leave a bare database bare, which is what makes a missing tracking table
@@ -392,7 +410,84 @@ something can still be run to clear it.
   `PersistentPostRunE` only on success, so a failed reset leaves the marker alone.
 - **An unparseable version is treated as too new.** joka writes a decimal string, so anything else
   came from something this build does not understand.
-- Nothing reports the marker now that `joka status` is gone. `meta.Read` is where to get it.
+- `joka status` reports the marker on its database line, with the owning root beside it.
+  `meta.Read` is where to get it in code.
+
+## Root ownership
+
+A `.jokarc.yaml` may name the configuration it belongs to, and the database records which
+configuration claimed it:
+
+```yaml
+root: jjc2-e2e
+```
+
+`--root` overrides it and a profile may set its own. The name is stamped into `joka_meta` as
+`state_root` the first time a mutating command succeeds, and a different root is refused
+(`meta.ErrWrongRoot`).
+
+**It exists because `state_identity` could not cover the case that actually happened.** That
+identity lives in `joka_meta` and is compared against a copy in the state file — and the state file
+is generally gitignored, so a CI checkout has none, `AuditState` returns `no_file`, and nothing
+refuses. Two roots then sync one database and each deletes the other's entities as declared nowhere,
+under `--auto`, without a word. jjc2's CI lost 16 rows that way. The root is declared in a committed
+file instead, so the comparison survives a checkout with no state file in it.
+
+**It is the environment label too.** In a `devops/joka/{local,test,prod}` layout the root name is
+the environment, so a prod root pointed at a test database is the same disagreement and gets the
+same refusal. One marker rather than two that could disagree.
+
+| recorded | declared | |
+|---|---|---|
+| absent | absent | nothing — joka worked this way before roots, and still does |
+| absent | declared | the root claims it on the way out |
+| present | absent | **refuse** — a claimed database must be named |
+| present | same | proceed |
+| present | other | **refuse**, naming both |
+
+- **Row three is what makes it hold.** Letting an undeclared root through would mean deleting one
+  line from a configuration turns the protection off, and what it protects against is silent and
+  destructive.
+- **Adoption is opt-in as a consequence.** A database is claimed only once some configuration
+  declares a root, so a project that declares none behaves exactly as it did.
+- **`drop` and `reset` are gated on this**, which is where it parts company with the upgrade gate and
+  the wrong-database refusal. Those skip a wiping command for reasons that do not carry over: a
+  blocked upgrade would have no command left to clear it, and `drop` takes `joka_meta` with it so the
+  identity check made `drop` followed by `init` fail. Ownership has neither problem — the claim is in
+  a committed file rather than one a wipe destroys, and `--adopt-root` says so when a root genuinely
+  means to take a database over. Dropping the wrong environment's database is the worst thing joka
+  can do, so it is the last command that should skip the check that names the owner.
+- **The claim is made on the way out**, in `PersistentPostRunE`, for the same reason the wipe stamp
+  is: a root owns a database once it has successfully written to it, and cobra runs
+  `PersistentPostRunE` only on success. A wiping command re-claims there too, or a wipe would quietly
+  release a database its own root had claimed.
+- **`ClaimRoot` is `DO NOTHING`, `AdoptRoot` is `DO UPDATE`.** A second root must not be able to
+  overwrite the first even if the check were bypassed; moving a claim is a separate, named act.
+- `joka status` prints the owner on its database line, because status is the command you reach for
+  after a refusal.
+
+## Provider adapters
+
+joka talks to one external provider today — AWS Secrets Manager — and will talk to more. Anything
+added must be a provider *behind an interface*, never a second special case beside the first.
+
+Where it already is: `connection.SecretFetcher` is an interface and `connection/aws.go` is its only
+implementation, in a file of its own.
+
+Where it is not, and what has to move before a second provider lands:
+
+- **`Fetch(ctx, secretID, region)` is AWS-shaped.** `region` means nothing to a provider that does
+  not have regions. The parameters want to be a per-provider config struct, not a widening list.
+- **The provider is baked into the source name.** `source: aws_secrets_manager` names the vendor
+  where it should name the kind, with the vendor beside it — `source: secret` plus `provider: aws`.
+- **`{{ asm.<source>.<key> }}` is the real blocker, because it is in user files.** `asm` is AWS
+  Secrets Manager. A neutral prefix is needed with `asm.` kept as an alias for ever, since jjc2's
+  seed files already use it and a template prefix is not something a database migration can rewrite.
+
+The tunnel work (see the SSM item under **Requests from consuming projects**) introduces a second
+interface of the same shape — one `Tunnel`, with `ssm` as the first implementation — and must not be
+written as a direct `aws ssm` call in the connection path. It also crosses a line this file records
+elsewhere: `pg_dump` is currently the only binary joka shells out to.
 
 ## Commands the convergence work removed
 
@@ -525,9 +620,14 @@ Still open before building:
    prompt lands after the migration plan is already approved. Either `ask` is refused under `apply`
    (as it already is under `--auto`), or an apply has two interaction points, which undercuts one
    plan and one confirmation.
-2. **Root discovery.** Paths resolve relative to the working directory and nothing marks a directory
-   as a joka root, so running from a subdirectory silently finds no migrations rather than saying you
-   are in the wrong place. `apply` needs that to be an error.
+2. ~~**Root discovery.**~~ Half done, and the destructive half is the done half. A command declares
+   the directories it reads (`joka:needs`) and `shared.RequireDir` checks them **before the
+   connection is opened** — running `entity sync` from a directory that was not a joka root used to
+   open one, run the tracking upgrade, and create `joka_lock`, `joka_meta` and `joka_state` in
+   whatever `DATABASE_URL` pointed at, and only then fail on the missing directory. What is still
+   open is discovery proper: joka reads `.jokarc.yaml` from the working directory only and never
+   searches upward, so a subdirectory of a root is refused rather than resolved. That is the safe
+   failure, and `apply` may want the search.
 3. **`joka.yaml` vs `.jokarc.yaml`.** The existing file already declares everything needed. Read
    both, prefer the new name, never print the old one.
 4. **Detailed exit codes** (0 no changes, 1 error, 2 changes pending), which is what a CI drift gate
@@ -538,6 +638,45 @@ Still open before building:
 Build order: `plan` first (read-only, useful alone in CI), then root discovery and `joka.yaml`, then
 `apply`, then a `--wait` for the container case (`db.Open` pings and fails immediately, so there is
 no retry today).
+
+## Requests from consuming projects
+
+Raised from jjc2 on 2026-09-24, agreed in this order. The order is by damage prevented, not by size.
+
+| | | Status |
+|---|---|---|
+| Declined step exits non-zero; a fresh database is quiet | | **Done** |
+| A database remembers which root owns it, and the root is the environment label | 3, 6 | **Done** — see **Root ownership** |
+| Deletion is loud under `--auto` | 4 | Agreed, not built |
+| A Go library entry point | 8 | Agreed, not built |
+| `--wait` for containers | 9 | Agreed, not built |
+| Detailed exit codes | 11 | Agreed, not built |
+| References resolve across the whole set | 2 | Agreed, not built |
+| `entities:` accepts a list | 1 | Agreed, not built |
+| Per-environment value overlays | 7 | Needs the list first |
+| SSM tunnel as a connection source | 5 | Last; see **Provider adapters** |
+
+**Deletion is loud** reverses a rule this file currently states on purpose — that `--auto` and
+`--output json` skip the confirmation, so a CI run deletes without being asked. jjc2's CI deleted 16
+mappings under exactly that rule. The replacement is `--allow-delete`, required when a
+non-interactive run would delete anything, with `reset` exempt. A count cap was considered and
+rejected: it invites arguing about N.
+
+**A Go library entry point** is the cheapest of these and unblocks the most. jjc2's test helpers
+reimplemented migration splitting and got it wrong — the "no `;` in migration comments" rule they
+were working around came from their splitter, not joka's. The logic is under `internal/`, which they
+cannot import, but a facade at the module root can, because `internal/` is importable by anything
+rooted at its parent. Keep the surface minimal; it becomes API the moment it ships.
+
+**`entities:` accepts a list** has one real problem and it is not the parsing. `State.Files` is keyed
+on path, and two roots can both hold `admin.yaml`. Whether that already works depends on whether the
+stored path is the joined one or the basename — confirm before scoping, because a root-relative key
+means a tracking version bump.
+
+**References resolve across the whole set** is worth doing whether or not the list lands. `refMap` is
+pre-populated from tracked rows and files are processed in load order, so a cross-file reference
+resolves only when its target sorts earlier or was already tracked. Ordering the set by reference
+dependency rather than by filename is the fix.
 
 ## Upgrading a database from 0.13
 
@@ -793,8 +932,8 @@ markers in `joka_meta` make that comparison possible:
 | `state_identity` | a UUID naming this database, stamped once with `ON CONFLICT DO NOTHING` and never rewritten — it travels with a dump, which is the point |
 | `state_version` | incremented in the same transaction as the write, because a count that could commit without the write it counts is worse than no count |
 
-`app.AuditState` reads the pair against the file's and returns one of seven verdicts. Nothing
-prints them now that `joka status` is gone — only the refusal below acts on one.
+`app.AuditState` reads the pair against the file's and returns one of seven verdicts. `joka status`
+prints the verdict on its state line, and the refusal below acts on one of them.
 
 | | |
 |---|---|
