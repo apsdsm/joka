@@ -375,6 +375,11 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 			row.RefID, row.TableName, row.PKColumn, row.RowPK)
 	}
 
+	if result.ClearedUnkeyed > 0 {
+		color.Cyan("  Cleared %d pre-_id tracking %s now owned by a declared entity",
+			result.ClearedUnkeyed, plural(result.ClearedUnkeyed, "row", "rows"))
+	}
+
 	for _, row := range result.Forgotten {
 		color.Cyan("  Dropped tracking for %s (its row was already gone)", row.RefID)
 	}

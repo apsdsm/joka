@@ -125,6 +125,20 @@ If a table has no unique index the entity declares, joka cannot tell whether the
 row is already there, and inserts — which may then collide. Add a unique
 constraint, or declare the columns of one that exists.
 
+### Upgrade a project from joka 0.13
+
+The database needs nothing. `entity sync` migrates the tracking on its own, then refuses because the
+seed files have no `_id` — 0.13 matched rows by position, so a 0.13-era project never wrote one:
+
+```
+entity set is not valid: 5 entities without an _id
+  no _id: api_key.yaml entity #1 (api_keys)
+```
+
+Add an `_id` to every entity it names and sync again. Adoption finds each existing row by its unique
+key and claims it: no duplicates, nothing deleted. Do **not** wipe `joka_migrations` or the tracking
+tables — that throws away the migration history to fix a problem in the YAML.
+
 ### Rename an entity's `_id`
 
 Usually nothing to do: joka finds the row again by its unique key and re-keys the

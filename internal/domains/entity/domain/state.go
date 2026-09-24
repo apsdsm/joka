@@ -246,3 +246,30 @@ func (s *State) Rekey(from, to string) bool {
 	s.Entities[to] = e
 	return true
 }
+
+// ForgetUnkeyedAt drops every unkeyed row pointing at this exact database row,
+// and reports how many it removed.
+//
+// An unkeyed row is one joka tracked before it recorded `_id`s. When an entity
+// is later given an `_id` and adopts that same row, the state holds it twice:
+// once keyed, once not. The unkeyed copy is then pure residue — it names a row
+// somebody already owns, nothing can act on it, and `joka status` reports it as
+// a finding for ever.
+//
+// This is the same rule that stops a rename deleting the row it renamed: one
+// database row is represented once.
+func (s *State) ForgetUnkeyedAt(table string, pk int64) int {
+	kept := s.Unkeyed[:0]
+	dropped := 0
+
+	for _, row := range s.Unkeyed {
+		if row.TableName == table && row.RowPK == pk {
+			dropped++
+			continue
+		}
+		kept = append(kept, row)
+	}
+
+	s.Unkeyed = kept
+	return dropped
+}

@@ -131,6 +131,9 @@ type ApplyResult struct {
 	// Undeclared are tracked rows with no _id, which joka cannot match to a
 	// declaration either way. Reported, never removed.
 	Undeclared []domain.TrackedRow `json:"undeclared"`
+	// ClearedUnkeyed counts pre-_id tracking rows dropped because a keyed entity
+	// now owns the row they named. See the sweep in Execute.
+	ClearedUnkeyed int `json:"cleared_unkeyed"`
 	// ForgottenFiles are joka_entities records dropped because the file is gone
 	// and every row it tracked now belongs to another file. This is what makes
 	// a rename leave nothing behind.
@@ -272,6 +275,16 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 			state.TrackFile(file.Path, file.ContentHash)
 			result.Files = append(result.Files, file.Path)
 		}
+	}
+
+	// A row a keyed entity now owns must not also sit in Unkeyed. That happens
+	// on the first sync after a database written before joka recorded _ids: the
+	// entities gain an _id, adopt their existing rows, and the pre-_id tracking
+	// for those same rows is left behind. It names a row somebody already owns,
+	// nothing can act on it, and status would report it for ever.
+	for refID := range state.Entities {
+		row := state.Entities[refID]
+		result.ClearedUnkeyed += state.ForgetUnkeyedAt(row.Table, row.PKValue)
 	}
 
 	// An entity the declaration no longer mentions is one joka is being told to

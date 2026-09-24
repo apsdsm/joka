@@ -313,3 +313,61 @@ func TestUniqueKeysAreReadOncePerTable(t *testing.T) {
 			db.uniqueKeyCalls)
 	}
 }
+
+func TestAdoptingClearsThePreIDTrackingForTheSameRow(t *testing.T) {
+	// The first sync after upgrading a database written before joka recorded
+	// _ids. The entities gain an _id and adopt their existing rows; the pre-_id
+	// tracking for those same rows would otherwise be left behind for ever,
+	// naming a row somebody already owns, unclearable, and reported by status
+	// on every run.
+	db := seededDB(t)
+	db.track("a.yaml", domain.TrackedRow{
+		TableName: "fields", RowPK: 7, PKColumn: "id", InsertionOrder: 0,
+	})
+
+	if len(db.state.Unkeyed) != 1 {
+		t.Fatalf("fixture: expected one unkeyed row, got %d", len(db.state.Unkeyed))
+	}
+
+	file := entityFile("a.yaml", col("fields", "alpha", map[string]any{
+		"xid": "field-one", "label": "Set up by hand",
+	}))
+	result := applyAll(t, db, file)
+
+	if result.ClearedUnkeyed != 1 {
+		t.Errorf("expected the pre-_id row cleared, got %d", result.ClearedUnkeyed)
+	}
+	if len(db.state.Unkeyed) != 0 {
+		t.Errorf("expected nothing left in Unkeyed, got %+v", db.state.Unkeyed)
+	}
+	if alpha, ok := db.state.Row("alpha"); !ok || alpha.PKValue != 7 {
+		t.Errorf("expected alpha to own the row, got %+v ok=%v", alpha, ok)
+	}
+}
+
+func TestAnUnkeyedRowNobodyClaimsIsLeftAlone(t *testing.T) {
+	// The sweep drops only what a keyed entity now owns. A pre-_id row nothing
+	// declares still cannot be matched to a declaration either way, so it stays
+	// reported rather than being quietly forgotten.
+	db := seededDB(t)
+	db.currentRows["fields|9"] = map[string]any{"xid": "orphan", "label": "nobody's"}
+	db.track("a.yaml",
+		domain.TrackedRow{TableName: "fields", RowPK: 7, PKColumn: "id", InsertionOrder: 0},
+		domain.TrackedRow{TableName: "fields", RowPK: 9, PKColumn: "id", InsertionOrder: 1},
+	)
+
+	file := entityFile("a.yaml", col("fields", "alpha", map[string]any{
+		"xid": "field-one", "label": "Set up by hand",
+	}))
+	result := applyAll(t, db, file)
+
+	if result.ClearedUnkeyed != 1 {
+		t.Errorf("expected only the adopted row's tracking cleared, got %d", result.ClearedUnkeyed)
+	}
+	if len(db.state.Unkeyed) != 1 || db.state.Unkeyed[0].RowPK != 9 {
+		t.Errorf("expected the unclaimed row kept, got %+v", db.state.Unkeyed)
+	}
+	if len(db.deletedRows) != 0 {
+		t.Errorf("expected no row deleted, got %+v", db.deletedRows)
+	}
+}

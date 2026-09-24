@@ -539,6 +539,44 @@ Build order: `plan` first (read-only, useful alone in CI), then root discovery a
 `apply`, then a `--wait` for the container case (`db.Open` pings and fails immediately, so there is
 no retry today).
 
+## Upgrading a database from 0.13
+
+Reproduced against a real 0.13 database built with the 0.13 binary, not a synthetic one. **The
+database side migrates cleanly and needs nothing done to it.** What fails is the seed files.
+
+`joka entity sync` runs the tracking upgrade (v1 → v2 → v3) successfully, drops `joka_entities` and
+`joka_entity_rows`, stamps `joka_meta` — and *then* refuses:
+
+```
+Upgraded tracking to version 2: make _id the identity of a tracked row
+Upgraded tracking to version 3: move entity tracking into one joka_state document
+entity set is not valid: 5 entities without an _id
+```
+
+0.13 matched entities to rows by position, so a 0.13-era project has no reason to have written an
+`_id` on anything. 0.14 requires one on every entity. **The whole upgrade is: add an `_id` to each
+entity and sync.** Adoption then finds each existing row by its unique key and claims it — no
+duplicates, no deletions, no data touched.
+
+Nothing needs wiping. Dropping `joka_migrations` or the tracking tables would be strictly worse: it
+throws away the applied-migration history and the snapshots, to fix a problem that is in the YAML.
+
+**The residue this used to leave, and no longer does.** A 0.13 database tracks rows with no `ref_id`,
+which the v3 upgrade carries into `Unkeyed` rather than losing. Once the entities gain an `_id` and
+adopt those same rows, the state held each row twice — once keyed, once not. The unkeyed copy named a
+row somebody already owned, nothing could act on it, `entity forget` was gone, and `joka status`
+reported it as a finding for ever.
+
+`ApplySetAction` now sweeps them: any unkeyed row whose (table, primary key) a keyed entity owns is
+dropped (`State.ForgetUnkeyedAt`). It is the same rule that stops a rename deleting the row it
+renamed — one database row is represented once. An unkeyed row *nothing* claims is still kept and
+reported, because joka genuinely cannot tell whether a file declares it.
+`TestAdoptingClearsThePreIDTrackingForTheSameRow` and
+`TestAnUnkeyedRowNobodyClaimsIsLeftAlone` guard both halves.
+
+Measured end to end on tic_main's schema seeded by 0.13: 6 tracked rows with 5 unkeyed, in → 6
+entities tracked, 0 unkeyed, no duplicate rows, second run a no-op.
+
 ## Entity identity (`_id`)
 
 joka identifies every seeded row by its `_id`. This is being moved to gradually; the steps done so
