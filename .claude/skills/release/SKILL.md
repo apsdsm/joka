@@ -71,12 +71,15 @@ Confirm the version with the user before proceeding. State your recommendation a
 
 1. Update the version constant:
    ```go
-   // main.go
-   const version = "0.X.Y"
+   // buildinfo.go
+   const release = "0.X.Y"
    ```
+   What joka reports is derived from it - a released build reports the tag, any
+   other build reports `release+dev.<commit>`. See **Identifying the build** in
+   CLAUDE.md.
 2. Stage and commit (use a HEREDOC for the message):
    ```bash
-   git add main.go <any-doc-files-touched>
+   git add buildinfo.go <any-doc-files-touched>
    git commit -m "$(cat <<'EOF'
    <one-line subject describing the headline change, ending with "bump to v0.X.Y">
 

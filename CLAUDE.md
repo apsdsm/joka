@@ -99,7 +99,7 @@ from it - see **Identifying the build**. When bumping the version:
 
 ## Key Technical Details
 
-- **Go 1.25+** with `github.com/lib/pq`
+- **Go 1.26+** with `github.com/lib/pq`
 - **External binaries**: `migrate consolidate` requires `pg_dump` on `PATH` (PostgreSQL only). No other command shells out. Tests that need it skip when absent (`exec.LookPath`).
 - **PostgreSQL only**: `db.IsPostgresDSN` requires the URL to start with `postgres://` or `postgresql://`; `db.Open` refuses anything else with `db.ErrUnsupportedDriver`. `connection.assembleDSN` refuses a `driver:` other than `postgres`/`postgresql`/empty the same way, so a stale `.jokarc.yaml` fails with an explanation instead of a timeout.
 - **Multi-statement SQL**: PostgreSQL handles multiple statements natively. `db.SplitSQLStatements` still splits migration files so each statement can be applied and reported individually.
