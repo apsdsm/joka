@@ -69,7 +69,8 @@ func openTunnel(ctx context.Context, conn *config.Connection, dsn string) (*prov
 	}
 
 	session, err := provider.Open(ctx, providers.TunnelSpec{
-		Target:     t.Target,
+		Target:     t.Target.ID,
+		TargetTags: t.Target.Tags,
 		RemoteHost: host,
 		RemotePort: port,
 		LocalPort:  t.LocalPort,

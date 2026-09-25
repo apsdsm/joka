@@ -549,7 +549,7 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--auto` | `-a` | `false` | Skip confirmation prompts |
 | `--output` | `-o` | `text` | Output format: `text` or `json` |
 | `--up-to` | | | Migration index to consolidate up to (required for `migrate consolidate`; must be the last applied migration) |
-| `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`) |
+| `--dry-run` | | `false` | Print the plan and exit without applying (`entity sync`, `apply`) |
 | `--statefile` | | | Path to the state file (default: `joka[.<profile>].state.json` beside the working directory) |
 | `--on-conflict` | | `fail` | What to do when the database changed since joka last wrote: `fail`, `file`, `db` or `ask` (`entity sync`). `db` and `ask` rewrite the seed files where the database wins |
 | `--decayed` | | `false` | Treat the seeded data in the database as stale: rewrite every declared column and report no conflicts (`entity sync`) |
@@ -557,6 +557,102 @@ Force-releases an advisory lock left behind by a crashed process. Shows who held
 | `--root` | | | Name of this joka root, overriding `root:` in `.jokarc.yaml` |
 | `--adopt-root` | | `false` | Move this database's root claim to this root |
 | `--wait` | | `0` | Retry the connection for this long before giving up (e.g. `30s`). For container entrypoints |
+
+## `joka apply`
+
+One command for both halves of what a root declares:
+
+```bash
+cd devops/joka/test
+joka apply
+```
+
+It takes one lock, prints one plan — pending migrations, then the seed changes that follow them —
+asks once, and applies both.
+
+```
+Migrations to apply:
+  250202000000  add_tier
+
+Entity files to update (modified):
+  clients.yaml
+    ~ clients (id=1)
+        tier:
+          - standard
+          + premium
+```
+
+**The seeds are planned against the schema the migrations will leave.** With migrations pending,
+joka applies them inside a transaction, plans the entities through it, and rolls back — so a
+migration and the seeds that depend on it are reported together before either is committed. Running
+the two commands separately cannot do this: `joka entity sync --dry-run` reads the live row and
+fails with `column "tier" does not exist`.
+
+`joka apply --dry-run` prints the plan, applies nothing, takes no lock, and exits 2 when there is
+work — a CI gate for both halves at once.
+
+Deleting a row no file declares needs `--allow-delete` when nobody is watching (`--auto`,
+`--output json`). Confirming an interactive plan is that authorisation: deletions lead the plan.
+
+`--on-conflict=ask` is refused under `apply`, because the prompt would land after the plan was
+approved. Resolve conflicts with `joka entity sync --on-conflict=ask` first, then apply.
+
+## A remote environment, end to end
+
+The database is in a private subnet, its password is in Secrets Manager, and the bastion is in an
+autoscaling group so its instance id changes. All of that goes in the config, and the command stays
+`joka apply`:
+
+```yaml
+root: myproject-test
+migrations: ../../../services/api/devops/migrations
+entities: entities
+
+connection:
+  host: myproject-rds.ap-northeast-1.rds.amazonaws.com
+  port: 5432
+  user: myproject
+  database: myproject
+  params: { sslmode: require }
+  secret:
+    secret_id: myproject/service/test/api
+    password_key: db_pass
+    region: ap-northeast-1
+    params: { profile: MYPROJECT_TEST }
+  tunnel:
+    target: { tag: Role=relay }
+    params: { profile: MYPROJECT_TEST, region: ap-northeast-1 }
+
+secrets:
+  seed:
+    secret_id: myproject/seed/test
+    region: ap-northeast-1
+    params: { profile: MYPROJECT_TEST }
+```
+
+What each part does:
+
+| | |
+|---|---|
+| `root:` | the database records it, and refuses a different root — so a test config cannot seed prod |
+| `params: { sslmode: require }` | goes into the assembled DSN; RDS forces TLS |
+| `secret.password_key` | the password is read from Secrets Manager and URL-encoded into the DSN |
+| `secret.params.profile` | which AWS profile to read it with, rather than whichever is active |
+| `tunnel.target` | an instance id, or `{ tag: Key=Value }` to find one |
+| `tunnel.params` | the profile and region the tunnel is opened in |
+| `secrets.seed` | named source for `{{ secret.seed.<key> }}` in the seed files |
+
+joka opens the forward, does the work, and closes it on the way out — including when the command
+fails. It needs `aws` and `session-manager-plugin` on `PATH`, and names whichever is missing.
+
+**Targeting by tag** picks a running instance carrying every tag given. Matches are sorted, so
+repeated runs pick the same one. No match names the tag and the region and profile it searched,
+which is usually where the mistake is.
+
+**Pinning the profile replaces checking the account.** A script that reads whatever profile is
+active has to verify the account before it does anything; naming the profile means joka never used
+the wrong one in the first place. `root:` catches the remaining case — right account, wrong
+database.
 
 ## Exit codes
 

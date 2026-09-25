@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
 	"github.com/apsdsm/joka/internal/providers"
@@ -38,17 +37,11 @@ type SecretsManager struct{}
 // Fetch returns the secret's values. A JSON object yields its fields; a plain
 // string yields one entry under the "" key.
 func (SecretsManager) Fetch(ctx context.Context, ref providers.SecretRef) (map[string]string, error) {
-	var opts []func(*awsconfig.LoadOptions) error
-	if region := ref.Params[ParamRegion]; region != "" {
-		opts = append(opts, awsconfig.WithRegion(region))
-	}
-	if profile := ref.Params[ParamProfile]; profile != "" {
-		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
-	}
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	// The same loader the tunnel uses, so region and profile mean the same
+	// thing wherever they are declared.
+	cfg, err := loadConfig(ctx, ref.Params)
 	if err != nil {
-		return nil, fmt.Errorf("loading aws config: %w", err)
+		return nil, err
 	}
 
 	out, err := secretsmanager.NewFromConfig(cfg).GetSecretValue(ctx,

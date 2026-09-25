@@ -216,10 +216,10 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		}
 
 		if jsonOut {
-			shared.PrintJSON(map[string]any{"status": "ok", "dry_run": true, "plan": planJSON(plan)})
+			shared.PrintJSON(map[string]any{"status": "ok", "dry_run": true, "plan": PlanJSON(plan)})
 			return pending
 		}
-		printPlan(plan)
+		PrintPlan(plan)
 		color.Yellow("\nDry run — no changes applied.")
 		return pending
 	}
@@ -241,7 +241,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// to use. Forgets drop tracking and delete no row.
 	if len(plan.Deletes) > 0 && !r.AllowDelete && (jsonOut || r.AutoConfirm) {
 		if !jsonOut {
-			printPlan(plan)
+			PrintPlan(plan)
 			return app.DeleteRefusedSummary(plan.Deletes)
 		}
 		return app.DeleteRefusedError(plan.Deletes)
@@ -253,7 +253,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 	// what makes entity sync a drift gate in CI.
 	if len(plan.Conflicts) > 0 && r.OnConflict == app.ConflictFail {
 		if !jsonOut {
-			printPlan(plan)
+			PrintPlan(plan)
 			return app.ConflictSummary(plan.Conflicts)
 		}
 		return app.ConflictError(plan.Conflicts)
@@ -272,7 +272,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 				"--on-conflict=ask needs someone to ask: use fail, file or db with --auto or --output json")
 		}
 
-		printPlan(plan)
+		PrintPlan(plan)
 
 		var ok bool
 		resolutions, ok = askConflicts(plan.Conflicts)
@@ -286,7 +286,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	if !jsonOut {
 		if r.OnConflict != app.ConflictAsk {
-			printPlan(plan)
+			PrintPlan(plan)
 		}
 
 		fmt.Println()
@@ -376,7 +376,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 
 	if jsonOut {
 		shared.PrintJSON(map[string]any{
-			"status": "ok", "on_conflict": string(r.OnConflict), "plan": planJSON(plan),
+			"status": "ok", "on_conflict": string(r.OnConflict), "plan": PlanJSON(plan),
 			"inserted": orEmpty(result.Inserted), "updated": orEmpty(result.Updated),
 			"adopted":   orEmpty(result.Adopted),
 			"deleted":   undeclaredJSON(result.Deleted),
@@ -477,7 +477,11 @@ func undeclaredJSON(rows []domain.TrackedRow) []map[string]any {
 	}
 	return out
 }
-func printPlan(plan *app.SyncPlan) {
+
+// PrintPlan renders a sync plan. Exported so `joka apply` prints the entity
+// half exactly as `entity sync` does, rather than growing a second renderer
+// that would drift from it.
+func PrintPlan(plan *app.SyncPlan) {
 	red := color.New(color.FgRed)
 	green := color.New(color.FgGreen)
 
@@ -607,7 +611,8 @@ func printConflicts(conflicts []app.RowConflict) {
 }
 
 // planJSON converts a SyncPlan into plain maps/slices for JSON output.
-func planJSON(plan *app.SyncPlan) map[string]any {
+// PlanJSON renders a sync plan as JSON, for the same reason as PrintPlan.
+func PlanJSON(plan *app.SyncPlan) map[string]any {
 	inserts := make([]map[string]any, 0, len(plan.Inserts))
 	for _, f := range plan.Inserts {
 		rows := make([]map[string]any, 0, len(f.Rows))
