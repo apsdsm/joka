@@ -133,6 +133,13 @@ func (r RunApplyCommand) Execute(ctx context.Context) error {
 // and the two-pass cost never arrives.
 func (r RunApplyCommand) planEntities(ctx context.Context, pending []migrationdomain.Migration) (*entityapp.SyncPlan, error) {
 	if len(pending) == 0 {
+		// No migrations to speculate against, but the seed plan is still a
+		// round trip or three per entity, which is its own wait on a remote
+		// database.
+		say := shared.Progress(r.OutputFormat == shared.OutputJSON)
+		say.Start("planning the seeds")
+		defer say.Stop()
+
 		if err := entityinfra.NewPostgresStateBackend(r.DB).EnsureStateTable(ctx); err != nil {
 			return nil, err
 		}
@@ -153,6 +160,15 @@ func (r RunApplyCommand) planEntities(ctx context.Context, pending []migrationdo
 		return nil, err
 	}
 
+	// Said out loud, because this is minutes of work on a remote database and
+	// silence is indistinguishable from a hang - which is how it was first
+	// reported. 29 migrations and 160 entities over a tunnel to another region
+	// is exactly the shape that looks wedged.
+	say := shared.Progress(r.OutputFormat == shared.OutputJSON)
+	say.Start(fmt.Sprintf("planning against the schema %s will leave",
+		shared.Count(len(pending), "pending migration", "pending migrations")))
+	defer say.Stop()
+
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("starting the speculative transaction: %w", err)
@@ -166,11 +182,15 @@ func (r RunApplyCommand) planEntities(ctx context.Context, pending []migrationdo
 	}
 
 	migrationTx := migrationinfra.NewPostgresTxDBAdapter(tx, r.DB)
-	for _, m := range pending {
-		if err := (migrationapp.ApplyAction{DB: migrationTx, Migration: m}).Execute(ctx); err != nil {
+	for i, m := range pending {
+		say.Update(fmt.Sprintf("planning against migration %s (%d of %d)", m.MigrationIndex, i+1, len(pending)))
+
+		if err := (migrationapp.ApplyAction{DB: migrationTx, Migration: m, SkipSnapshot: true}).Execute(ctx); err != nil {
 			return nil, fmt.Errorf("applying %s (speculatively): %w", m.MigrationIndex, err)
 		}
 	}
+
+	say.Update("planning the seeds against the migrated schema")
 
 	// Through the same handle, or the plan sees the pre-migration schema and
 	// the whole exercise is pointless.

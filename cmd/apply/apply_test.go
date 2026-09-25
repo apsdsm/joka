@@ -210,3 +210,52 @@ func TestApply(t *testing.T) {
 		}
 	})
 }
+
+func TestSpeculationWritesNoSnapshots(t *testing.T) {
+	// Capturing a schema snapshot reconstructs every table from pg_catalog,
+	// one query per table, after every migration. It is the most expensive
+	// thing a migration run does, and the speculative pass was paying it for
+	// snapshots it then rolled back — so `apply` cost it twice. Over a tunnel
+	// to another region that was minutes of silence, reported as a hang.
+	ctx := context.Background()
+	db := freshDB(t)
+	migrations, entities := root(t)
+
+	cmd := command(db, migrations, entities)
+	cmd.DryRun = true
+	if err := cmd.Execute(ctx); !errors.Is(err, shared.ErrChangesPending) {
+		t.Fatalf("expected work to be reported, got: %v", err)
+	}
+
+	// joka_snapshots may exist — the real pass creates it — but a dry run must
+	// not have put a row in it.
+	var rows int
+	err := db.QueryRow(`SELECT count(*) FROM joka_snapshots`).Scan(&rows)
+	if err != nil {
+		// No table at all is the same answer, more strongly.
+		return
+	}
+	if rows != 0 {
+		t.Errorf("expected the speculative pass to capture no snapshots, got %d", rows)
+	}
+}
+
+func TestTheRealPassStillCapturesSnapshots(t *testing.T) {
+	// Skipping them while speculating must not skip them for real: they are
+	// what `migrate verify` compares against.
+	ctx := context.Background()
+	db := freshDB(t)
+	migrations, entities := root(t)
+
+	if err := command(db, migrations, entities).Execute(ctx); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var rows int
+	if err := db.QueryRow(`SELECT count(*) FROM joka_snapshots`).Scan(&rows); err != nil {
+		t.Fatalf("reading joka_snapshots: %v", err)
+	}
+	if rows == 0 {
+		t.Error("expected the real pass to have captured a snapshot")
+	}
+}
