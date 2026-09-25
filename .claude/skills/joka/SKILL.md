@@ -55,6 +55,8 @@ reordered, or be renamed without losing its row.
 | | |
 |---|---|
 | `joka status` | Read-only inventory. Start here. |
+| `joka apply` | Migrations and seeds in one run: one lock, one plan, one confirmation. |
+| `joka apply --dry-run` | The combined plan, applying nothing. Exits 2 when there is work. |
 | `joka entity sync` | Apply the seed files. The only path by which data is seeded. |
 | `joka entity sync --dry-run` | The plan, without applying or taking the lock. |
 | `joka entity sync --allow-delete` | Lets a `--auto` / `--output json` run delete rows no file declares. |
@@ -293,10 +295,18 @@ connection:
   source: secret
   host: db.private.example.com
   port: 5432
-  secret: { secret_id: prod/db, region: ap-northeast-1 }
+  secret:
+    secret_id: prod/db
+    region: ap-northeast-1
+    params: { profile: MYPROJECT_TEST }
   tunnel:
-    target: i-0123456789abcdef0
+    target: { tag: Role=relay }     # or a literal i-0123456789abcdef0
+    params: { profile: MYPROJECT_TEST, region: ap-northeast-1 }
 ```
+
+`target: { tag: Key=Value }` finds a running instance carrying the tag, which is what you want when
+the bastion is in an autoscaling group and its id changes. `params.profile` pins which AWS profile
+is used, on both the secret and the tunnel, rather than whichever happens to be active.
 
 joka opens the port forward, connects through it and closes it on the way out. Needs `aws` and
 `session-manager-plugin` on PATH; it names whichever is missing. `remote_host` and `remote_port`

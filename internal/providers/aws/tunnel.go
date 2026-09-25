@@ -32,6 +32,9 @@ type SessionManager struct {
 	lookPath func(string) (string, error)
 	// ready polls until something is listening. Replaced in tests.
 	ready func(ctx context.Context, address string, within time.Duration) error
+	// lookup finds an instance by tag. Replaced in tests, which is what makes
+	// target resolution testable without an AWS account.
+	lookup instanceLookup
 }
 
 // Required binaries. The plugin is not a normal package on most systems, so
@@ -61,9 +64,18 @@ func (s SessionManager) Open(ctx context.Context, spec providers.TunnelSpec) (*p
 		}
 	}
 
-	if spec.Target == "" || spec.RemoteHost == "" || spec.RemotePort == 0 {
-		return nil, fmt.Errorf("an ssm tunnel needs target, remote_host and remote_port")
+	if spec.RemoteHost == "" || spec.RemotePort == 0 {
+		return nil, fmt.Errorf("an ssm tunnel needs remote_host and remote_port")
 	}
+
+	// Resolved before anything is started. A selector that matches nothing is
+	// a configuration error, and reporting it as one beats starting a session
+	// against an empty target and reading whatever the CLI makes of that.
+	target, err := findInstance(ctx, s.lookup, spec)
+	if err != nil {
+		return nil, err
+	}
+	spec.Target = target
 
 	localPort := spec.LocalPort
 	if localPort == 0 {
@@ -86,6 +98,15 @@ func (s SessionManager) Open(ctx context.Context, spec providers.TunnelSpec) (*p
 	// pipe nobody read, leaving joka to report only that nothing came up.
 	var stderr lastLines
 	cmd.Stderr = &stderr
+
+	// Capturing stderr is what made teardown able to hang. A non-*os.File
+	// writer makes exec create a pipe, and Wait blocks until every process
+	// holding the write end closes it — including session-manager-plugin,
+	// which outlives the CLI joka kills. contain kills the whole group so the
+	// plugin goes too; WaitDelay is the backstop that bounds the wait whatever
+	// escapes, because a tool that has finished its work must exit.
+	contain(cmd)
+	cmd.WaitDelay = teardownGrace
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -157,6 +178,12 @@ func (s SessionManager) Open(ctx context.Context, spec providers.TunnelSpec) (*p
 		spec.RemoteHost, spec.RemotePort, stderr.suffix(), readyRes)
 }
 
+// teardownGrace bounds Wait after the session is killed: how long to allow the
+// process to die and its pipes to be released before joka stops waiting and
+// closes them itself. Two seconds is far longer than a SIGKILL needs and short
+// enough that nobody watches it.
+const teardownGrace = 2 * time.Second
+
 // earlyExitGrace is how long to give a failing session to report its own exit
 // before joka gives up guessing. A session that fails does so quickly, and a
 // plain non-blocking check races it — the process has been started but has not
@@ -176,6 +203,9 @@ func (s SessionManager) withDefaults() SessionManager {
 	}
 	if s.ready == nil {
 		s.ready = waitForListener
+	}
+	if s.lookup == nil {
+		s.lookup = describeInstances
 	}
 
 	return s

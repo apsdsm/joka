@@ -539,6 +539,19 @@ script was the only reason most of them existed.
   thirty to say so, and the CLI's stderr is captured and carried into the error - it says
   "TargetNotConnected" or "not authorized", where joka can only say nothing came up. A session that
   ends with status zero is still a failure, and says that too.
+- **The target may be a tag rather than an id.** `target: { tag: Role=relay }` finds a running
+  instance carrying it. The relays are in autoscaling groups, so the id changes on every instance
+  refresh and a committed one goes stale - a config that has to be edited whenever the
+  infrastructure replaces a machine is a config that will be wrong when somebody needs it. Only
+  running instances count, matches are sorted so two runs pick the same one, and no match names the
+  tag and the region and profile it looked in, because that is usually the answer.
+- **Teardown kills the process group, and Wait is bounded.** `aws ssm start-session` is a launcher:
+  session-manager-plugin is the child that holds the port. Killing only the CLI left the plugin
+  running - holding the local port, so the next run could not bind it, and holding the inherited
+  stderr pipe, which made `cmd.Wait` block for ever. joka finished its work and sat there. `contain`
+  puts the command in its own process group and kills the group; `WaitDelay` bounds the wait
+  whatever escapes it. Both are load-bearing: without the group kill the hang goes but the orphan
+  stays, and `TestCloseDoesNotHangOnASurvivingGrandchild` checks the pid is gone.
 - **The local port is chosen, not configured.** A fixed port collides with whatever else is running
   and nothing outside the process needs to predict it. There is a small race between releasing the
   probe port and the session claiming it, accepted against colliding every time.
@@ -554,9 +567,11 @@ script was the only reason most of them existed.
   incomplete spec, the document parameters, a session that never opens, one that dies early, a
   double close — is exercised against a real local listener and a fake process.
 
-**The live path against AWS is unverified.** There is no AWS account or Session Manager plugin on
-this machine, so what has been proved is the lifecycle and the wiring, not that the CLI invocation
-is accepted. The first real run should be a `joka migrate status` against a test environment.
+**The live path has now run.** Against onc's test account on 2026-09-25: the secret was fetched, a
+relay was found by tag, the session opened, and PostgreSQL on the far side answered - it rejected
+the password, which is the database's business rather than the tunnel's. So the CLI invocation,
+the tag lookup and the forward are all confirmed; what has still never been exercised is a
+successful migrate or sync through one.
 
 ## Commands the convergence work removed
 
@@ -707,6 +722,59 @@ Still open before building:
 Build order: `plan` first (read-only, useful alone in CI), then root discovery and `joka.yaml`, then
 `apply`, then a `--wait` for the container case (`db.Open` pings and fails immediately, so there is
 no retry today).
+
+## `joka apply`
+
+One command that brings a database up to date with both halves of what a root declares: one lock,
+one plan, one confirmation.
+
+```
+Migrations to apply:
+  250202000000  add_tier
+
+Entity files to update (modified):
+  w.yaml
+    ~ widgets (id=1)
+        tier:
+          - standard
+          + premium
+```
+
+**The seeds are planned against the schema the migrations will leave.** That is the whole reason it
+is one command rather than two. `joka migrate up && joka entity sync` commits the schema change and
+*then* discovers the seeds are wrong; and `entity sync --dry-run` on the same pair fails outright —
+`column "tier" does not exist` — because it reads the live row and the column is not there yet.
+
+- **Speculate and roll back.** With migrations pending, joka applies them inside a transaction,
+  plans the entities through the same handle, and rolls back. PostgreSQL has transactional DDL, so
+  the cost is one forward pass and the rest is discarded. `TestApply/a_dry_run_applies_nothing…`
+  asserts the table the migration creates is not there afterwards.
+- **Skipped when nothing is pending**, which is most runs, so the two-pass cost only lands on runs
+  already doing schema work.
+- **The entity plan reads through the transaction handle** — `entityinfra.NewPostgresTxDBAdapter`
+  and `NewPostgresTxStateBackend` — or it sees the pre-migration schema and the exercise is
+  pointless. This was named in the design as the part most likely to be got subtly wrong;
+  `TestApply/it_plans_seeds_against_the_schema_the_migrations_will_leave` is the guard.
+- **`joka_state` is created outside the speculation.** It is joka's own bookkeeping rather than
+  anything the plan describes, and creating it inside a transaction about to roll back would leave
+  the real pass to create it again.
+- **The real pass is two ordinary transactions**, not the speculative one held open: migrations
+  commit, then the sync runs. Holding DDL locks on the whole schema while a human reads a prompt is
+  what the rollback exists to avoid.
+- **`joka init` is folded in.** Creating the migrations table is idempotent, and making the caller
+  run it first defeats the point of one command.
+- **One confirmation authorises the deletions in the plan.** Deletions lead the plan, so an
+  interactive `apply` has shown them before it asks. `--auto` and `--output json` still need
+  `--allow-delete`, because nobody read it.
+- **`--dry-run` takes no lock and exits 2 when there is work**, so it is a CI gate for both halves
+  at once.
+
+**`ask` is refused under `apply`**, as it already is under `--auto`: the prompt would land after the
+plan was approved, giving one command two interaction points. That was open question 1 of the
+design; this is the answer. Resolve conflicts with `entity sync --on-conflict=ask`, then apply.
+
+Still not done from the design: a `joka.yaml` distinct from `.jokarc.yaml` (question 3), and root
+discovery by searching upward (question 2). Neither blocks the command.
 
 ## The Go library (`github.com/apsdsm/joka/jokalib`)
 

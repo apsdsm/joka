@@ -97,3 +97,68 @@ func fullPathsOf(files []*domain.EntityFile) map[string]string {
 
 	return out
 }
+
+// LoadedSet is every seed file the roots contain, ready to plan against.
+//
+// It is DB-independent apart from the state it is compared to, which is what
+// lets `joka apply` load the same set against a speculative transaction that
+// `entity sync` loads against the live connection. One loader, so the two
+// cannot disagree about what the files say.
+type LoadedSet struct {
+	// Files is every declared file, in discovery order. Set-level rules — an
+	// _id claimed twice, an override naming nothing — are already checked.
+	Files []*domain.EntityFile
+	// Dirty names the files whose content hash moved since the last sync.
+	Dirty map[string]bool
+	// OverriddenBy is _id to the file whose overrides: block set columns on it.
+	OverriddenBy map[string]string
+}
+
+// LoadSet discovers, hashes, parses and validates the seed files under the
+// given roots, comparing content hashes against the state it is given.
+func LoadSet(dirs []string, state *domain.State) (*LoadedSet, error) {
+	found, err := infra.DiscoverEntityRoots(dirs)
+	if err != nil {
+		return nil, err
+	}
+
+	set := &LoadedSet{Dirty: map[string]bool{}}
+
+	for _, disc := range found {
+		hash, err := app.HashFileContent(disc.Full)
+		if err != nil {
+			return nil, err
+		}
+
+		// Every file is parsed, including ones the hash says are unchanged.
+		// _id uniqueness is a property of the whole set, so an unchanged file
+		// still has to be read to know what it claims. The hash decides
+		// whether a file is written, not whether it is read.
+		file, err := app.ParseEntityAction{Path: disc.Full}.Execute()
+		if err != nil {
+			return nil, err
+		}
+		file.Path = disc.Key
+		file.FullPath = disc.Full
+		file.ContentHash = hash
+		set.Files = append(set.Files, file)
+
+		stored, tracked := state.FileHash(disc.Key)
+		switch app.FileStatusFor(tracked, stored, hash) {
+		case domain.StatusNew, domain.StatusModified:
+			set.Dirty[disc.Key] = true
+		}
+	}
+
+	// Overrides merge before anything else looks at the set, so the plan, the
+	// apply, the hashes and the write-back all read one merged declaration.
+	overriddenBy, problems := app.ApplyOverrides(set.Files)
+	problems = append(problems, app.ValidateEntitySet(set.Files)...)
+
+	if err := app.EntitySetError(problems); err != nil {
+		return nil, err
+	}
+	set.OverriddenBy = overriddenBy
+
+	return set, nil
+}

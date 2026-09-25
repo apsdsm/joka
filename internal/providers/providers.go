@@ -42,8 +42,16 @@ type Secrets interface {
 // TunnelSpec describes a port forward to open.
 type TunnelSpec struct {
 	// Target is the thing being tunnelled through: an SSM instance id, a
-	// bastion, an IAP resource.
+	// bastion, an IAP resource. Empty when TargetTags selects one instead.
 	Target string
+	// TargetTags selects the target by tag when no id was given. Every tag must
+	// match, and the provider picks deterministically among the matches.
+	//
+	// Tags rather than something AWS-shaped because every cloud has them under
+	// one name or another - labels on GCP, tags on Azure - and the reason for
+	// selecting at all is the same everywhere: an instance in an autoscaling
+	// group has no stable id to write down.
+	TargetTags map[string]string
 	// RemoteHost and RemotePort are the database, as addressed from the
 	// target's side of the network.
 	RemoteHost string

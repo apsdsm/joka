@@ -59,7 +59,7 @@ func TestResolveWithTunnel(t *testing.T) {
 		conn := &config.Connection{
 			Source: "literal",
 			URL:    "postgresql://u:p@db.private:5432/app?sslmode=require",
-			Tunnel: &config.Tunnel{Provider: "faketun", Target: "i-1", RemoteHost: "db.private", RemotePort: 5432},
+			Tunnel: &config.Tunnel{Provider: "faketun", Target: config.TunnelTarget{ID: "i-1"}, RemoteHost: "db.private", RemotePort: 5432},
 		}
 
 		dsn, closer, err := ResolveWithTunnel(ctx, conn, nil)
@@ -89,7 +89,7 @@ func TestResolveWithTunnel(t *testing.T) {
 
 		conn := &config.Connection{
 			Source: "literal", Host: "db.private", Port: 6543, User: "u", Database: "app",
-			Tunnel: &config.Tunnel{Provider: "faketun2", Target: "i-2"},
+			Tunnel: &config.Tunnel{Provider: "faketun2", Target: config.TunnelTarget{ID: "i-2"}},
 		}
 
 		_, closer, err := ResolveWithTunnel(ctx, conn, nil)
@@ -109,7 +109,7 @@ func TestResolveWithTunnel(t *testing.T) {
 
 		conn := &config.Connection{
 			Source: "literal", URL: "postgresql://u:p@h:5432/app",
-			Tunnel: &config.Tunnel{Provider: "badtun", Target: "i-3", RemoteHost: "h", RemotePort: 5432},
+			Tunnel: &config.Tunnel{Provider: "badtun", Target: config.TunnelTarget{ID: "i-3"}, RemoteHost: "h", RemotePort: 5432},
 		}
 
 		_, closer, err := ResolveWithTunnel(ctx, conn, nil)
@@ -127,7 +127,7 @@ func TestResolveWithTunnel(t *testing.T) {
 	t.Run("an unknown tunnel provider names the ones there are", func(t *testing.T) {
 		conn := &config.Connection{
 			Source: "literal", URL: "postgresql://u:p@h:5432/app",
-			Tunnel: &config.Tunnel{Provider: "azure", Target: "x", RemoteHost: "h", RemotePort: 5432},
+			Tunnel: &config.Tunnel{Provider: "azure", Target: config.TunnelTarget{ID: "x"}, RemoteHost: "h", RemotePort: 5432},
 		}
 
 		if _, _, err := ResolveWithTunnel(ctx, conn, nil); err == nil {
@@ -144,7 +144,7 @@ func TestResolveWithTunnel(t *testing.T) {
 
 		conn := &config.Connection{
 			Source: "secret",
-			Tunnel: &config.Tunnel{Provider: "faketun3", Target: "i-4", RemoteHost: "h", RemotePort: 5432},
+			Tunnel: &config.Tunnel{Provider: "faketun3", Target: config.TunnelTarget{ID: "i-4"}, RemoteHost: "h", RemotePort: 5432},
 		}
 
 		if _, _, err := ResolveWithTunnel(ctx, conn, nil); err == nil {
@@ -170,7 +170,7 @@ func TestTunnelDefaultsFromTheDSN(t *testing.T) {
 
 		conn := &config.Connection{
 			Source: "env",
-			Tunnel: &config.Tunnel{Provider: "dsntun", Target: "i-9"},
+			Tunnel: &config.Tunnel{Provider: "dsntun", Target: config.TunnelTarget{ID: "i-9"}},
 		}
 
 		dsn, closer, err := ResolveWithTunnel(context.Background(), conn, nil)
@@ -195,7 +195,7 @@ func TestTunnelDefaultsFromTheDSN(t *testing.T) {
 
 		conn := &config.Connection{
 			Source: "env",
-			Tunnel: &config.Tunnel{Provider: "dsntun2", Target: "i-9", RemoteHost: "real.db", RemotePort: 5433},
+			Tunnel: &config.Tunnel{Provider: "dsntun2", Target: config.TunnelTarget{ID: "i-9"}, RemoteHost: "real.db", RemotePort: 5433},
 		}
 
 		_, closer, err := ResolveWithTunnel(context.Background(), conn, nil)
@@ -216,7 +216,7 @@ func TestTunnelDefaultsFromTheDSN(t *testing.T) {
 
 		conn := &config.Connection{
 			Source: "env",
-			Tunnel: &config.Tunnel{Provider: "dsntun3", Target: "i-9"},
+			Tunnel: &config.Tunnel{Provider: "dsntun3", Target: config.TunnelTarget{ID: "i-9"}},
 		}
 
 		_, _, err := ResolveWithTunnel(context.Background(), conn, nil)

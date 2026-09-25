@@ -106,23 +106,15 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
-		if jsonOut {
-			return fmt.Errorf("starting transaction: %w", err)
-		}
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
 	// Fail fast on lock contention rather than hanging indefinitely: a DDL
-	// migration that can't acquire its lock (e.g. an app still holding the
-	// table) errors out in seconds instead of wedging.
-	if true {
-		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '15s'"); err != nil {
-			tx.Rollback()
-			if jsonOut {
-				return fmt.Errorf("setting lock_timeout: %w", err)
-			}
-			return fmt.Errorf("setting lock_timeout: %w", err)
-		}
+	// migration that cannot acquire its lock, because an app is still holding
+	// the table, errors out in seconds instead of wedging.
+	if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '15s'"); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return fmt.Errorf("setting lock_timeout: %w", err)
 	}
 
 	txAdapter := infra.NewPostgresTxDBAdapter(tx, r.DB)
@@ -138,20 +130,13 @@ func (r RunMigrateUpCommand) Execute(ctx context.Context) error {
 		}.Execute(ctx)
 
 		if err != nil {
-			tx.Rollback()
-			if jsonOut {
-				return err
-			}
-			color.New(color.FgRed).Fprintf(r.out(), "Error applying migrations: %v\n", err)
-			return err
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("applying %s: %w", m.MigrationIndex, err)
 		}
 		applied = append(applied, m.MigrationIndex)
 	}
 
 	if err := tx.Commit(); err != nil {
-		if jsonOut {
-			return fmt.Errorf("committing transaction: %w", err)
-		}
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 

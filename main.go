@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apsdsm/joka/cmd/apply"
 	"github.com/apsdsm/joka/cmd/dbtools"
 	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/lock"
@@ -391,6 +392,60 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 		Short: "Entity graph management commands",
 	}
 
+	applyCmd := &cobra.Command{
+		Use:   "apply",
+		Short: "Bring the database up to date with the migrations and the seeds",
+		Long: `Bring the database up to date with both halves of what this root declares.
+
+One lock, one plan, one confirmation: pending migrations and the seed changes
+that follow them, applied in that order.
+
+The seeds are planned against the schema the migrations will leave, not the one
+in front of joka now. When migrations are pending, joka applies them inside a
+transaction, plans the entities through the same handle and rolls back — so a
+migration and the seeds that depend on it are reported together, before either
+is committed. With nothing pending, which is most runs, it plans directly and
+that pass never happens.
+
+  joka apply --dry-run    print the plan and apply nothing; exits 2 when there
+                          is work to do
+
+Deleting a row no file declares needs --allow-delete when nobody is watching
+(--auto, --output json). Confirming an interactive plan is that authorisation,
+because the plan names every row it would delete, first.`,
+		Annotations: needs("migrations,entities", mutates),
+		RunE: func(c *cobra.Command, _ []string) error {
+			dryRun, _ := c.Flags().GetBool("dry-run")
+			allowDelete, _ := c.Flags().GetBool("allow-delete")
+
+			onConflict, _ := c.Flags().GetString("on-conflict")
+			policy, err := entityapp.ParseConflictPolicy(onConflict)
+			if err != nil {
+				return err
+			}
+
+			return apply.RunApplyCommand{
+				DB:            dbConn,
+				Secrets:       secrets.New(cfg.Secrets),
+				MigrationsDir: migrationsDir,
+				EntitiesDirs:  entitiesDirs,
+				AutoConfirm:   autoConfirm,
+				OutputFormat:  outputFormat,
+				StateFile:     stateFile,
+				Profile:       profile,
+				JokaVersion:   version,
+				DryRun:        dryRun,
+				AllowDelete:   allowDelete,
+				OnConflict:    policy,
+			}.Execute(c.Context())
+		},
+	}
+	applyCmd.Flags().Bool("dry-run", false, "Print the plan without applying anything")
+	applyCmd.Flags().Bool("allow-delete", false,
+		"Permit a non-interactive run (--auto, --output json) to delete rows no file declares")
+	applyCmd.Flags().String("on-conflict", "fail",
+		"What to do when the database changed since joka last wrote: fail, file, db or ask")
+
 	entitySyncCmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync entity YAML files to the database",
@@ -526,7 +581,7 @@ Use --dry-run to print the plan without applying anything.`,
 		},
 	}
 
-	root.AddCommand(initCmd, statusCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
+	root.AddCommand(applyCmd, initCmd, statusCmd, migrateCmd, entityCmd, dropCmd, resetCmd, unlockCmd, versionCmd)
 
 	err := root.Execute()
 

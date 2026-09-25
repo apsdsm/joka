@@ -66,8 +66,9 @@ type Tunnel struct {
 	// Provider names the vendor. Empty means "aws", whose implementation is
 	// Session Manager port forwarding.
 	Provider string `yaml:"provider"`
-	// Target is what to tunnel through — an SSM instance id for aws.
-	Target string `yaml:"target"`
+	// Target is what to tunnel through: an SSM instance id for aws, or a
+	// selector that finds one. See TunnelTarget.
+	Target TunnelTarget `yaml:"target"`
 	// RemoteHost and RemotePort are the database as the target addresses it.
 	// They default to the connection's own host and port, because naming the
 	// database twice is how the two come to disagree.
