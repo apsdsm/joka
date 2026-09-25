@@ -751,6 +751,15 @@ is one command rather than two. `joka migrate up && joka entity sync` commits th
   asserts the table the migration creates is not there afterwards.
 - **Skipped when nothing is pending**, which is most runs, so the two-pass cost only lands on runs
   already doing schema work.
+- **The speculative pass captures no schema snapshots** (`ApplyAction.SkipSnapshot`). Capturing one
+  reconstructs every table from `pg_catalog` with a query per table, after every migration - for
+  onc's 29 migrations that is about 464 round trips, and `apply` was paying it twice for snapshots
+  the rollback then discarded. Over a tunnel to another region that is a couple of minutes. Nothing
+  in a plan reads a snapshot: they feed `migrate verify` and the drift line in `joka status`, both
+  of which read what the real pass wrote.
+- **It says what it is doing.** Planning is minutes of work on a remote database, and silence is
+  indistinguishable from a hang - which is exactly how it was first reported. Progress goes to
+  stderr, so `--output json` still emits one document and a redirected stdout still gets the plan.
 - **The entity plan reads through the transaction handle** — `entityinfra.NewPostgresTxDBAdapter`
   and `NewPostgresTxStateBackend` — or it sees the pre-migration schema and the exercise is
   pointless. This was named in the design as the part most likely to be got subtly wrong;
@@ -824,6 +833,35 @@ Already public and worth knowing before adding to this: `db` and `config` are no
 so `db.SplitSQLStatements`, `db.Open` and the config schema are importable today. So are the
 `cmd/*` command structs, which is what this package calls — it exists to fix their defaults, not to
 reach anything that was locked away.
+
+## Saying what it is doing
+
+`shared.Activity` reports the phase joka is in while it works. A remote run is minutes of round
+trips with nothing on the screen, and silence is indistinguishable from a hang — which is how
+`joka apply` against a database in another region was first reported. The work was fine; the absence
+of output was not.
+
+| | |
+|---|---|
+| a terminal | one line, animated in place, cleared before anything else prints |
+| a pipe, a file, a CI log | one plain line per phase, no carriage returns |
+| `--output json` | nothing at all |
+
+- **It goes to stderr.** A redirected stdout still receives only the command's own output, and
+  `--output json` still emits exactly one document — `shared.Progress(jsonOut)` discards it outright
+  rather than relying on the stream split.
+- **A log is not a terminal.** A spinner rewriting itself with carriage returns turns a CI log into
+  one unreadable line, so the animation is off for anything that is not a character device. That
+  test needs no dependency and is right for the cases that matter.
+- **The line is cleared on Stop**, or the plan that prints next starts over a half-drawn spinner. The
+  clear writes spaces, because a shorter message after a longer one would otherwise leave the tail
+  of the old one behind.
+- **Every order is harmless.** It is held across error paths, so Stop without Start, Stop twice and a
+  nil writer all do nothing.
+
+Where it is used: `apply`'s speculative pass (per migration, then the seed plan) and `entity sync`'s
+plan, which is a round trip or three per entity and the other place a couple of hundred entities on a
+remote database is a wait with nothing to look at.
 
 ## Exit codes
 

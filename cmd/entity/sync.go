@@ -149,6 +149,19 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		dirty[f.Path] = true
 	}
 
+	// The plan is a round trip or three per entity - one to find the row, one
+	// to read its columns, one more the first time a row is adopted - so at a
+	// couple of hundred entities on a remote database it is a wait with nothing
+	// on the screen.
+	say := shared.Progress(jsonOut)
+	declared := 0
+	for _, f := range all {
+		declared += app.CountEntities(f.Entities)
+	}
+	say.Start(fmt.Sprintf("planning %s across %s",
+		shared.Count(declared, "entity", "entities"),
+		shared.Count(len(all), "file", "files")))
+
 	// The plan comes before the early return. A run with no dirty files can
 	// still have something to say: deleting a file leaves every other file
 	// unchanged, and the entities it declared are now declared nowhere.
@@ -160,6 +173,8 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		OverriddenBy: overriddenBy,
 		Decayed:      r.Decayed,
 	}.Execute(ctx)
+	say.Stop()
+
 	if err != nil {
 		return err
 	}
