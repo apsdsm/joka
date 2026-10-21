@@ -8,7 +8,7 @@ import (
 
 // release is the version this source is. Bumping it and tagging is the release
 // procedure; see CLAUDE.md.
-const release = "0.16.1"
+const release = "0.16.2"
 
 // version is what joka reports, and what it stamps into joka_meta as
 // joka_version: `release` for a build made from a released version, and

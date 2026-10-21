@@ -60,9 +60,21 @@ func trimSecretRef(expr string) string {
 //
 // Non-string values pass through unchanged.
 func resolveColumns(ctx context.Context, columns map[string]any, refMap map[string]int64, now string, db DBAdapter, secrets SecretResolver) (map[string]any, error) {
+	return resolveColumnsWith(ctx, columns, refMap, now, db, secrets, nil)
+}
+
+// resolveColumnsWith is resolveColumns taking some values as already resolved.
+// A column named in pre is used as given, which is how the argon2id hashes
+// computed ahead of the apply reach the row they belong to.
+func resolveColumnsWith(ctx context.Context, columns map[string]any, refMap map[string]int64, now string, db DBAdapter, secrets SecretResolver, pre map[string]any) (map[string]any, error) {
 	resolved := make(map[string]any, len(columns))
 
 	for k, v := range columns {
+		if done, ok := pre[k]; ok {
+			resolved[k] = done
+			continue
+		}
+
 		str, ok := v.(string)
 		if !ok {
 			resolved[k] = v

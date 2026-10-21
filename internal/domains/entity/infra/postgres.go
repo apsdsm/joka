@@ -199,6 +199,15 @@ func (p *PostgresDBAdapter) GetRow(ctx context.Context, table string, columns []
 		return nil, fmt.Errorf("reading %s row %s=%d: %w", table, pkColumn, pkValue, err)
 	}
 
+	return rowValues(columns, dest, types), nil
+}
+
+// rowValues turns the scanned destinations of one row into the column→value
+// map GetRow and GetRows return. Byte slices become strings, and a char(n)
+// value loses its padding; see GetRow for why.
+func rowValues(columns []string, dest []any, types []*sql.ColumnType) map[string]any {
+	result := make(map[string]any, len(columns))
+
 	for i, c := range columns {
 		value := dest[i]
 		if b, ok := value.([]byte); ok {
@@ -212,7 +221,96 @@ func (p *PostgresDBAdapter) GetRow(ctx context.Context, table string, columns []
 		result[c] = value
 	}
 
+	return result
+}
+
+// GetRows reads the given columns from every row whose pkColumn is one of pks,
+// in one query. A primary key with no row is absent from the result.
+//
+// This is GetRow for a whole table's worth of tracked rows. Planning a sync
+// used to read each row on its own, so a no-change run over 2,850 entities was
+// 2,868 round trips, and over a connection with any latency the round trips
+// were the whole cost.
+func (p *PostgresDBAdapter) GetRows(ctx context.Context, table string, columns []string, pkColumn string, pks []int64) (map[int64]map[string]any, error) {
+	result := make(map[int64]map[string]any, len(pks))
+	if len(pks) == 0 {
+		return result, nil
+	}
+
+	// The key is selected first and separately, so a caller that also asks for
+	// the key column as a value is not confused about which one is which.
+	quoted := make([]string, 0, len(columns)+1)
+	quoted = append(quoted, fmt.Sprintf(`"%s"`, pkColumn))
+	for _, c := range columns {
+		quoted = append(quoted, fmt.Sprintf(`"%s"`, c))
+	}
+
+	query := fmt.Sprintf(`SELECT %s FROM "%s" WHERE "%s" = ANY($1)`,
+		strings.Join(quoted, ", "), table, pkColumn)
+
+	rows, err := p.db.QueryContext(ctx, query, pq.Array(pks))
+	if err != nil {
+		return nil, fmt.Errorf("reading %d %s rows: %w", len(pks), table, err)
+	}
+	defer rows.Close()
+
+	types, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("reading %s column types: %w", table, err)
+	}
+
+	for rows.Next() {
+		dest := make([]any, len(columns)+1)
+		scan := make([]any, len(dest))
+		for i := range dest {
+			scan[i] = &dest[i]
+		}
+
+		if err := rows.Scan(scan...); err != nil {
+			return nil, fmt.Errorf("reading %s rows: %w", table, err)
+		}
+
+		pk, ok := dest[0].(int64)
+		if !ok {
+			return nil, fmt.Errorf("reading %s rows: primary key %q is %T, not an integer", table, pkColumn, dest[0])
+		}
+
+		// types[0] is the key; the values start after it.
+		result[pk] = rowValues(columns, dest[1:], types[1:])
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading %s rows: %w", table, err)
+	}
+
 	return result, nil
+}
+
+// RowsExist reports which of the given primary keys are still present in the
+// table, in one query.
+func (p *PostgresDBAdapter) RowsExist(ctx context.Context, table, pkColumn string, pks []int64) (map[int64]bool, error) {
+	result := make(map[int64]bool, len(pks))
+	if len(pks) == 0 {
+		return result, nil
+	}
+
+	rows, err := p.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE "%s" = ANY($1)`, pkColumn, table, pkColumn),
+		pq.Array(pks))
+	if err != nil {
+		return nil, fmt.Errorf("checking for %d %s rows: %w", len(pks), table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var pk int64
+		if err := rows.Scan(&pk); err != nil {
+			return nil, fmt.Errorf("checking for %s rows: %w", table, err)
+		}
+		result[pk] = true
+	}
+
+	return result, rows.Err()
 }
 
 // LookupValue queries a single value from an existing table row. Returns

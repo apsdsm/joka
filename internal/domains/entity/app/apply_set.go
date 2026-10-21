@@ -103,6 +103,10 @@ type ApplySetAction struct {
 	// rewritten rather than the changed ones, so a {{ now }} moved whenever
 	// anything else in its file did.
 	Write map[string][]string
+
+	// hashed holds the argon2id values computed ahead of the loop, by _id and
+	// column. See prehash.
+	hashed map[string]map[string]any
 }
 
 // ApplyResult reports what the run did.
@@ -174,6 +178,8 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	a.hashed = a.prehash(ctx, ordered, state)
 
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	declared := make(map[string]bool)
@@ -360,7 +366,7 @@ func (a ApplySetAction) Execute(ctx context.Context) (*ApplyResult, error) {
 // insert resolves an entity's columns and inserts the row. It returns the
 // resolved columns so the caller can record them as the baseline.
 func (a ApplySetAction) insert(ctx context.Context, e domain.Entity, refMap map[string]int64, now string) (int64, map[string]any, error) {
-	columns, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
+	columns, err := resolveColumnsWith(ctx, e.Columns, refMap, now, a.DB, a.Secrets, a.hashed[e.RefID])
 	if err != nil {
 		return 0, nil, fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
 	}
@@ -385,7 +391,14 @@ func (a ApplySetAction) update(
 	kept map[string]string,
 	planned []string,
 ) (map[string]any, error) {
-	resolved, err := resolveColumns(ctx, e.Columns, refMap, now, a.DB, a.Secrets)
+	// Only the columns this run writes are resolved. Resolving the rest meant a
+	// hash or a lookup computed to be thrown away.
+	wanted := make(map[string]any)
+	for _, name := range writableNames(e, kept, planned) {
+		wanted[name] = e.Columns[name]
+	}
+
+	resolved, err := resolveColumnsWith(ctx, wanted, refMap, now, a.DB, a.Secrets, a.hashed[e.RefID])
 	if err != nil {
 		return nil, fmt.Errorf("resolving %s (_id %s): %w", e.Table, e.RefID, err)
 	}

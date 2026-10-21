@@ -195,6 +195,13 @@ func (a DiffEntityAction) Execute(ctx context.Context) (*EntityDiff, error) {
 	diff.KeyedByID = len(diff.UnkeyedDeclared) == 0 && len(diff.UnkeyedTracked) == 0 &&
 		len(declared) > 0 && len(tracked) > 0
 
+	// A file of a few hundred rows is a few hundred round trips to read one at a
+	// time. The reads are the same ones, asked a table at a time.
+	cache := newReadCache(a.DB)
+	a.DB = cache
+	cache.prefetch(ctx, a.State, []*domain.EntityFile{{Entities: a.Entities}})
+	cache.prefetchLiveness(ctx, tracked)
+
 	pairs := alignPositionally(declared, tracked)
 	// Positional alignment only means something when there is something on
 	// both sides; an untracked file has nothing to have broken against.

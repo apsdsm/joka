@@ -456,3 +456,78 @@ func mustRecord(t *testing.T, err error) {
 		t.Fatalf("RecordEntityRow: %v", err)
 	}
 }
+
+func TestPostgresBulkReads(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	db, err := testlib.GetTestPostgresDB()
+	if err != nil {
+		t.Fatalf("getting test db: %v", err)
+	}
+
+	ctx := context.Background()
+
+	testlib.DropTablePostgres(t, db, "bulk_things")
+	if _, err := db.ExecContext(ctx, `CREATE TABLE bulk_things (id BIGSERIAL PRIMARY KEY, name TEXT, country CHAR(8), doc JSONB)`); err != nil {
+		t.Fatalf("creating the table: %v", err)
+	}
+	t.Cleanup(func() { testlib.DropTablePostgres(t, db, "bulk_things") })
+
+	for _, row := range []string{"a", "b", "c"} {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO bulk_things (name, country, doc) VALUES ($1, 'JP', '{"k": 1}')`, row); err != nil {
+			t.Fatalf("seeding: %v", err)
+		}
+	}
+
+	adapter := infra.NewPostgresDBAdapter(db)
+
+	t.Run("GetRows returns each row as GetRow would, and omits a missing key", func(t *testing.T) {
+		got, err := adapter.GetRows(ctx, "bulk_things", []string{"name", "country", "doc"}, "id", []int64{1, 3, 99})
+		if err != nil {
+			t.Fatalf("GetRows: %v", err)
+		}
+
+		if len(got) != 2 {
+			t.Fatalf("expected rows 1 and 3, got %v", got)
+		}
+		if _, present := got[99]; present {
+			t.Error("expected the missing key absent")
+		}
+
+		for pk, row := range got {
+			single, err := adapter.GetRow(ctx, "bulk_things", []string{"name", "country", "doc"}, "id", pk)
+			if err != nil {
+				t.Fatalf("GetRow: %v", err)
+			}
+			for column, want := range single {
+				if row[column] != want {
+					t.Errorf("row %d %s: bulk %#v, single %#v", pk, column, row[column], want)
+				}
+			}
+		}
+
+		if got[1]["country"] != "JP" {
+			t.Errorf("expected the char(n) padding dropped, got %q", got[1]["country"])
+		}
+	})
+
+	t.Run("GetRows with no keys reads nothing", func(t *testing.T) {
+		got, err := adapter.GetRows(ctx, "no_such_table", []string{"name"}, "id", nil)
+		if err != nil || len(got) != 0 {
+			t.Errorf("expected an empty result without a query, got %v, %v", got, err)
+		}
+	})
+
+	t.Run("RowsExist reports the keys that are there", func(t *testing.T) {
+		got, err := adapter.RowsExist(ctx, "bulk_things", "id", []int64{2, 3, 50})
+		if err != nil {
+			t.Fatalf("RowsExist: %v", err)
+		}
+		if !got[2] || !got[3] || got[50] {
+			t.Errorf("expected 2 and 3 present and 50 absent, got %v", got)
+		}
+	})
+}

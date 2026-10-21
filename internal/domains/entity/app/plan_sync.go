@@ -278,6 +278,11 @@ type PlanSyncAction struct {
 
 // Execute builds the plan.
 func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
+	// Every read the plan makes goes through one cache, filled a table at a time.
+	// See readCache.
+	cache := newReadCache(a.DB)
+	a.DB = cache
+
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	plan := &SyncPlan{}
 
@@ -297,6 +302,8 @@ func (a PlanSyncAction) Execute(ctx context.Context) (*SyncPlan, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	cache.prefetch(ctx, a.State, ordered)
 
 	refMap := make(map[string]int64, len(a.State.Entities))
 	for refID, tracked := range a.State.Entities {
@@ -484,6 +491,18 @@ func (a PlanSyncAction) planUndeclared(ctx context.Context, plan *SyncPlan, decl
 	claimed := make(map[string]string, len(plan.Adopted))
 	for refID, adoption := range plan.Adopted {
 		claimed[rowKey(adoption.Row.Table, adoption.Row.PKValue)] = refID
+	}
+
+	// The tracked rows nothing declares each need an existence check; one query
+	// per table answers them all.
+	var undeclared []domain.TrackedRow
+	for _, row := range a.State.AllRows() {
+		if !declared[row.RefID] && !removing[row.RefID] {
+			undeclared = append(undeclared, row)
+		}
+	}
+	if cache, ok := a.DB.(*readCache); ok {
+		cache.prefetchLiveness(ctx, undeclared)
 	}
 
 	for _, row := range a.State.AllRows() {

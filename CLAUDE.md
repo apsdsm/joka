@@ -1607,9 +1607,52 @@ way forward short of dropping the data.
 | steady state | 310 | 0.05s | 3.1s | 9.3s |
 | `joka status` | 11 | 0.01s | 0.1s | 0.3s |
 
-Adoption is 3.2 round trips per entity: one `FindByUniqueKey`, and two `GetRow` — `liveBaseline` and
-the plan's own read of the same columns of the same row. Collapsing those two is the next saving
-available and has not been done.
+These figures predate **Reading in bulk** below. Adoption was 3.2 round trips per entity: one
+`FindByUniqueKey`, and two `GetRow` (`liveBaseline` and the plan's own read of the same row). The two
+reads are now one; `FindByUniqueKey` is still per entity.
+
+### Reading in bulk
+
+The plan reads each tracked row once, and a read cost one round trip, so planning was one round trip
+per entity whether or not anything had changed. Measured on 2,850 entities over three tables, counted
+from `log_statement='all'`:
+
+| | before | after |
+|---|---|---|
+| `entity sync`, nothing changed | 2,868 queries | 21 |
+| `entity diff` of one 285-entity file | 578 | 14 |
+
+At 10 ms a round trip the first row is 29 s of waiting for a sync that does nothing.
+
+- **`app.readCache` wraps the adapter for the plan and the diff.** `prefetch` reads each table's
+  tracked rows in one `WHERE pk = ANY(...)` query over the union of the columns its entities declare,
+  and the per-entity `GetRow` that follows is answered from memory. `prefetchLiveness` does the same
+  for the existence check on rows no file declares. A repeated `{{ lookup|… }}` that found its row is
+  remembered; one that did not is asked again.
+- **It is never given to the apply.** The apply writes, and a cache of what rows held before would
+  answer for rows it has just changed. The cache is built inside `PlanSyncAction.Execute` and
+  `DiffEntityAction.Execute`, so nothing outside them can hand it on.
+- **The bulk methods are optional.** `BulkReader` (`GetRows`, `RowsExist`) is asserted on the adapter,
+  and an adapter without it is read a row at a time as before. `DBAdapter` did not change.
+- **A failed bulk read is not reported where it happens.** The per-row read that follows asks for the
+  same rows and names the one it concerns. Inside the transaction `joka apply` plans in, a failed
+  statement aborts every later one, so the cache keeps the first error and returns it in place of
+  `current transaction is aborted`.
+- **The apply resolves only the columns it writes.** `update` resolved every declared column and then
+  discarded the ones the plan had not named, which for an `argon2id` column was a hash computed to be
+  thrown away. `writableNames` is the one definition of which columns those are.
+- **`argon2id` values are computed ahead, in parallel** (`prehash`). A hash is about 25 ms of wall time
+  and was resolved inline between database writes. A first sync containing 950 hashes went from 25 s to
+  14.6 s. Four workers is the cap: each holds 64 MiB, and on 16 cores two workers took 18.4 s, four
+  16.1 s and eight 19.9 s, so memory bandwidth rather than core count is the limit. Each row still
+  gets its own salt.
+
+Not done:
+
+- **Inserts and updates are one statement each.** A first sync of 2,850 entities is about 5,700 round
+  trips. Batching inserts changes the order serial keys are assigned in, so it is a decision about what
+  a seeded id means rather than an optimisation.
+- **`FindByUniqueKey` is per entity**, which only a first adoption pays.
 
 Adoption is what makes the `state_identity` marker load-bearing rather than informational.
 Before it, a sync against the wrong database announced itself with a duplicate key; now it would
