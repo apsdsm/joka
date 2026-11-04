@@ -42,6 +42,7 @@ type Inputs struct {
 	MigrationsDir string
 	EntitiesDirs  []string
 	StateFile     string
+	StateRemote   *entityinfra.RemoteState
 }
 
 // Report is the whole inventory. Text and JSON render the same value.
@@ -128,7 +129,7 @@ func Build(ctx context.Context, in Inputs) (*Report, error) {
 	}
 	report.Meta = markers
 
-	report.StateFile = buildStateFile(in, markers)
+	report.StateFile = buildStateFile(ctx, in, markers)
 
 	state, err := entityinfra.NewPostgresStateBackend(in.DB).Load(ctx)
 	if err != nil {
@@ -150,10 +151,14 @@ func Build(ctx context.Context, in Inputs) (*Report, error) {
 	return report, nil
 }
 
-func buildStateFile(in Inputs, markers meta.State) StateFile {
-	path := entityinfra.StateFilePath(in.StateFile, in.Profile)
+func buildStateFile(ctx context.Context, in Inputs, markers meta.State) StateFile {
+	store, err := entityinfra.NewStateStore(in.StateFile, in.Profile, in.StateRemote)
+	if err != nil {
+		return StateFile{Verdict: "unreadable", Note: err.Error(), NeedsAttention: true}
+	}
+	path := store.Describe()
 
-	doc, present, err := entityinfra.ReadStateFile(path)
+	doc, present, err := store.Read(ctx)
 	if err != nil {
 		return StateFile{Path: path, Verdict: "unreadable", Note: err.Error(), NeedsAttention: true}
 	}

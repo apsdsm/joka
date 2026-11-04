@@ -209,3 +209,40 @@ profiles:
 		}
 	})
 }
+
+func TestLoadState(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(orig)
+
+	yaml := `state:
+  backend: s3
+  bucket: team-joka
+  region: ap-northeast-1
+profiles:
+  prod:
+    state:
+      backend: s3
+      bucket: team-joka
+      key: prod/state.json
+      profile: prod-admin
+`
+	os.WriteFile(".jokarc.yaml", []byte(yaml), 0644)
+
+	base, err := Load("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if base.State == nil || base.State.Bucket != "team-joka" || base.State.Region != "ap-northeast-1" || base.State.Key != "" {
+		t.Errorf("base state = %+v", base.State)
+	}
+
+	prod, err := Load("prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prod.State == nil || prod.State.Key != "prod/state.json" || prod.State.Profile != "prod-admin" {
+		t.Errorf("profile state = %+v, want the profile's block to replace the base's", prod.State)
+	}
+}

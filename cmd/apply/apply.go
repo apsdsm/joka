@@ -36,8 +36,11 @@ type RunApplyCommand struct {
 	AutoConfirm   bool
 	OutputFormat  string
 	StateFile     string
-	Profile       string
-	JokaVersion   string
+	// StateRemote, when set, keeps the state document in a remote store instead of
+	// a local file.
+	StateRemote *entityinfra.RemoteState
+	Profile     string
+	JokaVersion string
 	// DryRun prints the plan and applies nothing. Read-only overall: the
 	// speculative pass rolls back, and no lock is taken.
 	DryRun bool
@@ -240,6 +243,7 @@ func (r RunApplyCommand) run(ctx context.Context, allowDelete bool) error {
 		AutoConfirm:  true,
 		OutputFormat: "text",
 		StateFile:    r.StateFile,
+		StateRemote:  r.StateRemote,
 		Profile:      r.Profile,
 		JokaVersion:  r.JokaVersion,
 		SkipLock:     true,

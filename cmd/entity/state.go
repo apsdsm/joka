@@ -22,7 +22,12 @@ import (
 // A failure to write is reported and does not fail the command. The sync
 // already happened, unwinding it is not possible, and an unwritten file is a
 // finding `joka status` reports rather than a reason to claim the run failed.
-func materializeState(ctx context.Context, db *sql.DB, stateFile, profile, jokaVersion string) error {
+func materializeState(ctx context.Context, db *sql.DB, stateFile string, remote *infra.RemoteState, profile, jokaVersion string) error {
+	store, err := infra.NewStateStore(stateFile, profile, remote)
+	if err != nil {
+		return err
+	}
+
 	state, err := infra.NewPostgresStateBackend(db).Load(ctx)
 	if err != nil {
 		return fmt.Errorf("reading the state back to write the state file: %w", err)
@@ -40,7 +45,7 @@ func materializeState(ctx context.Context, db *sql.DB, stateFile, profile, jokaV
 	}
 	doc.Stamp(jokaVersion)
 
-	return infra.WriteStateFile(infra.StateFilePath(stateFile, profile), doc)
+	return store.Write(ctx, doc)
 }
 
 // reloadFiles re-reads the declared files joka just rewrote, so the hash and

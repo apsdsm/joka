@@ -1163,6 +1163,16 @@ through `cmd/entity.loadSet` and validates it — `reimport` and `update` read o
 now, which is how they could write a set sync would refuse and, since the state document keys on
 `_id`, quietly take over an `_id` tracked somewhere else.
 
+### Remote state (`state:` block)
+
+`internal/providers` has a third interface, `StateStore` (`Read`/`Write` of bytes against a `StateRef`), beside `Secrets` and `Tunnel`. `internal/providers/aws/state.go` registers it as backend `s3`. `entity/infra.StateStore` is what callers hold: `FileStore` for the local file, `RemoteStore` for a provider, chosen by `infra.NewStateStore(explicit, profile, remote)`. The wrong-database check, `joka status` and the post-commit write all go through it.
+
+- **S3 replaces the local file** rather than adding to it. Two copies could disagree, and the audit would then have to say which one it read.
+- **`state:` plus `--statefile` is refused**, not resolved by precedence: both answer where the state lives.
+- **A read that fails for any reason other than a missing object fails the command.** `refuseWrongDatabase` runs before a write, and treating "could not look" as "no file" would turn off the check exactly when S3 is unreachable.
+- **The write is a plain `PutObject`** with no `If-Match`. The advisory lock serialises mutating commands per database; conditional writes would add a retry path for a race the lock already prevents.
+- **`endpoint:`** switches to path-style addressing, for MinIO and for the fake S3 server in `state_test.go`.
+
 ### Where it is enforced
 
 - **`entity sync`** validates the whole set before writing anything, and refuses.

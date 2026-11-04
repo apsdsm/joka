@@ -82,6 +82,26 @@ type Tunnel struct {
 	Params map[string]string `yaml:"params"`
 }
 
+// State places the state document in a remote store instead of a local file.
+//
+// It exists for the case a local file cannot serve: a CI checkout has no state
+// file, so the wrong-database check has nothing to compare against. A shared
+// object is the same copy for a laptop and a pipeline.
+type State struct {
+	// Backend names the store. "s3" is the only one joka ships.
+	Backend string `yaml:"backend"`
+	Bucket  string `yaml:"bucket"`
+	// Key is the object name. Empty means joka[.<profile>].state.json, so one
+	// bucket can hold several profiles without repeating the name.
+	Key string `yaml:"key"`
+	// Region and Profile are the AWS region and shared-config profile; empty
+	// means the default credential chain's own choice.
+	Region  string `yaml:"region"`
+	Profile string `yaml:"profile"`
+	// Endpoint points at an S3-compatible store such as MinIO.
+	Endpoint string `yaml:"endpoint"`
+}
+
 // Profile overlays the base config. Set (non-nil) fields override the base;
 // unset fields inherit it.
 type Profile struct {
@@ -89,6 +109,7 @@ type Profile struct {
 	Migrations *string           `yaml:"migrations"`
 	Entities   *PathList         `yaml:"entities"`
 	StateFile  *string           `yaml:"statefile"`
+	State      *State            `yaml:"state"`
 	Connection *Connection       `yaml:"connection"`
 	Secrets    map[string]Secret `yaml:"secrets"`
 }
@@ -103,6 +124,7 @@ type Config struct {
 	// Entities is one seed directory or several, synced as one desired state.
 	Entities   PathList           `yaml:"entities"`
 	StateFile  string             `yaml:"statefile"`
+	State      *State             `yaml:"state"`
 	Connection *Connection        `yaml:"connection"`
 	Secrets    map[string]Secret  `yaml:"secrets"`
 	Profiles   map[string]Profile `yaml:"profiles"`
@@ -158,6 +180,9 @@ func applyProfile(base *Config, p Profile) *Config {
 	}
 	if p.StateFile != nil {
 		merged.StateFile = *p.StateFile
+	}
+	if p.State != nil {
+		merged.State = p.State
 	}
 	if p.Connection != nil {
 		merged.Connection = p.Connection

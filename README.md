@@ -795,3 +795,33 @@ Tools that avoid this run migrations against a throwaway *shadow* database first
 works this way). joka does not, deliberately: it would mean provisioning and maintaining a
 second database to make primary keys look neater, which is a large amount of machinery for
 a cosmetic property.
+
+#### Keeping the state document in S3
+
+A CI checkout has no `joka.state.json`, so the wrong-database check finds nothing to compare against
+and does not run. Declaring a `state:` block moves the document to an S3 object that a laptop and a
+pipeline both read:
+
+```yaml
+state:
+  backend: s3
+  bucket: team-joka-state
+  key: joka/prod.state.json   # optional; default joka[.<profile>].state.json
+  region: ap-northeast-1      # optional; default credential chain's region
+  profile: prod-admin         # optional AWS shared-config profile
+  endpoint: http://localhost:9000   # optional; S3-compatible stores such as MinIO
+```
+
+A profile may carry its own `state:` block, which replaces the base one.
+
+- **S3 replaces the local file.** No `joka.state.json` is written when `state:` is set.
+- **`state:` and `--statefile` / `statefile:` are mutually exclusive.** Naming both is an error.
+- **Credentials** come from the AWS default chain, the same as `aws_secrets_manager` connections.
+  The role needs `s3:GetObject` and `s3:PutObject` on the key.
+- **A missing object is the first-run case** and reads as "no state file". Any other read failure
+  (access denied, network) fails the command before it writes, because "could not look" must not be
+  treated as "nothing there".
+- **A failed write after a commit is reported and does not fail the command**, as with the local
+  file: the database copy is already consistent.
+- **Concurrent writers.** The write is a plain `PutObject`. The database advisory lock already
+  serialises mutating commands against one database, so two runs do not write one object at once.
