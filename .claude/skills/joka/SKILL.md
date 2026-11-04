@@ -1,4 +1,4 @@
----
+ When `.jokarc.yaml` has a `state:` block the document is an S3 object: delete it or change its `key`.---
 name: joka
 description: Use joka to manage a PostgreSQL database's migrations and seed data — check whether a database is up to date, apply migrations, sync seed entities, resolve drift between the seed files and the database, adopt an existing database, and rename or remove seeded rows. Use when a project has a .jokarc.yaml or a devops/migrations or devops/entities directory, when the user mentions joka, seed data, seeding, entity sync, migrations in such a project, or when a command has printed a joka error (conflict, drift, wrong database, tracking upgrade blocked).
 ---

@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"database/sql"
+	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 	"os"
 
 	"github.com/apsdsm/joka/cmd/shared"
@@ -26,6 +27,7 @@ type RunStatusCommand struct {
 	MigrationsDir string
 	EntitiesDirs  []string
 	StateFile     string
+	StateRemote   *entityinfra.RemoteState
 	OutputFormat  string
 }
 
@@ -36,6 +38,7 @@ func (r RunStatusCommand) Execute(ctx context.Context) error {
 		MigrationsDir: r.MigrationsDir,
 		EntitiesDirs:  r.EntitiesDirs,
 		StateFile:     r.StateFile,
+		StateRemote:   r.StateRemote,
 	})
 	if err != nil {
 		if r.OutputFormat == shared.OutputJSON {

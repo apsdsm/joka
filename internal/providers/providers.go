@@ -39,6 +39,33 @@ type Secrets interface {
 	Fetch(ctx context.Context, ref SecretRef) (map[string]string, error)
 }
 
+// StateRef locates one state document within a state store.
+type StateRef struct {
+	// Container is the bucket, share or directory the document lives in.
+	Container string
+	// Key is the document's name within the container.
+	Key string
+	// Params is provider-specific, as in SecretRef.
+	Params map[string]string
+}
+
+// String renders the reference for messages, in the form a person would write.
+func (r StateRef) String() string {
+	return r.Container + "/" + r.Key
+}
+
+// StateStore keeps the state document somewhere other than the working
+// directory.
+//
+// It deals in bytes because the document's shape belongs to joka, not to a
+// vendor. Read reports a missing document as found=false rather than an error:
+// a database nobody has synced from yet has none, and that is the ordinary
+// first run.
+type StateStore interface {
+	Read(ctx context.Context, ref StateRef) (body []byte, found bool, err error)
+	Write(ctx context.Context, ref StateRef, body []byte) error
+}
+
 // TunnelSpec describes a port forward to open.
 type TunnelSpec struct {
 	// Target is the thing being tunnelled through: an SSM instance id, a
@@ -81,6 +108,7 @@ var (
 	mu      sync.RWMutex
 	secrets = map[string]Secrets{}
 	tunnels = map[string]Tunnel{}
+	states  = map[string]StateStore{}
 )
 
 // RegisterSecrets makes a secrets provider available under a name. Called from
@@ -96,6 +124,32 @@ func RegisterTunnel(name string, t Tunnel) {
 	mu.Lock()
 	defer mu.Unlock()
 	tunnels[name] = t
+}
+
+// RegisterState makes a state store available under a backend name, the value
+// of `backend:` in the `state:` block.
+func RegisterState(name string, s StateStore) {
+	mu.Lock()
+	defer mu.Unlock()
+	states[name] = s
+}
+
+// LookupState returns the state store registered under a backend name.
+func LookupState(name string) (StateStore, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	s, ok := states[name]
+	if !ok {
+		have := make([]string, 0, len(states))
+		for k := range states {
+			have = append(have, k)
+		}
+		sort.Strings(have)
+		return nil, unknown("state", name, have)
+	}
+
+	return s, nil
 }
 
 // LookupSecrets returns the named secrets provider.

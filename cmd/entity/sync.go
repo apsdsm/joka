@@ -27,6 +27,9 @@ type RunEntitySyncCommand struct {
 	// StateFile overrides where the state file is written; empty means the
 	// default beside the working directory.
 	StateFile string
+	// StateRemote, when set, keeps the state document in a remote store instead of
+	// a local file.
+	StateRemote *infra.RemoteState
 	// Profile and JokaVersion name the state file and stamp it.
 	Profile     string
 	JokaVersion string
@@ -385,7 +388,7 @@ func (r RunEntitySyncCommand) Execute(ctx context.Context) error {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
-	if err := materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion); err != nil {
+	if err := materializeState(ctx, r.DB, r.StateFile, r.StateRemote, r.Profile, r.JokaVersion); err != nil {
 		color.Yellow("The sync committed, but the state file was not written: %v", err)
 	}
 
@@ -738,7 +741,7 @@ func refreshHashes(
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return materializeState(ctx, r.DB, r.StateFile, r.Profile, r.JokaVersion)
+	return materializeState(ctx, r.DB, r.StateFile, r.StateRemote, r.Profile, r.JokaVersion)
 }
 
 // printAdoptions names the rows joka found in the database and is about to

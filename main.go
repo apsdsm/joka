@@ -71,6 +71,7 @@ func main() {
 		migrationsDir string
 		entitiesDirs  []string
 		stateFile     string
+		stateRemote   *entityinfra.RemoteState
 		rootName      string
 		adoptRoot     bool
 		autoConfirm   bool
@@ -111,6 +112,7 @@ func main() {
 			if !c.Flags().Changed("statefile") && cfg.StateFile != "" {
 				stateFile = cfg.StateFile
 			}
+			stateRemote = remoteStateFrom(cfg.State)
 			if !c.Flags().Changed("root") && cfg.Root != "" {
 				rootName = cfg.Root
 			}
@@ -191,7 +193,7 @@ func main() {
 			}
 
 			if c.Annotations[annotationMutates] == "true" && c.Annotations[annotationWipes] != "true" {
-				if err := refuseWrongDatabase(c, stateFile, profile, dbConn); err != nil {
+				if err := refuseWrongDatabase(c, stateFile, stateRemote, profile, dbConn); err != nil {
 					return err
 				}
 
@@ -285,6 +287,7 @@ could be built — 'joka migrate verify' is the drift gate for schema and
 				MigrationsDir: migrationsDir,
 				EntitiesDirs:  entitiesDirs,
 				StateFile:     stateFile,
+				StateRemote:   stateRemote,
 				OutputFormat:  outputFormat,
 			}.Execute(c.Context())
 		},
@@ -432,6 +435,7 @@ because the plan names every row it would delete, first.`,
 				AutoConfirm:   autoConfirm,
 				OutputFormat:  outputFormat,
 				StateFile:     stateFile,
+				StateRemote:   stateRemote,
 				Profile:       profile,
 				JokaVersion:   version,
 				DryRun:        dryRun,
@@ -503,6 +507,7 @@ Use --dry-run to print the plan without applying anything.`,
 				OnConflict:   policy,
 				Profile:      profile,
 				StateFile:    stateFile,
+				StateRemote:  stateRemote,
 				JokaVersion:  version,
 			}.Execute(c.Context())
 		},
@@ -562,6 +567,7 @@ Use --dry-run to print the plan without applying anything.`,
 				OutputFormat:  outputFormat,
 				Profile:       profile,
 				StateFile:     stateFile,
+				StateRemote:   stateRemote,
 				JokaVersion:   version,
 			}.Execute(c.Context())
 		},
@@ -632,10 +638,14 @@ func loadEnv(envFile string) error {
 // way round.
 //
 // Only a disagreeing identity refuses. See StateAudit.BlocksWrite.
-func refuseWrongDatabase(c *cobra.Command, stateFile, profile string, db *sql.DB) error {
-	path := entityinfra.StateFilePath(stateFile, profile)
+func refuseWrongDatabase(c *cobra.Command, stateFile string, remote *entityinfra.RemoteState, profile string, db *sql.DB) error {
+	store, err := entityinfra.NewStateStore(stateFile, profile, remote)
+	if err != nil {
+		return err
+	}
+	path := store.Describe()
 
-	doc, hasFile, err := entityinfra.ReadStateFile(path)
+	doc, hasFile, err := store.Read(c.Context())
 	if err != nil {
 		return err
 	}
@@ -652,10 +662,10 @@ func refuseWrongDatabase(c *cobra.Command, stateFile, profile string, db *sql.DB
 	}
 
 	return fmt.Errorf("%w: %s names %s, and this database is %s. Nothing was written.\n"+
-		"  If the connection is right, the state file is stale: remove it, or point --statefile "+
-		"somewhere else.",
+		"  If the connection is right, the state document is stale: %s",
 		domain.ErrWrongDatabase, path,
-		identityOrNone(doc.Identity), identityOrNone(metaState.StateIdentity))
+		identityOrNone(doc.Identity), identityOrNone(metaState.StateIdentity),
+		staleStateHint(remote))
 }
 
 // identityOrNone renders a state identity for the refusal above. An empty one
@@ -730,4 +740,39 @@ func refuseWrongRoot(c *cobra.Command, db *sql.DB, declared string, adopt bool) 
 	}
 
 	return meta.CheckRoot(state.StateRoot, declared, adopt)
+}
+
+// remoteStateFrom turns a `state:` block into what the entity layer opens. nil
+// in, nil out: no block means a local file.
+func remoteStateFrom(s *config.State) *entityinfra.RemoteState {
+	if s == nil {
+		return nil
+	}
+
+	params := map[string]string{}
+	for k, v := range map[string]string{
+		"region":   s.Region,
+		"profile":  s.Profile,
+		"endpoint": s.Endpoint,
+	} {
+		if v != "" {
+			params[k] = v
+		}
+	}
+
+	return &entityinfra.RemoteState{
+		Backend:   s.Backend,
+		Container: s.Bucket,
+		Key:       s.Key,
+		Params:    params,
+	}
+}
+
+// staleStateHint says how to clear a stale state document, which differs by
+// where it lives.
+func staleStateHint(remote *entityinfra.RemoteState) string {
+	if remote != nil {
+		return "delete the object, or point the state: block at a different key."
+	}
+	return "remove it, or point --statefile somewhere else."
 }

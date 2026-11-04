@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	entityinfra "github.com/apsdsm/joka/internal/domains/entity/infra"
 
 	"github.com/apsdsm/joka/cmd/entity"
 	"github.com/apsdsm/joka/cmd/migration"
@@ -26,6 +27,9 @@ type RunResetCommand struct {
 	AutoConfirm   bool
 	OutputFormat  string
 	StateFile     string
+	// StateRemote, when set, keeps the state document in a remote store instead of
+	// a local file.
+	StateRemote *entityinfra.RemoteState
 	// Profile and JokaVersion are passed through to entity sync, which writes
 	// the state file.
 	Profile     string
@@ -122,6 +126,7 @@ func (r RunResetCommand) Execute(ctx context.Context) error {
 		OutputFormat: "text",
 		SkipLock:     true,
 		StateFile:    r.StateFile,
+		StateRemote:  r.StateRemote,
 		Profile:      r.Profile,
 		JokaVersion:  r.JokaVersion,
 		// A reset has just dropped and re-seeded everything, so every declared
